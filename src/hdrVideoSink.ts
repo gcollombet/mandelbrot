@@ -35,11 +35,14 @@ async function verifyEncoder(settings: VideoEncodeSettings, preference: EncoderP
 }
 
 export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise<VideoEncoderSink> {
+  if (settings.encoding?.profile === 'quantizer' && settings.hdrQuantizer === undefined) settings = { ...settings, hdrQuantizer: 10 }
   const first = settings.hardwareAcceleration ?? 'prefer-hardware'
   const preferences: EncoderPreference[] = first === 'prefer-hardware' ? [first,'no-preference'] : [first]
-  // Constant quality first; an encoder without quantizer mode falls back to the
-  // variable-bitrate estimate rather than failing the export.
-  const modes = settings.hdrQuantizer === undefined ? [undefined] : [settings.hdrQuantizer, undefined]
+  // Explicit profiles never downgrade the requested rate-control mode.
+  // Keep the legacy fallback only for callers without an encoding selection.
+  const constant = settings.encoding?.profile !== 'quantizer' && (settings.encoding !== undefined || settings.hdrQuantizer === undefined)
+  if (constant && !settings.encoding) settings = { ...settings, encoding: { profile: 'high', bitrateMbps: 100 } }
+  const modes = constant || settings.hdrQuantizer === undefined ? [undefined] : settings.encoding ? [settings.hdrQuantizer] : [settings.hdrQuantizer, undefined]
   let config: VideoEncoderConfig | undefined, quantizer: number | undefined
   const errors: string[] = []
   search: for (const mode of modes) for (const preference of preferences) {

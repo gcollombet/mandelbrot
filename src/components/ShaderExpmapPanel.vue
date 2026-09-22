@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import VideoEncodingControls from './VideoEncodingControls.vue'
+import { normalizeVideoEncoding } from '../videoEncoding'
 import { normalizeStereoVideo } from '../stereoVideo'
 import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -66,13 +68,15 @@ const unregisterPreview=props.videoOnly?()=>{}:registerShaderPreviewReader(relea
 onUnmounted(unregisterPreview)
 const previewScale=ref(saved.previewScale),angle=ref(saved.angle),window=ref<ExpmapVideoWindow|null>(null)
 const stereo=ref(normalizeStereoVideo(saved.stereo))
+const encoding=ref(normalizeVideoEncoding(saved.encoding))
 const dynamicRange=ref<'sdr'|'hdr'>(saved.dynamicRange??'sdr'),hdrExposure=ref(saved.hdrExposure??0),hdrQuantizer=ref(saved.hdrQuantizer??10)
 watch(dynamicRange,value=>{if(value==='hdr'&&codec.value==='avc')codec.value='hevc'},{immediate:true})
 const useRingFirst=computed(()=>ringFirst.value&&!stereo.value.enabled&&dynamicRange.value!=='hdr')
 const outputWidth=ref(saved.width),outputHeight=ref(saved.height),preview=ref<HTMLCanvasElement|null>(null)
-watch([dynamicRange,hdrExposure,hdrQuantizer,()=>stereo.value.enabled,()=>stereo.value.strength,()=>stereo.value.layout,interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
+watch(dynamicRange, mode => { if (mode === 'sdr' && encoding.value.profile === 'quantizer') encoding.value = { ...encoding.value, profile: 'high' } }, { immediate: true })
+watch([encoding,dynamicRange,hdrExposure,hdrQuantizer,()=>stereo.value.enabled,()=>stereo.value.strength,()=>stereo.value.layout,interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
   interpolation:interpolation.value,sampleDistribution:sampleDistribution.value,radialDensity:radialDensity.value,budgetMiB:budgetMiB.value,samples:samples.value,previewScale:previewScale.value,angle:angle.value,
-  dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,ringFirst:ringFirst.value,keepRings:keepRings.value,ringBitrateMbps:ringBitrateMbps.value}))
+  encoding:{...encoding.value},dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,ringFirst:ringFirst.value,keepRings:keepRings.value,ringBitrateMbps:ringBitrateMbps.value}))
 let abort:AbortController|undefined,hardAbort:AbortController|undefined
 const interrupting=ref(false)
 const plan=computed(()=>{try{return props.plan?planExpmap({...props.plan,radialDensity:radialDensity.value,centerOctaves:17}):null}catch{return null}})
@@ -221,7 +225,7 @@ async function render(video=false,browserStorage=false) {
         const writable=await file.createWritable()
         let result
         try {
-          const request={dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},window:{...window.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,maxSamples:samples.value,effects,
+          const request={encoding:{...encoding.value},dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},window:{...window.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,maxSamples:samples.value,effects,
             destination:{kind:'stream' as const,writable:writable as unknown as WritableStream<Uint8Array>},signal:abort!.signal,gpuRenderer:renderer,onWarning:(message:string)=>{hdrWarning.value=message},onProgress:(a:number,b:number)=>{done.value=a;total.value=b}}
           result=useRingFirst.value?await exportShaderRingVideo({manifest:videoSource.value},{...request,hardSignal:hardAbort!.signal,scratch:scratchDirectory,keepIntermediates:keepRings.value,intermediateBitrate:ringBitrateMbps.value*1e6,
             onPhase:(phase,a,b)=>{status.value=phase;done.value=a;total.value=b}}):await exportExpmapVideo({manifest:videoSource.value},request)
@@ -305,11 +309,12 @@ function updateWindow() {
             <DenseSelect v-model="dynamicRange" :label="t('shaderExpmapPanel.video.dynamicRange')" :options="dynamicRangeOptions"/>
             <template v-if="dynamicRange==='hdr'">
               <DenseField v-model="hdrExposure" :label="t('shaderExpmapPanel.video.hdrExposure')" :min="-16" :max="16" :step="0.5" :default="0"/>
-              <DenseField v-model="hdrQuantizer" :label="t('shaderExpmapPanel.video.quantizer')" :min="0" :max="codec==='hevc'?51:63" :step="1" :default="10"/>
+              <DenseField v-if="encoding.profile==='quantizer'" v-model="hdrQuantizer" :label="t('shaderExpmapPanel.video.quantizer')" :min="0" :max="codec==='hevc'?51:63" :step="1" :default="10"/>
               <p class="hint">{{ t('shaderExpmapPanel.video.hdrHint') }}</p>
               <p v-if="!memory" role="alert">{{ t('shaderExpmapPanel.video.budgetInsufficient') }}</p>
             </template>
             <DenseSelect v-model="codec" :label="t('shaderExpmapPanel.video.codec')" :options="(dynamicRange==='hdr'?MP4_CODECS.filter(c=>c.value!=='avc'):MP4_CODECS).map(c => ({ value: c.value, label: t(c.labelKey) }))"/>
+            <VideoEncodingControls v-model="encoding" :codec="codec" :width="outputWidth" :height="outputHeight" :fps="fps" :duration="window.durationSeconds + window.holdSeconds" :hdr="dynamicRange==='hdr'"/>
             <label><input type="checkbox" v-model="stereo.enabled">{{ t('shaderExpmapPanel.video.stereo') }}</label>
             <template v-if="stereo.enabled">
               <DenseSelect v-model="stereo.layout" :label="t('shaderExpmapPanel.video.layout')" :options="layoutOptions"/>

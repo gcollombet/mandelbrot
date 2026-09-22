@@ -106,7 +106,7 @@
     "hdr": "HDR · 10 bits PQ",
     "hdrExposure": "HDR exposure (EV)",
     "quantizer": "Quantizer",
-    "hdrHint": "Rec.2020 / PQ · full frame-by-frame render, mono or stereo. 10-bit encoder checked at start, no SDR fallback. The preview stays SDR. Constant quality: 0 = maximum, 10 to 20 = clean; variable-bitrate fallback if the encoder refuses.",
+    "hdrHint": "Rec.2020 / PQ · full frame-by-frame rendering, mono or stereo. The 10-bit encoder is checked at startup, with no SDR fallback. Preview remains SDR. Compression follows the selected profile.",
     "budgetInsufficient": "Insufficient budget: reduce the resolution or increase the player budget.",
     "codec": "Codec",
     "stereo": "Stereoscopic video",

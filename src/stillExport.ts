@@ -153,6 +153,8 @@ export type StillExportDeps = {
     }): Promise<void>
     endVideoExportSession(): void
     videoFrameReady(): boolean
+    /** True while the field would converge on a reference about to be replaced (see Engine). */
+    exportReferencePending?(): boolean
     beginExportFrameAa(): void
     waitForSubmittedWork(): Promise<void>
     captureExportFrame(request: {
@@ -190,6 +192,8 @@ export type StillExportRequest = {
   signal?: AbortSignal
   onWarning?: (message: string) => void
   onProgress?: (progress: { tile: number; tiles: number; pumps: number }) => void
+  /** Called once per tile after convergence, before the frame capture (dev bench raw readback). */
+  onTileConverged?: (tile: StillTile) => Promise<void> | void
 }
 
 export type StillExportResult = {
@@ -198,9 +202,13 @@ export type StillExportResult = {
   canvas: HTMLCanvasElement
   plan: StillPlan
   totalPumps: number
+  /** Sum over tiles of first pump → converged (excludes session setup, capture and readback). */
+  convergeMs: number
 }
 
 const DEFAULT_MAX_PUMPS_PER_TILE = 20000
+/** Pause between pumps while the reference is pending: those pumps only let update() promote it. */
+const REFERENCE_WAIT_MS = 5
 const CAPTURE_DRIVE_ATTEMPTS = 8
 
 /**
@@ -229,6 +237,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
     : scaleDecimalStringByPow2(request.location.scale, 1 / plan.grid)
   const maxPumps = request.maxPumpsPerTile ?? DEFAULT_MAX_PUMPS_PER_TILE
   let totalPumps = 0
+  let convergeMs = 0
   const { cx, cy, scale, angle } = request.location
 
   const throwIfAborted = () => {
@@ -269,11 +278,26 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       deps.controller.setExportTime(0)
       deps.engine.beginExportFrameAa()
       let pumps = 0
+      let referenceWaits = 0
       let ready = false
+      const convergeStart = performance.now()
       while (!ready && pumps < maxPumps) {
         throwIfAborted()
         await deps.controller.drawOnce()
         await deps.engine.waitForSubmittedWork()
+        // Right after a move the worker may publish a reference that escapes
+        // early, then restart on a recentred one. The field converges on the
+        // first one to a stable, wrong image, so no convergence counts until
+        // the settled reference is promoted (drawOnce's update() does it).
+        // These pumps are near free and the orbit build can take seconds: they
+        // do not spend the convergence budget.
+        if (deps.engine.exportReferencePending?.()) {
+          if ((++referenceWaits & 15) === 0) {
+            request.onProgress?.({ tile: tile.index, tiles: plan.tiles.length, pumps: totalPumps + pumps })
+          }
+          await new Promise(resolve => setTimeout(resolve, REFERENCE_WAIT_MS))
+          continue
+        }
         pumps++
         ready = deps.engine.videoFrameReady()
         if (!ready && (pumps & 15) === 0) {
@@ -281,9 +305,11 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
         }
       }
       totalPumps += pumps
+      convergeMs += performance.now() - convergeStart
       if (!ready) {
         throw new Error(t('video.still.tileNotConverged', { tile: tile.index + 1, tiles: plan.tiles.length, pumps: maxPumps }))
       }
+      await request.onTileConverged?.(tile)
       const pending = request.hdr ? deps.engine.captureHdrFrame!(surfaceW, surfaceH, 1, {format:'png',exposure:request.hdrExposure ?? 0,originX:tile.originX,originY:tile.originY,signal:request.signal,onWarning:onHdrWarning}) : deps.engine.captureExportFrame({
         outputWidth: surfaceW,
         outputHeight: surfaceH,
@@ -320,5 +346,5 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
     deps.navigator.scale(scale)
     deps.navigator.angle(angle)
   }
-  return { canvas, hdrPixels, plan, totalPumps }
+  return { canvas, hdrPixels, plan, totalPumps, convergeMs }
 }

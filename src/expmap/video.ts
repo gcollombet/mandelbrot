@@ -1,3 +1,4 @@
+import type { VideoEncoding } from '../videoEncoding'
 import { t } from '../i18n'
 import type { HdrGpuOptions } from '../hdrGpuOutput'
 import { hdrEncoderConfig, hdrInputFrame, type VideoDynamicRange } from '../hdrVideo'
@@ -75,6 +76,7 @@ export function expmapVideoFrameView(request:{window:ExpmapVideoWindow;width:num
 /** Deterministic ordered loop. Interactive request dropping never enters here. */
 export async function exportExpmapVideo(source: { manifest: ExpmapVideoSource }, request: {
   window: ExpmapVideoWindow; width: number; height: number; fps: number; codec: Mp4Codec; maxSamples?: number; sampleDistribution?: ExpmapSampleDistribution; effects?: ExpmapEffects
+  encoding?: VideoEncoding
   stereo?: StereoVideoSettings
   dynamicRange?: VideoDynamicRange; hdrExposure?: number; hdrQuantizer?: number
   destination: VideoDestination; signal?: AbortSignal
@@ -108,7 +110,7 @@ export async function exportExpmapVideo(source: { manifest: ExpmapVideoSource },
   request.signal?.throwIfAborted()
   const limit = request.frameLimit === undefined ? total : Math.max(0, Math.min(total, Math.floor(request.frameLimit)))
   request.onProgress?.(0, limit)
-  const sink = await createVideoSink({ width: request.width, height: request.height, fps: request.fps, codec: request.codec, dynamicRange:request.dynamicRange, hdrQuantizer:hdr?request.hdrQuantizer:undefined, destination: request.destination, hardwareAcceleration: 'prefer-hardware' })
+  const sink = await createVideoSink({ width: request.width, height: request.height, fps: request.fps, codec: request.codec, encoding: request.encoding, dynamicRange:request.dynamicRange, hdrQuantizer:hdr?request.hdrQuantizer:undefined, destination: request.destination, hardwareAcceleration: 'prefer-hardware' })
   let emitted = 0
   try {
     for (let i = 0; i < limit; i++) {

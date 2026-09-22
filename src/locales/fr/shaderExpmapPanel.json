@@ -106,7 +106,7 @@
     "hdr": "HDR · 10 bits PQ",
     "hdrExposure": "Exposition HDR (EV)",
     "quantizer": "Quantificateur",
-    "hdrHint": "Rec.2020 / PQ · rendu complet image par image, en mono ou stéréo. Encodeur 10 bits vérifié au démarrage, sans repli SDR. L’aperçu reste SDR. Qualité constante : 0 = maximale, 10 à 20 = propre ; repli en débit variable si l’encodeur refuse.",
+    "hdrHint": "Rec.2020 / PQ · rendu complet image par image, en mono ou stéréo. Encodeur 10 bits vérifié au démarrage, sans repli SDR. L’aperçu reste SDR. La compression suit le profil sélectionné.",
     "budgetInsufficient": "Budget insuffisant : réduire la résolution ou augmenter le budget du lecteur.",
     "codec": "Codec",
     "stereo": "Vidéo stéréoscopique",

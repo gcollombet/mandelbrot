@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import VideoEncodingControls from './VideoEncodingControls.vue'
+import { normalizeVideoEncoding } from '../videoEncoding'
 import ExpmapZoomControl from './ExpmapZoomControl.vue';
 import VideoMotionControls from './VideoMotionControls.vue';
 import VideoRotationControls from './VideoRotationControls.vue';
@@ -121,6 +123,7 @@ const magnificationThreshold = ref(saved.magnificationThreshold);
 const dynamicRange = ref<'sdr' | 'hdr'>(saved.dynamicRange ?? 'sdr');
 const hdrExposure = ref(saved.hdrExposure ?? 0);
 const hdrQuantizer = ref(saved.hdrQuantizer ?? DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer!);
+const encoding = ref(normalizeVideoEncoding(saved.encoding));
 const codec = ref<Mp4Codec | 'auto'>(saved.codec);
 watch(dynamicRange, mode => { if (mode === 'hdr' && codec.value === 'avc') codec.value = 'auto'; }, { immediate: true });
 const motion = ref({ ...saved.motion });
@@ -149,7 +152,7 @@ watch(renderMode, (mode) => {
 
 watch(
   [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold,
-    codec, dynamicRange, hdrExposure, hdrQuantizer, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
+    encoding, codec, dynamicRange, hdrExposure, hdrQuantizer, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -160,6 +163,7 @@ watch(
     magnificationThreshold: magnificationThreshold.value,
     codec: codec.value,
     dynamicRange: dynamicRange.value,
+    encoding: { ...encoding.value },
     hdrExposure: hdrExposure.value,
     hdrQuantizer: hdrQuantizer.value,
     motion: motion.value,
@@ -177,6 +181,7 @@ const output = computed<VideoOutputSpec>(() => {
   return {
     width, height,
     dynamicRange: dynamicRange.value,
+    encoding: { ...encoding.value },
     hdrExposure: hdrExposure.value,
     hdrQuantizer: hdrQuantizer.value,
     fps: Number(fps.value),
@@ -193,17 +198,18 @@ const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
 const effectiveCodec = computed(() => codec.value === 'auto' ? (dynamicRange.value === 'hdr' ? (['hevc','av1','vp9'] as const).find(c => codecSupport.value[c]) ?? null : preferredExpmapCodec(codecSupport.value)) : codecSupport.value[codec.value] ? codec.value : null);
 const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · ' + t('videoExportPanel.encoder.hardwarePreferred') : ' · ' + t('videoExportPanel.encoder.browserFallback'))
 const codecLabel = computed(() => probing.value ? t('videoExportPanel.codec.probing') : effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? t('videoExportPanel.codec.avcCompat') : effectiveCodec.value?.toUpperCase() ?? t('videoExportPanel.codec.unavailable'));
-watch([resolution, fps, dynamicRange], async (_values, _old, onCleanup) => {
+watch([resolution, fps, dynamicRange, encoding, hdrQuantizer], async (_values, _old, onCleanup) => {
   const spec = output.value;
   let current = true;
   probing.value = true; codecSupport.value = {}; encoderPreferences.value = {};
   onCleanup(() => { current = false; });
-  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }, spec.dynamicRange);
+  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }, spec.dynamicRange, encoding.value, hdrQuantizer.value);
   if (!current) return;
   codecSupport.value = support;
   probing.value = false;
 }, { immediate: true });
 
+watch(dynamicRange, mode => { if (mode === 'sdr' && encoding.value.profile === 'quantizer') encoding.value = { ...encoding.value, profile: 'high' } }, { immediate: true })
 const hdrQuantizerMax = computed(() => effectiveCodec.value === 'hevc' ? 51 : 63);
 watch(hdrQuantizerMax, max => { if (hdrQuantizer.value > max) hdrQuantizer.value = max; });
 const codecOptions = computed(() => [{value:'auto',label:dynamicRange.value === 'hdr' ? t('videoExportPanel.codec.autoHdr') : t('videoExportPanel.codec.autoSdr')}, ...MP4_CODECS.filter(c => dynamicRange.value !== 'hdr' || c.value !== 'avc').map(({value,labelKey}) => { const label = t(labelKey); return {value,label:codecSupport.value[value] === false ? t('videoExportPanel.codec.unavailableHere', { label }) : label}; })]);
@@ -377,7 +383,8 @@ function start() {
     <DenseSection :title="t('videoExportPanel.output.title')">
       <DenseSelect :label="t('videoExportPanel.output.dynamicRange')" v-model="dynamicRange" :options="[{value:'sdr',label:t('videoExportPanel.output.sdr')},{value:'hdr',label:t('videoExportPanel.output.hdr')}]"/>
       <label v-if="dynamicRange === 'hdr'" class="ve-row"><span class="ve-label">{{ t('videoExportPanel.output.hdrExposure') }}</span><input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" :aria-label="t('videoExportPanel.output.hdrExposureAria')"/></label>
-      <DenseField v-if="dynamicRange === 'hdr'" :label="t('videoExportPanel.output.quantizer')" v-model="hdrQuantizer" :min="0" :max="hdrQuantizerMax" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer"/>
+      <VideoEncodingControls v-model="encoding" :codec="effectiveCodec ?? (codec === 'auto' ? 'hevc' : codec)" :width="output.width" :height="output.height" :fps="output.fps" :duration="totalDuration" :hdr="dynamicRange === 'hdr'"/>
+      <DenseField v-if="dynamicRange === 'hdr' && encoding.profile === 'quantizer'" :label="t('videoExportPanel.output.quantizer')" v-model="hdrQuantizer" :min="0" :max="hdrQuantizerMax" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer"/>
       <p v-if="dynamicRange === 'hdr'" class="ve-note">{{ t('videoExportPanel.output.hdrNote') }}</p>
       <div class="ve-form"><label class="ve-row">
           <span class="ve-label">{{ t('videoExportPanel.output.resolution') }}</span>

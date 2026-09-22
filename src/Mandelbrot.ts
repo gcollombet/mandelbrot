@@ -91,6 +91,9 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'aaAdaptive',
     'targetFps',
     'zoomMagnificationThreshold',
+    // The kernel (exact / BLA) is a session choice: presets never carry it,
+    // and a legacy preset that still does is ignored on load.
+    'approximationMode',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
 export const EXPLORATION_STATE_FIELDS = [
@@ -193,5 +196,6 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         aaAdaptive: current.aaAdaptive,
         targetFps: current.targetFps,
         zoomMagnificationThreshold: current.zoomMagnificationThreshold,
+        approximationMode: current.approximationMode,
     };
 }

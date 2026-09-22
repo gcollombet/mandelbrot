@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import VideoEncodingControls from './VideoEncodingControls.vue'
+import { normalizeVideoEncoding } from '../videoEncoding'
 import { radialMode } from '../expmap/radial'
 
 import { expmapLoopDomain } from '../expmap/loop'
@@ -30,6 +32,7 @@ const { t } = useI18n()
 const manifest = ref<ExpmapManifest | null>(null), windowSpec = ref<ExpmapVideoWindow | null>(null)
 const framesDone = ref(0), framesTotal = ref(0)
 const savedOutput = loadExpmapOutput()
+const encoding = ref(normalizeVideoEncoding(savedOutput.encoding))
 const sampleDistribution=ref(savedOutput.sampleDistribution)
 const maxSamples = ref(savedOutput.maxSamples), width = ref(savedOutput.width), height = ref(savedOutput.height), fps = ref(savedOutput.fps), codec = ref(savedOutput.codec)
 const error = ref(''), progress = ref(''), ownRunning = ref(false), probing = ref(true)
@@ -57,13 +60,13 @@ const validationError = computed(() => {
 let abort: AbortController | undefined, generation = 0
 onMounted(() => refreshExpmapLibrary().catch(e => { error.value = String(e) }))
 onUnmounted(() => { generation++; abort?.abort() })
-watch([width, height, fps], async (_value, _previous, onCleanup) => {
+watch([width, height, fps, encoding], async (_value, _previous, onCleanup) => {
   let current = true; onCleanup(() => { current = false })
   probing.value = true; support.value = {}; encoderPreferences.value = {}
-  try { const result = await probeMp4Codecs(width.value, height.value, fps.value, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }); if (current) support.value = result }
+  try { const result = await probeMp4Codecs(width.value, height.value, fps.value, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }, 'sdr', encoding.value); if (current) support.value = result }
   finally { if (current) probing.value = false }
 }, { immediate: true })
-watch([width, height, fps, codec, maxSamples, sampleDistribution], () => saveExpmapOutput({ width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value }))
+watch([encoding, width, height, fps, codec, maxSamples, sampleDistribution], () => saveExpmapOutput({ encoding: { ...encoding.value }, width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value }))
 watch(selectedExpmapDocumentId, async id => {
   const current = ++generation; manifest.value = null; windowSpec.value = null
   const entry = expmapLibraryEntries.value.find(e => e.id === id)
@@ -153,7 +156,7 @@ async function start() {
     release = parkExpmapSession(props.engine, props.controller)
     gpu = await ExpmapGpuRenderer.create(opened.store, opened.manifest, props.engine?.device)
     persist()
-    const result = await exportExpmapVideo(opened, { effects: { ...documentEffects(manifest.value.documentId) }, window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: selectedCodec, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value,
+    const result = await exportExpmapVideo(opened, { effects: { ...documentEffects(manifest.value.documentId) }, window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: selectedCodec, encoding: { ...encoding.value }, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value,
       destination: { kind: 'stream', writable }, signal: abort.signal, gpuRenderer: gpu,
       onProgress: (frames, total) => { framesDone.value = frames; framesTotal.value = total; progress.value = frames === total ? t('expmapVideoPanel.progress.finalizing') : t('expmapVideoPanel.progress.encoding') } })
     progress.value = result.cancelled ? t('expmapVideoPanel.progress.interrupted') : t('expmapVideoPanel.progress.saved')
@@ -195,6 +198,7 @@ async function start() {
           <div class="row"><DenseSelect v-model="outputResolution" :label="t('expmapVideoPanel.output.resolution')" :options="resolutions"/><DenseSelect :model-value="fps" :label="t('expmapVideoPanel.output.fps')" :options="[24,25,30,60].map(n => ({value: n, label: `${n} fps`}))" @update:model-value="fps = Number($event)"/></div>
           <p>{{ width }} × {{ height }}<template v-if="width > manifest.projection.width || height > manifest.projection.height">{{ t('expmapVideoPanel.output.upscale', { width: manifest.projection.width, height: manifest.projection.height }) }}</template></p>
           <DenseSelect v-model="codec" :label="t('expmapVideoPanel.output.encoding')" :options="[{value:'auto',label:t('expmapVideoPanel.output.auto')}, ...MP4_CODECS.map(c => ({ value: c.value, label: t(c.labelKey) }))]"/>
+          <VideoEncodingControls v-model="encoding" :codec="effectiveCodec ?? (codec === 'auto' ? 'hevc' : codec)" :width="width" :height="height" :fps="fps" :duration="windowSpec.durationSeconds + motion.holdSeconds"/>
           <p role="status">{{ codecLabel }}{{ encoderLabel }}</p>
           <details><summary>{{ t('expmapVideoPanel.output.qualityDetails') }}</summary>
             <div class="dims"><label>{{ t('expmapVideoPanel.output.width') }} <input type="number" inputmode="numeric" :value="width" min="2" max="3840" step="2" @change="width = Math.min(3840, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || width"></label><span aria-hidden="true">×</span><label>{{ t('expmapVideoPanel.output.height') }} <input type="number" inputmode="numeric" :value="height" min="2" max="2160" step="2" @change="height = Math.min(2160, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || height"></label></div>

@@ -26,6 +26,7 @@ import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
 import {clampBlaEpsilon} from '../blaEpsilon';
 import {createDevCapture} from '../devCapture';
+import {createDevBench} from '../devBench';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {cloneOrbitTrap, DEFAULT_ORBIT_TRAP, normalizeOrbitTrapFromLegacy} from '../OrbitTrap';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -331,9 +332,27 @@ if (import.meta.env.DEV) {
     download: (canvas, suffix) => downloadCanvas(canvas, suffix),
     magnificationThreshold: () => mandelbrotParams.value.zoomMagnificationThreshold ?? 16,
   });
-  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown };
+  const bench = createDevBench({
+    getEngine: () => mandelbrotCtrlRef.value?.getEngine?.() ?? null,
+    getStillDeps: () => {
+      const ctrl = mandelbrotCtrlRef.value;
+      const engine = ctrl?.getEngine?.();
+      const nav = ctrl?.getNavigator?.();
+      if (!ctrl || !engine || !nav) return null;
+      return { engine, controller: { drawOnce: () => ctrl.drawOnce(), setExportTime: (t) => ctrl.setExportTime?.(t) }, navigator: nav };
+    },
+    resetParams: (patch) => {
+      const next = { ...structuredClone(DEFAULT_MANDELBROT_PARAMS), ...structuredClone(patch) } as MandelbrotParams;
+      next.colorStops = normalizeColorStops(next.colorStops);
+      mandelbrotParams.value = next;
+    },
+    getView: () => { const p = mandelbrotParams.value; return { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle }; },
+    getEps: () => clampBlaEpsilon(mandelbrotParams.value.blaEpsilon),
+  });
+  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown };
   w.__capture = dev.capture;
   w.__compare = dev.compare;
+  w.__bench = bench.bench;
   // Live-path tests: patch viewer settings without touching localStorage.
   w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
 }
@@ -1910,7 +1929,6 @@ function tickTravelAnimation() {
     mandelbrotParams.value.stripeFrequency = target.stripeFrequency ?? 8;
     mandelbrotParams.value.colorStops = target.colorStops;
     mandelbrotParams.value.interpolationMode = target.interpolationMode;
-    mandelbrotParams.value.approximationMode = target.approximationMode;
     mandelbrotParams.value.tessellationLevel = target.tessellationLevel ?? 0;
     mandelbrotParams.value.displacementAmount = target.displacementAmount ?? 0;
     mandelbrotParams.value.microBumpStrength = target.microBumpStrength ?? 0;

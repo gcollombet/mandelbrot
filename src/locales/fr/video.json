@@ -99,5 +99,19 @@
   },
   "animationPreset": {
     "nameRequired": "Le nom du préréglage d’animation est obligatoire."
+  },
+  "encoding": {
+    "profile": "Compression",
+    "standard": "Standard",
+    "high": "Très haute qualité (défaut)",
+    "maximum": "Qualité maximale",
+    "custom": "Personnalisé",
+    "quantizer": "Quantificateur HDR (avancé)",
+    "bitrate": "Débit cible",
+    "invalid": "Débit invalide",
+    "estimate": "CBR · {bitrate} Mbit/s · ≈ {size} Mo",
+    "constantHint": "Débit constant demandé. Un refus bloque l’export ; le débit réel dépend de l’encodeur.",
+    "quantizerHint": "Plus la valeur est basse, plus les détails sont préservés. Taille variable.",
+    "refused": "Débit constant demandé : {bitrate} Mbit/s. Essayez un autre profil ou codec."
   }
 }

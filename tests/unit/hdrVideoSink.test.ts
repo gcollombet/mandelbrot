@@ -146,3 +146,17 @@ describe('native HDR video sink',()=>{
     expect(close).toHaveBeenCalledOnce()
   })
 })
+
+it('honors an explicit HDR bitrate even when an old quantizer remains saved', async () => {
+  const sink = await createVideoSink({ ...settings, hdrQuantizer: 10, encoding: { profile: 'custom', bitrateMbps: 90 } })
+  const encoder = encoders.at(-1)!
+  expect(encoder.config).toMatchObject({ bitrateMode: 'constant', bitrate: 90e6 })
+  expect(sink.quantizer).toBeUndefined()
+  await sink.addFrame(frame())
+  expect(encoder.options[0]).not.toHaveProperty('vp9')
+  await sink.finalize()
+})
+it('does not silently downgrade an explicit quantizer profile', async () => {
+  quantizerRejected = true
+  await expect(createVideoSink({ ...settings, hdrQuantizer: 12, encoding: { profile: 'quantizer', bitrateMbps: 100 } })).rejects.toThrow()
+})

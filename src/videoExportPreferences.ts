@@ -1,3 +1,4 @@
+import { normalizeVideoEncoding, DEFAULT_VIDEO_ENCODING, type VideoEncoding } from './videoEncoding'
 // ── Persisted state of the video export panel ──
 // The panel is unmounted whenever its tab closes, so pinned endpoints would
 // otherwise be lost on a stray click — after the user had navigated somewhere
@@ -24,6 +25,7 @@ export function isAaSampleChoice(value: unknown): value is AaSampleChoice {
 }
 
 export type VideoExportPreferences = {
+  encoding?: VideoEncoding
   pinnedStart: VideoPathLocation | null
   pinnedEnd: VideoPathLocation | null
   durationSeconds: number
@@ -45,6 +47,7 @@ export type VideoExportPreferences = {
 }
 
 export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
+  encoding: { ...DEFAULT_VIDEO_ENCODING },
   pinnedStart: null,
   pinnedEnd: null,
   durationSeconds: 20,
@@ -104,6 +107,7 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
   if (typeof value !== 'object' || value === null) return { ...d }
   const raw = value as Record<string, unknown>
   return {
+    encoding: normalizeVideoEncoding(raw.encoding),
     pinnedStart: normalizeLocation(raw.pinnedStart),
     pinnedEnd: normalizeLocation(raw.pinnedEnd),
     durationSeconds: normalizeNumber(raw.durationSeconds, d.durationSeconds),

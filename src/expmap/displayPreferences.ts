@@ -1,8 +1,10 @@
+import { normalizeVideoEncoding, DEFAULT_VIDEO_ENCODING, type VideoEncoding } from '../videoEncoding'
 import { normalizeStereoVideo, DEFAULT_STEREO_VIDEO, type StereoVideoSettings } from '../stereoVideo'
 import type { ShaderInterpolation, ShaderSampleDistribution } from './displaySampling'
 import { isMp4Codec, type Mp4Codec } from '../videoEncoderSink'
 /** Shader panel settings that survive a reload: creation, playback and video export. */
 export type ShaderExpmapPreferences = {
+  encoding?: VideoEncoding
   stereo?: StereoVideoSettings
   dynamicRange?: 'sdr'|'hdr'; hdrExposure?: number; hdrQuantizer?: number
   interpolation: ShaderInterpolation; sampleDistribution: ShaderSampleDistribution; radialDensity: number; budgetMiB: number; samples: number; previewScale: string; angle: number
@@ -10,6 +12,7 @@ export type ShaderExpmapPreferences = {
 }
 export const SHADER_SAMPLE_CHOICES = [1, 4, 9, 16, 36, 64, 144, 256]
 export const DEFAULT_SHADER_PREFERENCES: ShaderExpmapPreferences = {
+  encoding: { ...DEFAULT_VIDEO_ENCODING },
   stereo: { ...DEFAULT_STEREO_VIDEO }, dynamicRange:'sdr', hdrExposure:0, hdrQuantizer:10,
   interpolation: 'bilinear', sampleDistribution: 'grid', radialDensity: 1, budgetMiB: 512, samples: 16, previewScale: '', angle: 0,
   width: 3840, height: 2160, fps: 60, codec: 'hevc', ringFirst: true, keepRings: false, ringBitrateMbps: 100,
@@ -21,6 +24,7 @@ export function loadShaderPreferences(): ShaderExpmapPreferences {
   try {
     const v = JSON.parse(localStorage.getItem(KEY) ?? '{}')
     return {
+      encoding: normalizeVideoEncoding(v.encoding),
       stereo: normalizeStereoVideo(v.stereo),
       dynamicRange:v.dynamicRange==='hdr'?'hdr':'sdr',hdrExposure:num(v.hdrExposure,0,-16,16),hdrQuantizer:num(v.hdrQuantizer,d.hdrQuantizer!,0,63,1),
       // Migrate the previous combined selector only when the new field is absent.

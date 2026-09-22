@@ -22,7 +22,8 @@ describe('uniform AA shifted-lattice lookup', () => {
     expect(shader).toContain(
       'vec2<f32>(parameters.aaLookupOffsetX, parameters.aaLookupOffsetY) / (2.0 * neutralExtent)',
     )
-    expect(shader).toContain('+ vec2<f32>(0.5, 0.5) - aaLookupUvOffset;')
+    expect(shader).toContain('+ vec2<f32>(0.5, 0.5) - aaLookupUvOffset\n')
+    expect(shader).toContain('- vec2<f32>(parameters.liveShiftU, parameters.liveShiftV);')
   })
 
   it('keeps direct rendering and the palette preview unshifted', () => {

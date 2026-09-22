@@ -99,5 +99,19 @@
   },
   "animationPreset": {
     "nameRequired": "Animation preset name is required."
+  },
+  "encoding": {
+    "profile": "Compression",
+    "standard": "Standard",
+    "high": "Very high quality (default)",
+    "maximum": "Maximum quality",
+    "custom": "Custom",
+    "quantizer": "HDR quantizer (advanced)",
+    "bitrate": "Target bitrate",
+    "invalid": "Invalid bitrate",
+    "estimate": "CBR · {bitrate} Mbit/s · ≈ {size} MB",
+    "constantHint": "Constant bitrate requested. Unsupported settings stop export; actual bitrate depends on the encoder.",
+    "quantizerHint": "Lower values preserve more detail. Variable file size.",
+    "refused": "Requested constant bitrate: {bitrate} Mbit/s. Try another profile or codec."
   }
 }

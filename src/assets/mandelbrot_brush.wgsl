@@ -1331,6 +1331,17 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   return inside_x && inside_y;
 }
 
+// Texels the kernel iterates. Live rotation margin (rotationUnion < 0): while
+// the view turns, the circumscribed disc outside the viewport is iterated too,
+// on the even lattice only — the resolve rebuilds the rest at step 2. It gives
+// the next frozen snapshot every angle the rotation can reach.
+fn is_inside_compute_region(xy_neutral: vec2<f32>, coord: vec2<u32>) -> bool {
+  if (is_inside_rotated_screen(xy_neutral)) { return true; }
+  return brush.rotationUnion < -0.5
+    && dot(xy_neutral, xy_neutral) <= 1.0
+    && ((coord.x | coord.y) & 1u) == 0u;
+}
+
 // Direct non-Cartesian coordinates relative to the block's deep scale anchor.
 // Point samples deliberately bypass the Cartesian AA jitter/footprint.
 fn expmap_local(coord: vec2<f32>) -> vec2<f32> {
@@ -1352,16 +1363,43 @@ var<workgroup> wgCount: atomic<u32>;
 // Exact per-lane g_workBudget, reduced by lane 0.
 var<workgroup> wgWeightedWork: array<u32, 64>;
 
+// Rotation margin, workgroup packing: the host dispatches the whole square
+// in 16×16 blocks of 2×2 workgroups. A block lying entirely outside the
+// viewport only holds even-lattice work (64 texels); spread over four
+// workgroups it would run 16 lanes out of 64, at the cost of full waves. Its
+// first workgroup takes one lattice texel per lane instead, the other three
+// idle. Conservative: the block's circumscribed circle must clear the viewport.
+fn margin_block_outside_viewport(block: vec2<u32>) -> bool {
+  let neutralExtent = sqrt(brush.aspect * brush.aspect + 1.0);
+  let centre = vec2<f32>(brush.tileOriginX, brush.tileOriginY) + vec2<f32>(block * 16u) + vec2<f32>(8.0);
+  let xy_neutral = vec2<f32>(
+    centre.x / brush.neutralSide * 2.0 - 1.0,
+    1.0 - centre.y / brush.neutralSide * 2.0,
+  );
+  let local = rotate(xy_neutral * neutralExtent, -brush.angle);
+  let texel = 2.0 * neutralExtent / brush.neutralSide;
+  let outside = max(abs(local) - vec2<f32>(brush.aspect, 1.0), vec2<f32>(0.0));
+  return length(outside) > 12.0 * texel;
+}
+
 @compute @workgroup_size(8, 8)
 fn cs_main(
   @builtin(global_invocation_id) local_gid: vec3<u32>,
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
   @builtin(local_invocation_index) lidx: u32,
 ) {
-  let gid = vec3<u32>(
-    local_gid.x + u32(brush.dispatchOriginX),
-    local_gid.y + u32(brush.dispatchOriginY),
-    local_gid.z,
-  );
+  var texel = local_gid.xy + vec2<u32>(u32(brush.dispatchOriginX), u32(brush.dispatchOriginY));
+  var laneActive = true;
+  // Workgroup-uniform (depends on wid only): barriers stay in uniform flow.
+  if (brush.rotationUnion < -0.5 && brush.expmapMode < 0.5) {
+    let block = wid.xy / 2u;
+    if (margin_block_outside_viewport(block)) {
+      texel = block * 16u + lid.xy * 2u;
+      laneActive = all(wid.xy % 2u == vec2<u32>(0u));
+    }
+  }
+  let gid = vec3<u32>(texel, local_gid.z);
   // The block anchor already includes its global starting row. Adding the
   // local row produces the same scale on both sides of block/octave halos.
   expmapAppearanceLogScaleOffset = 0.0;
@@ -1378,7 +1416,7 @@ fn cs_main(
   var weightedWork = 0u;
 
   let dims = textureDimensions(raw);
-  if (gid.x < dims.x && gid.y < dims.y) {
+  if (laneActive && gid.x < dims.x && gid.y < dims.y) {
     let globalCoord = vec2<f32>(brush.tileOriginX, brush.tileOriginY) + vec2<f32>(gid.xy);
     // Same uv convention as the fragment passes: uv.y=0 is the bottom row.
     let uv = vec2<f32>(
@@ -1387,9 +1425,10 @@ fn cs_main(
     );
     let xy_neutral = uv * 2.0 - vec2<f32>(1.0);
 
-    // Outside the rotated viewport: keep as-is, count nothing.
+    // Outside the rotated viewport (and its rotation margin): keep as-is,
+    // count nothing.
     let expmapInside = f32(gid.x) < brush.expmapWidth && f32(gid.y) < brush.expmapHeight;
-    if (select(is_inside_rotated_screen(xy_neutral), expmapInside, brush.expmapMode > 0.5)) {
+    if (select(is_inside_compute_region(xy_neutral, gid.xy), expmapInside, brush.expmapMode > 0.5)) {
       let coord = vec2<i32>(i32(gid.x), i32(gid.y));
 
       // A negative value is always the single exact step-1 request.

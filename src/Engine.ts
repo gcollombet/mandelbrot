@@ -159,6 +159,9 @@ class GpuDeviceLostDuringSetupError extends Error {
 const COLOR_UNIFORM_FLOAT_COUNT = 104
 /** Slots 96/97: toroidal origin of the raw texture (analytic-AA payload reads). */
 const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96
+/** Live-grid sub-texel residual, normalized UV (color.wgsl liveShiftU/V). */
+const COLOR_UNIFORM_LIVE_SHIFT_U_SLOT = 65
+const COLOR_UNIFORM_LIVE_SHIFT_V_SLOT = 67
 const TAU = Math.PI * 2
 
 // Minimum number of unfinished pixels below which we consider the image
@@ -284,6 +287,7 @@ type ReferenceWorkerResponse =
         referenceCx: string
         referenceCy: string
         orbit: Float32Array<ArrayBuffer>
+        computeMs: number
     }
     | {
         type: 'tableProgress'
@@ -301,6 +305,7 @@ type ReferenceWorkerResponse =
         // built under. A mismatch with Engine.tableGeneration means the build
         // predates the latest ε/skip/mode change (in-flight when the setter was
         // posted) — dropped; the worker's FIFO guarantees a fresh build follows.
+        buildMs: number
     } & BlaTablePayload)
     | {
         type: 'error'
@@ -720,6 +725,24 @@ export class Engine {
      *  the whole square; every texel left out is one `is_inside_rotated_screen`
      *  already rejects, so no computed state is ever dropped or invalidated. */
     private dispatchBox = { x: 0, y: 0, width: 0, height: 0 }
+    /**
+     * Live rotation margin: the angle changed since the last zoom-cycle
+     * boundary (cycle start or mid-zoom swap). While it holds, the iteration
+     * kernel also computes the circumscribed disc outside the viewport, on the
+     * even lattice only, and the resolve keeps it (step-2 reconstruction).
+     *
+     * Only the viewport is computed otherwise, so the live texture handed to
+     * the frozen role at a swap covered the rectangle at the swap's angle and
+     * nothing else. Zooming in, the frozen texture is the only source for the
+     * screen's outer ring until the live one catches up (lzf starts at
+     * 1/threshold); every degree turned since the swap pushed the screen's
+     * corners outside that rectangle, into texels no one computed: black
+     * triangles on each side. The disc contains the viewport at every angle,
+     * so the next frozen texture covers any further rotation. The even
+     * lattice (packed into full waves, see cs_main) iterates a quarter of the
+     * ring: about a fifth of the viewport's texels at 16:9.
+     */
+    private liveRotationMargin = false
 
     // pipelines / bindgroups
     pipelineResolve?: GPURenderPipeline
@@ -826,6 +849,10 @@ export class Engine {
     tableBuildCompletionSerial = 0
     /** Live worker-side BLA table build milestone (start/transfer/completion). */
     tableBuildActive = false
+    /** Worker compute time of the latest orbit chunk's reference (dev bench). */
+    orbitComputeTiming = { refId: 0, ms: 0 }
+    /** Worker build time of the latest accepted BLA table (dev bench). */
+    blaBuildTiming = { refId: 0, ms: 0 }
     tableBuildProgress = 0
     tableBuildStage: TableBuildStage = 'idle'
 
@@ -1081,7 +1108,7 @@ export class Engine {
     /** Set to true when we need to run the merge pass (resolved+frozen→frozen) at zoom stop. */
     private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
-    private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
+    private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0, liveShiftU: 0, liveShiftV: 0 }
 
     /**
      * Refresh the frozen fallback from the resolved (live) texture before the
@@ -1116,19 +1143,64 @@ export class Engine {
             && (uniforms !== undefined || this.frozenAligned)
         if (frozenUsable) {
             const aspect = this.width / Math.max(1, this.height)
-            this.mergeUniforms = uniforms ?? { zf: 1, lzf: 1, frozenShiftU: 0, frozenShiftV: 0, aspect, angle: 0 }
+            // The destination is the live grid (live read unshifted). The old
+            // frozen grid sits at (frozen offset − live residual) from it: both
+            // are measured from the same last rendered camera.
+            this.mergeUniforms = {
+                ...(uniforms ?? {
+                    zf: 1,
+                    lzf: 1,
+                    frozenShiftU: (this.frozenOffsetCommittedX - this.liveResidualX) / this.neutralSize,
+                    frozenShiftV: -(this.frozenOffsetCommittedY - this.liveResidualY) / this.neutralSize,
+                    aspect,
+                    angle: 0,
+                }),
+                liveShiftU: 0,
+                liveShiftV: 0,
+            }
             this.needMergeSnapshot = true
             this.needFreezeSnapshot = false
         } else {
             this.needFreezeSnapshot = true
         }
+        // Either way the new frozen texture is the live grid of the last
+        // rendered frame, seen from the current camera.
+        this.frozenOffsetX = this.liveResidualX + this.frameLiveShiftX
+        this.frozenOffsetY = this.liveResidualY + this.frameLiveShiftY
     }
-    /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
-    private frozenBaseShiftX = 0
-    private frozenBaseShiftY = 0
-    /** Rounded live-texel pan accumulated since the current frozen snapshot. */
-    private frozenPanShiftX = 0
-    private frozenPanShiftY = 0
+    /**
+     * Displacement of the frozen grid relative to the camera, in frozen texels,
+     * with the content-shift convention of `shiftTexX/Y` (a texture displaced
+     * by D is read at `truth − D`). Exact: it follows the camera's float motion,
+     * never the rounded texel shifts applied to the live texture, and it keeps
+     * advancing on clear frames (reference re-anchor, table clear) where the
+     * live texture does not shift. `frozenOffset*` is this frame's value,
+     * `frozenOffsetCommitted*` the last rendered frame's.
+     */
+    private frozenOffsetX = 0
+    private frozenOffsetY = 0
+    private frozenOffsetCommittedX = 0
+    private frozenOffsetCommittedY = 0
+    /**
+     * Sub-texel displacement of the live grid relative to the camera, in live
+     * texels, same convention. Mid-zoom the navigator does not snap the centre,
+     * so a pan moves the camera by fractional texels while the live texture
+     * can only move by whole ones. The remainder is carried here (|r| ≤ 0.5)
+     * instead of being dropped each frame: the compute pass evaluates the grid
+     * (camera + r), the colour pass reads it back at (truth − r). Dropping it
+     * made the live content drift from the camera — and from the frozen
+     * texture — by the sum of every frame's rounding.
+     */
+    private liveResidualX = 0
+    private liveResidualY = 0
+    /** Camera motion of this frame in texels of the previous live grid (set by update()). */
+    private frameLiveShiftX = 0
+    private frameLiveShiftY = 0
+    /** Reference re-anchor jump (new reference − old one), consumed by the next update(). */
+    private referenceJumpX = 0
+    private referenceJumpY = 0
+    /** Compute-centre uniforms as written by update(), before the live-residual correction. */
+    private computeCenterUniform = { cx: 0, cy: 0, scale: 0 }
     /** True when the frozen texture is spatially aligned with the live texture.
      *  Set to true after a freeze snapshot or merge pass. Set to false on translation. */
     private frozenAligned = false
@@ -1304,7 +1376,18 @@ export class Engine {
         this.stagingRef = null
         this.referenceWorkerCx = staging.cx
         this.referenceWorkerCy = staging.cy
+        // dx/dy are relative to the reference: record how far it moves so the
+        // frozen texture can follow the camera across the re-anchor (the view
+        // centre is untouched, so the offset change is exactly the jump).
+        const offsetBefore = this.mandelbrotNavigator.view_floatexp() as Float64Array
         this.mandelbrotNavigator.reference_origin(staging.cx, staging.cy)
+        const offsetAfter = this.mandelbrotNavigator.view_floatexp() as Float64Array
+        const jumpX = offsetBefore[2] * 2 ** offsetBefore[3] - offsetAfter[2] * 2 ** offsetAfter[3]
+        const jumpY = offsetBefore[4] * 2 ** offsetBefore[5] - offsetAfter[4] * 2 ** offsetAfter[5]
+        if (Number.isFinite(jumpX) && Number.isFinite(jumpY)) {
+            this.referenceJumpX += jumpX
+            this.referenceJumpY += jumpY
+        }
 
         // Set orbit length directly — NOT via markReferenceReset (which would zero it).
         // This lets the next frame use the uploaded orbit immediately.
@@ -1502,6 +1585,7 @@ export class Engine {
         }
 
         if (message.type === 'orbitChunk') {
+            this.orbitComputeTiming = { refId: message.refId, ms: message.computeMs }
             const active = this.activeRef
             const staging = this.stagingRef
 
@@ -1580,6 +1664,7 @@ export class Engine {
         if (message.tableGeneration !== this.tableGeneration) {
             return
         }
+        this.blaBuildTiming = { refId: message.refId, ms: message.buildMs }
         if (this.activeRef && message.refId === this.activeRef.refId) {
             this.writeBlaTable(message)
             this.currentBlaLevelCount = message.levelCount
@@ -1954,7 +2039,7 @@ export class Engine {
             generation: 0,
         }))
         this.uniformBufferMerge = this.device.createBuffer({
-            size: 4 * 8, // 6 floats (zf, lzf, frozenShiftU, frozenShiftV, aspect, angle) padded to 32 bytes
+            size: 4 * 8, // zf, lzf, frozenShiftU, frozenShiftV, aspect, angle, liveShiftU, liveShiftV
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Merge',
         })
@@ -2633,6 +2718,29 @@ export class Engine {
     }
 
     /**
+     * The reference the field is converging on is not the one the worker will
+     * settle on for this view: a newer reference is staged, the worker has not
+     * answered the latest reset/view yet (a restart is about to be staged), or
+     * the visible orbit prefix is still short.
+     *
+     * Orbit length alone is not enough: the Rust orbit rebases to 0 when the
+     * reference escapes and keeps going to maxIter, so an early-escaping
+     * reference (e.g. ~695 iterations out of 35 788 right after a teleport)
+     * reports a full-length orbit. Exact perturbation on it converges to a
+     * wrong but stable field (a minibrot interior painted flat at the
+     * reference's escape iteration) until the recentred orbit is promoted.
+     * A still must wait for that promotion; the live view and video export
+     * do not (they render progressively across the hand-over).
+     */
+    exportReferencePending(): boolean {
+        if (this.referenceWorkerFailed) return false
+        const visibleTarget = Math.min(this.currentMaxIterations, ORBIT_STEP_CAPACITY - 1)
+        return this.stagingRef !== null
+            || this.isReferenceValidating
+            || this.currentReferenceAvailableIter < visibleTarget
+    }
+
+    /**
      * Convergence gate for video export: identical to the real-time predicate
      * except that a running frozen/live zoom cycle no longer disqualifies the
      * frame. A true result means this frame is safe to capture and encode.
@@ -2662,6 +2770,8 @@ export class Engine {
         this.tiledKeyframeTileIndex = 0
         this.tiledKeyframeComplete = false
         this.frozenAligned = true
+        this.frozenOffsetX = this.frozenOffsetCommittedX = this.liveResidualX
+        this.frozenOffsetY = this.frozenOffsetCommittedY = this.liveResidualY
         this.frozenDisplayVersion = this.resolvedDisplayVersion
         this.needFreezeSnapshot = false
         this.needMergeSnapshot = false
@@ -2918,6 +3028,52 @@ export class Engine {
 
     async waitForSubmittedWork(): Promise<void> {
         await this.device?.queue.onSubmittedWorkDone()
+    }
+
+    /**
+     * Dev/bench readback of the raw iteration field (layers 0, 2, 3 = iter,
+     * z.x, z.y) of the front raw texture, in logical texel order (the toroidal
+     * origin is undone here). Neutral-space square of side `side`; use
+     * `neutralTexelFor` semantics (see readIterPixel) to map screen pixels.
+     */
+    async readRawField(): Promise<{ side: number; iter: Float32Array; zx: Float32Array; zy: Float32Array }> {
+        const texture = this.rawTexture
+        if (!this.device || !texture) throw new Error('[Engine] raw texture unavailable')
+        const side = texture.width
+        const bytesPerRow = (side * 4 + 255) & ~255
+        const layers = [0, 2, 3]
+        const buffer = this.device.createBuffer({
+            size: bytesPerRow * side * layers.length,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine RawField Readback',
+        })
+        const encoder = this.device.createCommandEncoder()
+        layers.forEach((layer, i) => encoder.copyTextureToBuffer(
+            { texture, origin: { x: 0, y: 0, z: layer } },
+            { buffer, offset: bytesPerRow * side * i, bytesPerRow, rowsPerImage: side },
+            { width: side, height: side, depthOrArrayLayers: 1 },
+        ))
+        this.device.queue.submit([encoder.finish()])
+        await buffer.mapAsync(GPUMapMode.READ)
+        const mapped = new Float32Array(buffer.getMappedRange())
+        const stride = bytesPerRow / 4
+        const ox = this.rawOriginX
+        const oy = this.rawOriginY
+        const out = layers.map((_, i) => {
+            const plane = new Float32Array(side * side)
+            const base = i * stride * side
+            for (let y = 0; y < side; y++) {
+                const py = (((y + oy) % side) + side) % side
+                for (let x = 0; x < side; x++) {
+                    const px = (((x + ox) % side) + side) % side
+                    plane[y * side + x] = mapped[base + py * stride + px]
+                }
+            }
+            return plane
+        })
+        buffer.unmap()
+        buffer.destroy()
+        return { side, iter: out[0], zx: out[1], zy: out[2] }
     }
 
     /**
@@ -3641,8 +3797,21 @@ export class Engine {
         return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) }
     }
 
+    /** Shared `rotationUnion` code for the brush and resolve uniforms:
+     *  2 expmap, 1 tiled rotating keyframe (full disc), −1 live rotation
+     *  margin (disc on the even lattice, see liveRotationMargin), 0 viewport. */
+    private rotationUnionCode(): number {
+        if (this.expmapProjection) return 2
+        if (this.tiledRotationUnion) return 1
+        return this.liveRotationMarginActive() ? -1 : 0
+    }
+
+    private liveRotationMarginActive(): boolean {
+        return this.liveRotationMargin && !this.tiledKeyframePlan && !this.videoExportActive
+    }
+
     private computeIterationDispatchBox(aspect: number, angle: number) {
-        if (this.tiledKeyframePlan && this.tiledRotationUnion) {
+        if ((this.tiledKeyframePlan && this.tiledRotationUnion) || this.liveRotationMarginActive()) {
             return { x: 0, y: 0, width: this.neutralSize, height: this.neutralSize }
         }
         // Bounding box of the rotated viewport, snapped outwards to the 8×8
@@ -4632,10 +4801,6 @@ export class Engine {
             this.clearHistoryNextFrame = true
             if (!preserveZoomFrozen) {
                 this.zoomState = resetZoomState()
-                this.frozenBaseShiftX = 0
-                this.frozenBaseShiftY = 0
-                this.frozenPanShiftX = 0
-                this.frozenPanShiftY = 0
             }
             // A reference reset clears the live texture. At deep zoom, the first
             // recompute can be slow enough to expose a black frame unless we keep
@@ -4680,6 +4845,35 @@ export class Engine {
             const prevFrozenScale = getFrozenScale(this.zoomState)
             const prevLiveScale = getLiveScale(this.zoomState)
 
+            // Camera motion since the last rendered frame, in texels of the
+            // previous live and frozen grids. Measured on every frame, clear
+            // frames included, and across a reference re-anchor (dx/dy are
+            // reference-relative, so the jump is added back).
+            const referenceJumpX = orbitWasReset ? this.referenceJumpX : 0
+            const referenceJumpY = orbitWasReset ? this.referenceJumpY : 0
+            if (orbitWasReset) {
+                this.referenceJumpX = 0
+                this.referenceJumpY = 0
+            }
+            let frameShiftX = 0
+            let frameShiftY = 0
+            if (this.prevFrameMandelbrot && !this.expmapProjection) {
+                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
+                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot.dx + referenceJumpX
+                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot.dy + referenceJumpY
+                frameShiftX = -(deltaDx * this.neutralSize) / (2 * neutralExtent)
+                frameShiftY = (deltaDy * this.neutralSize) / (2 * neutralExtent)
+            }
+            const oldLiveScale = wasZoomActive && prevLiveScale > 0
+                ? prevLiveScale
+                : (this.prevFrameMandelbrot?.scale ?? mandelbrot.scale)
+            const oldFrozenScale = wasZoomActive && prevFrozenScale > 0 ? prevFrozenScale : oldLiveScale
+            const finiteShift = (v: number) => Number.isFinite(v) ? v : 0
+            this.frameLiveShiftX = finiteShift(frameShiftX / oldLiveScale)
+            this.frameLiveShiftY = finiteShift(frameShiftY / oldLiveScale)
+            this.frozenOffsetX = this.frozenOffsetCommittedX + finiteShift(frameShiftX / oldFrozenScale)
+            this.frozenOffsetY = this.frozenOffsetCommittedY + finiteShift(frameShiftY / oldFrozenScale)
+
             const {state, effects} = event
                 ? reduceZoomState(this.zoomState, event, { threshold: this.zoomMagnificationThreshold })
                 : { state: this.zoomState, effects: [] as import('./zoomState').ZoomEffect[] }
@@ -4706,14 +4900,16 @@ export class Engine {
                     case 'copyResolvedToFrozen':
                         if (wasZoomActive && prevFrozenScale > 0 && prevLiveScale > 0) {
                             // Mid-zoom swap: the new frozen texture takes the live
-                            // texture's space (lzf = 1) and absorbs the old frozen
-                            // where it is still finer (zf = threshold, same shift
-                            // formula as the colour pass).
+                            // grid (lzf = 1, live read unshifted) and absorbs the
+                            // old frozen where it is still finer (zf = threshold).
+                            // The old frozen sits at (its offset − the live
+                            // residual, in frozen texels) from that grid.
+                            const liveToFrozen = prevLiveScale / prevFrozenScale
                             this.requestFrozenRefresh({
                                 zf: prevFrozenScale / prevLiveScale,
                                 lzf: 1,
-                                frozenShiftU: (this.frozenBaseShiftX + this.frozenPanShiftX * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
-                                frozenShiftV: -(this.frozenBaseShiftY + this.frozenPanShiftY * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                frozenShiftU: (this.frozenOffsetCommittedX - this.liveResidualX * liveToFrozen) / this.neutralSize,
+                                frozenShiftV: -(this.frozenOffsetCommittedY - this.liveResidualY * liveToFrozen) / this.neutralSize,
                                 aspect,
                                 angle: mandelbrot.angle,
                             })
@@ -4722,43 +4918,44 @@ export class Engine {
                             // previous frame's display space when aligned.
                             this.requestFrozenRefresh()
                         }
-                        if (isZoomActive(this.zoomState)) {
-                            if (!wasZoomActive) {
-                                // New cycle start: capture the initial pan delta
-                                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
-                                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
-                                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-                                const frozenScale = getFrozenScale(this.zoomState)
-                                if (frozenScale > 0) {
-                                    this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * frozenScale * neutralExtent))
-                                    this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * frozenScale * neutralExtent))
-                                }
-                            } else {
-                                // Swap: the live texture already contains pan, no base shift
-                                this.frozenBaseShiftX = 0
-                                this.frozenBaseShiftY = 0
-                            }
-                            this.frozenPanShiftX = 0
-                            this.frozenPanShiftY = 0
-                        }
                         break
                     case 'mergeResolvedAndFrozen':
                         this.needMergeSnapshot = !this.tiledKeyframePlan
                         if (wasZoomActive && prevFrozenScale > 0) {
+                            // Zoom stop: merge into the CURRENT camera's display
+                            // space (the navigator snaps the centre on this very
+                            // frame), so both sources are read at their exact
+                            // displacement from it.
                             this.mergeUniforms = {
                                 zf: prevFrozenScale / mandelbrot.scale,
                                 lzf: prevLiveScale / mandelbrot.scale,
-                                frozenShiftU: (this.frozenBaseShiftX + this.frozenPanShiftX * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
-                                frozenShiftV: -(this.frozenBaseShiftY + this.frozenPanShiftY * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                frozenShiftU: this.frozenOffsetX / this.neutralSize,
+                                frozenShiftV: -this.frozenOffsetY / this.neutralSize,
                                 aspect,
                                 angle: mandelbrot.angle,
+                                liveShiftU: (this.liveResidualX + this.frameLiveShiftX) / this.neutralSize,
+                                liveShiftV: -(this.liveResidualY + this.frameLiveShiftY) / this.neutralSize,
                             }
+                            this.frozenOffsetX = 0
+                            this.frozenOffsetY = 0
                         }
                         break
                     case 'clearHistoryNextFrame':
                         this.clearHistoryNextFrame = true
                         break
                 }
+            }
+
+            // Rotation margin (see liveRotationMargin). A cycle start or swap
+            // hands the live texture to the frozen role and restarts the live
+            // one: the margin re-arms only if the angle keeps changing. In idle
+            // it persists, so a zoom started after a rotation freezes a margin.
+            if (event?.type === 'scaleChanged'
+                && effects.some(effect => effect.type === 'copyResolvedToFrozen')) {
+                this.liveRotationMargin = false
+            }
+            if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.angle !== mandelbrot.angle) {
+                this.liveRotationMargin = true
             }
         }
 
@@ -4830,8 +5027,6 @@ export class Engine {
         const liveZoomFactor = zoomActive
             ? getLiveScale(this.zoomState) / mandelbrot.scale
             : 1.0
-        const frozenScale = getFrozenScale(this.zoomState)
-        const liveScale = getLiveScale(this.zoomState)
         const antialiasLevelColor = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
 
         // Phase D analytic AA: current sample's jitter δc as unit direction +
@@ -4862,16 +5057,11 @@ export class Engine {
             zoomFactor,                     // 8: zoomFactor
             (zoomActive || this.frozenAligned || this.needFreezeSnapshot) ? 1.0 : 0.0, // 9: frozenAligned
             liveZoomFactor,                 // 10: liveZoomFactor
-            // Frozen shift derived from the live texture's actual cumulative
-            // shift (in rounded texels at liveScale), rescaled to frozen UV.
-            // This ensures the frozen texture follows the exact same pan drift
-            // as the live texture, without independent accumulation errors.
-            (zoomActive && frozenScale > 0)
-                ? (this.frozenBaseShiftX + this.frozenPanShiftX * (liveScale / frozenScale)) / this.neutralSize
-                : 0,                        // 11: frozenShiftU
-            (zoomActive && frozenScale > 0)
-                ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (liveScale / frozenScale)) / this.neutralSize
-                : 0,                        // 12: frozenShiftV
+            // Exact displacement of the frozen grid from this frame's camera
+            // (see frozenOffsetX): follows the camera, not the rounded shifts
+            // of the live texture.
+            this.frozenOffsetX / this.neutralSize,  // 11: frozenShiftU
+            -this.frozenOffsetY / this.neutralSize, // 12: frozenShiftV
             effectiveTessellationLevel,     // 13: tessellationLevel
             effectiveDisplacementAmount,    // 14: displacementAmount
             animGlobalSpeed,                // 15: animationSpeed (legacy/global speed)
@@ -4924,9 +5114,9 @@ export class Engine {
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
             effectiveGradeSaturation,            // 64: gradeSaturation (display grade)
-            0,                                    // 65: reserved (was the analytic-AA reach heatmap)
+            this.liveResidualX / this.neutralSize,  // 65: liveShiftU (patched in render())
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
-            0,                                    // 67: reserved
+            -this.liveResidualY / this.neutralSize, // 67: liveShiftV (patched in render())
             effectiveProtrusionPhase,             // 68: protrusionPhase [0, 1)
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
@@ -5058,8 +5248,13 @@ export class Engine {
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
         // computes at the fixed target scale for this cycle.
+        this.computeCenterUniform = {
+            cx: deep ? cxMant : mandelbrot.dx,
+            cy: deep ? cyMant : mandelbrot.dy,
+            scale: deep ? scaleParts.mantissa : computeScale,
+        }
         const mandelbrotShaderUniformDataGuarded = new Float32Array([
-            deep ? cxMant : mandelbrot.dx,        // 0: cx — fe mantissa when deep, else plain
+            deep ? cxMant : mandelbrot.dx,        // 0: cx — fe mantissa when deep, else plain (render() adds the live residual)
             deep ? cyMant : mandelbrot.dy,        // 1: cy — fe mantissa when deep, else plain
             mandelbrot.mu,
             deep ? scaleParts.mantissa : computeScale, // 3: scale — fe mantissa when deep, else plain
@@ -5388,8 +5583,49 @@ export class Engine {
             shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
             shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
         }
-        const roundedShiftTexX = Math.round(shiftTexX)
-        const roundedShiftTexY = Math.round(shiftTexY)
+        // Carry the sub-texel remainder instead of dropping it: the texture
+        // moves by whole texels, the camera by the float amount, and the live
+        // residual keeps the difference (see liveResidualX).
+        let roundedShiftTexX = 0
+        let roundedShiftTexY = 0
+        if (this.clearHistoryNextFrame || this.expmapProjection) {
+            this.liveResidualX = 0
+            this.liveResidualY = 0
+        } else {
+            const totalX = this.liveResidualX + shiftTexX
+            const totalY = this.liveResidualY + shiftTexY
+            roundedShiftTexX = Math.round(totalX)
+            roundedShiftTexY = Math.round(totalY)
+            this.liveResidualX = totalX - roundedShiftTexX
+            this.liveResidualY = totalY - roundedShiftTexY
+        }
+        shiftTexX = roundedShiftTexX
+        shiftTexY = roundedShiftTexY
+        if (this.computeCenterUniform.scale !== 0) {
+            // The compute pass evaluates the grid the live texture actually
+            // holds (camera + residual); the colour pass reads it back at
+            // (truth − residual). One live texel = 2·extent/N local units.
+            const texelLocal = 2 * Math.sqrt(aspect * aspect + 1.0) / this.neutralSize
+            const center = this.computeCenterUniform
+            this.device.queue.writeBuffer(
+                this.uniformBufferMandelbrot!,
+                0,
+                new Float32Array([
+                    center.cx + this.liveResidualX * texelLocal * center.scale,
+                    center.cy - this.liveResidualY * texelLocal * center.scale,
+                ]),
+            )
+            this.device.queue.writeBuffer(
+                this.uniformBufferColor!,
+                COLOR_UNIFORM_LIVE_SHIFT_U_SLOT * 4,
+                new Float32Array([this.liveResidualX / this.neutralSize]),
+            )
+            this.device.queue.writeBuffer(
+                this.uniformBufferColor!,
+                COLOR_UNIFORM_LIVE_SHIFT_V_SLOT * 4,
+                new Float32Array([-this.liveResidualY / this.neutralSize]),
+            )
+        }
         const hasTranslationShift = roundedShiftTexX !== 0 || roundedShiftTexY !== 0
         const enteringTranslation = hasTranslationShift && !this.batchTranslationActive
         if (enteringTranslation) {
@@ -5460,10 +5696,6 @@ export class Engine {
         }
 
         if (!this.clearHistoryNextFrame) {
-            if (isZoomActive(this.zoomState)) {
-                this.frozenPanShiftX += roundedShiftTexX
-                this.frozenPanShiftY += roundedShiftTexY
-            }
             // Translation shifts the live texture but not the frozen texture,
             // so any non-zero shift desynchronizes them.
             if (hasTranslationShift) {
@@ -5512,7 +5744,7 @@ export class Engine {
             tiledTile?.originX ?? 0,
             tiledTile?.originY ?? 0,
             this.neutralSize,
-            this.expmapProjection ? 2 : this.tiledRotationUnion ? 1 : 0,
+            this.rotationUnionCode(),
             ...(this.expmapProjection?.uniforms ?? new Float32Array(12)),
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
@@ -5553,7 +5785,7 @@ export class Engine {
             tiledTile?.originX ?? 0,
             tiledTile?.originY ?? 0,
             this.neutralSize,
-            this.expmapProjection ? 2 : this.tiledRotationUnion ? 1 : 0,
+            this.rotationUnionCode(),
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
@@ -5611,6 +5843,8 @@ export class Engine {
                 this.mergeUniforms.frozenShiftV,
                 this.mergeUniforms.aspect,
                 this.mergeUniforms.angle,
+                this.mergeUniforms.liveShiftU,
+                this.mergeUniforms.liveShiftV,
             ])
             this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
             const mergeAttachments: GPURenderPassColorAttachment[] = [
@@ -5638,8 +5872,6 @@ export class Engine {
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needMergeSnapshot = false
             this.frozenAligned = true
-            this.frozenPanShiftX = 0
-            this.frozenPanShiftY = 0
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
@@ -5680,12 +5912,6 @@ export class Engine {
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needFreezeSnapshot = false
             this.frozenAligned = true
-            this.frozenPanShiftX = 0
-            this.frozenPanShiftY = 0
-            if (!isZoomActive(this.zoomState)) {
-                this.frozenBaseShiftX = 0
-                this.frozenBaseShiftY = 0
-            }
         }
 
         const makeDisplayAttachments = (
@@ -5697,9 +5923,15 @@ export class Engine {
                 display.geometryView,
                 display.metadataView,
                 ...(display.orbitGradientView ? [display.orbitGradientView] : []),
-            ].map(view => ({
+            ].map((view, index) => ({
                 view,
-                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                // Layer 0 is the iteration count: clear it to the no-data
+                // sentinel. The resolve scissor leaves everything outside the
+                // viewport's box at this value, and 0 reads as an exact interior
+                // texel (step 1): once frozen, a zoom + rotation brought those
+                // texels on screen as solid interior triangles, and they
+                // outranked coarse live data in the min-step pick.
+                clearValue: { r: index === 0 ? -1 : 0, g: 0, b: 0, a: 0 },
                 loadOp,
                 storeOp: 'store' as GPUStoreOp,
             }))
@@ -6167,6 +6399,8 @@ export class Engine {
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
+        this.frozenOffsetCommittedX = this.frozenOffsetX
+        this.frozenOffsetCommittedY = this.frozenOffsetY
 
         // Parameters have been consumed — clear the flag so the engine can go idle
         // once all other conditions (orbit, unfinished pixels, etc.) are satisfied.

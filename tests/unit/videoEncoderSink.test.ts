@@ -57,3 +57,15 @@ describe('hardware-first encoder selection', () => {
     expect(mocks.canEncode).toHaveBeenCalledOnce()
   })
 })
+
+ it('passes identical explicit CBR settings to preflight and the SDR source', async () => {
+   mocks.canEncode.mockResolvedValue(true)
+   const sink = await createVideoSink({ ...settings, codec: 'hevc', encoding: { profile: 'custom', bitrateMbps: 123 }, destination: { kind: 'buffer' } })
+   const probe = mocks.canEncode.mock.calls[0][1]
+   const source = mocks.source.mock.calls[0][0]
+   expect(probe.quality).toEqual(new Quality({ bitrate: 123e6, bitrateMode: 'constant' }))
+   expect(source.quality).toEqual(probe.quality)
+   expect(source.fullCodecString).toBe(probe.fullCodecString)
+   expect(source.latencyMode).toBe('quality')
+   await sink.cancel()
+ })

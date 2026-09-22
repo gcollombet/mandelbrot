@@ -79,9 +79,9 @@ struct Uniforms {
   aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
   aaAnalytic: f32,       // 1 = analytic AA expansion enabled (raw payload bound)
   gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
-  _reserved65: f32,      // was the analytic-AA reach heatmap flag
+  liveShiftU: f32,       // sub-texel displacement of the live grid from the camera (normalized UV)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
-  _reserved67: f32,
+  liveShiftV: f32,
   protrusionPhase: f32,     // wrapped global phase offset [0, 1)
   protrusionSharpness: f32, // global lobe exponent [0.25, 16], default 2
   protrusionGeometryMix: f32, // 0 = iteration lobe, 1 = scalar height warp
@@ -1807,8 +1807,11 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     vec2<f32>(parameters.aaLookupOffsetX, parameters.aaLookupOffsetY) / (2.0 * neutralExtent),
     applyAaGate
   );
+  // liveShift: mid-zoom pans move the camera by fractional texels while the
+  // live texture only moves by whole ones; the remainder is read back here.
   let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf
-              + vec2<f32>(0.5, 0.5) - aaLookupUvOffset;
+              + vec2<f32>(0.5, 0.5) - aaLookupUvOffset
+              - vec2<f32>(parameters.liveShiftU, parameters.liveShiftV);
 
   var liveInBounds: bool;
   if (lzf < 1.0) {

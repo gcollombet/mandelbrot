@@ -206,6 +206,7 @@ export async function runVideoExportToWebm(
       height: output.height,
       fps: output.fps,
       codec: request.codec,
+      encoding: output.encoding,
       dynamicRange: output.dynamicRange,
       hdrQuantizer: output.dynamicRange === 'hdr' ? output.hdrQuantizer : undefined,
       destination: request.destination,

@@ -67,7 +67,7 @@
     "hdrExposure": "Exposition HDR (EV)",
     "hdrExposureAria": "Exposition vidéo HDR",
     "quantizer": "Quantificateur",
-    "hdrNote": "Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR. Qualité constante : 0 = maximale et fichiers très lourds, 10 à 20 = visuellement propre ; le débit cible est ignoré, repli en débit variable si l’encodeur refuse ce mode.",
+    "hdrNote": "Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage, sans repli SDR. La compression suit le profil sélectionné ci-dessus.",
     "resolution": "Résolution",
     "frameRate": "Cadence",
     "codec": "Codec",

@@ -40,7 +40,7 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
   if(!Number.isFinite(request.fps)||request.fps<=0||request.fps>240||!Number.isSafeInteger(total)||total<1||total>10_000_000)throw new Error(t('expmap.ringVideo.limits'))
   const viewAt=(frame:number)=>expmapVideoFrameView(request,frame,total,duration)
   validateExpmapView(m.projection,viewAt(0))
-  await selectVideoEncoder({codec:request.codec,width:request.width,height:request.height,fps:request.fps})
+  await selectVideoEncoder({codec:request.codec,width:request.width,height:request.height,fps:request.fps,encoding:request.encoding})
   // GPU capture + one compressed coverage plane, color encode and transfers.
   const reserve=request.width*request.height*32
   const memory=planShaderMemory(m,request.width,request.height,renderer.budgetBytes,reserve,renderer.gpuDevice?.limits)

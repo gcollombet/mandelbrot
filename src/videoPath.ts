@@ -1,3 +1,4 @@
+import type { VideoEncoding } from './videoEncoding'
 import { canonicalDecimal, canonicalScale } from './expmap/decimal'
 import { t } from './i18n'
 
@@ -47,9 +48,10 @@ export const MIN_MAGNIFICATION_THRESHOLD = 2
 export const MAX_MAGNIFICATION_THRESHOLD = 32
 
 export type VideoOutputSpec = {
+  encoding?: VideoEncoding
   dynamicRange?: 'sdr' | 'hdr'
   hdrExposure?: number
-  /** HDR constant-quality quantizer index; undefined = variable bitrate. */
+  /** HDR quantizer index, used by the advanced quantizer profile. */
   hdrQuantizer?: number
   width: number
   height: number

@@ -50,3 +50,6 @@ target
 
 # Console capture output (src/devCapture.ts, __capture({ save }))
 /captures
+
+# Test bench outputs (bench/scenes.json is versioned)
+/bench/out

@@ -1,3 +1,4 @@
+import { videoBitrate, rateControlledCodec, type VideoEncoding } from './videoEncoding'
 import { supportsHdrEncoder, type VideoDynamicRange } from './hdrVideo'
 import { t } from './i18n'
 // ── Encoding sink for video export ──
@@ -14,11 +15,10 @@ import {
   BufferTarget,
   Mp4OutputFormat,
   Output,
-  QUALITY_HIGH,
+  Quality,
   VideoSample,
   VideoSampleSource,
   canEncodeVideo,
-  type Quality,
   type VideoCodec,
 } from 'mediabunny'
 
@@ -61,9 +61,10 @@ export type VideoEncodeSettings = {
   fps: number
   codec: Mp4Codec
   destination: VideoDestination
+  encoding?: VideoEncoding
   quality?: Quality
   /** HDR only: constant-quality quantizer index (VP9/AV1 0–63, HEVC 0–51).
-   *  Undefined = variable bitrate. Ignored by the SDR path. */
+   *  Used only for the advanced HDR quantizer profile (or legacy callers). */
   hdrQuantizer?: number
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software'
   /** Seconds between key frames. Frequent keyframes ease seeking, cost size. */
@@ -100,7 +101,7 @@ export type VideoEncoderSink = {
 }
 
 export type EncoderPreference = NonNullable<VideoEncodeSettings['hardwareAcceleration']>
-type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'codec' | 'quality' | 'hardwareAcceleration' | 'dynamicRange'> & { fps?: number }
+type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'codec' | 'quality' | 'hardwareAcceleration' | 'dynamicRange' | 'encoding' | 'hdrQuantizer'> & { fps?: number }
 
 /** Prefer hardware, then allow the browser to choose another implementation. */
 export async function selectVideoEncoder(settings: EncoderProbeSettings): Promise<EncoderPreference> {
@@ -113,22 +114,24 @@ export async function selectVideoEncoder(settings: EncoderProbeSettings): Promis
       // Mediabunny forwards framerate at runtime, but omits it from the probe's public type.
       const options = {
         width: settings.width, height: settings.height, framerate: settings.fps,
-        quality: settings.quality ?? QUALITY_HIGH, hardwareAcceleration,
+        fullCodecString: settings.quality ? undefined : rateControlledCodec(settings.codec, settings.width, settings.height, videoBitrate(settings.codec, settings.width, settings.height, settings.fps ?? 30, settings.encoding)),
+        quality: settings.quality ?? new Quality({ bitrate: videoBitrate(settings.codec, settings.width, settings.height, settings.fps ?? 30, settings.encoding), bitrateMode: 'constant' }), hardwareAcceleration,
       }
       if (settings.dynamicRange === 'hdr'
-        ? await supportsHdrEncoder(settings, hardwareAcceleration)
+        ? await supportsHdrEncoder({ ...settings, encoding: settings.encoding ?? { profile: 'high', bitrateMbps: 100 }, quantizer: settings.hdrQuantizer }, hardwareAcceleration)
         : await canEncodeVideo(settings.codec, options)) return hardwareAcceleration
       failures.push(t('video.encoder.configRefused', { preference: hardwareAcceleration }))
     } catch (error) {
       failures.push(t('video.encoder.attemptFailed', { preference: hardwareAcceleration, error: error instanceof Error ? error.message : String(error) }))
     }
   }
+  const rateHint = settings.encoding?.profile === 'quantizer' || settings.quality ? '' : ' ' + t('video.encoding.refused', { bitrate: videoBitrate(settings.codec, settings.width, settings.height, settings.fps ?? 30, settings.encoding) / 1e6 })
   throw new Error(t('video.encoder.unavailable', {
     codec: settings.codec.toUpperCase(), width: settings.width, height: settings.height,
     fps: settings.fps === undefined ? '' : t('video.encoder.atFps', { fps: settings.fps }),
     evenHint: settings.codec === 'avc' && (settings.width % 2 || settings.height % 2) ? t('video.encoder.avcEvenDimensions') : '',
     failures: failures.join(' ; '),
-  }))
+  }) + rateHint)
 }
 
 /** The same selection policy is used by the UI, preflight, and actual encoder. */
@@ -138,10 +141,12 @@ export async function probeMp4Codecs(
   fps?: number,
   onSelected?: (codec: Mp4Codec, preference: EncoderPreference) => void,
   dynamicRange: VideoDynamicRange = 'sdr',
+  encoding?: VideoEncoding,
+  hdrQuantizer?: number,
 ): Promise<Record<Mp4Codec, boolean>> {
   const entries = await Promise.all(MP4_CODECS.map(async ({ value }) => {
     try {
-      const preference = await selectVideoEncoder({ codec: value, width, height, fps, dynamicRange })
+      const preference = await selectVideoEncoder({ codec: value, width, height, fps, dynamicRange, encoding, hdrQuantizer })
       onSelected?.(value, preference)
       return [value, true] as const
     } catch { return [value, false] as const }
@@ -180,8 +185,10 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
 
   const source = new VideoSampleSource({
     codec,
-    quality: settings.quality ?? QUALITY_HIGH,
+    fullCodecString: settings.quality ? undefined : rateControlledCodec(codec, settings.width, settings.height, videoBitrate(codec, settings.width, settings.height, settings.fps, settings.encoding)),
+    quality: settings.quality ?? new Quality({ bitrate: videoBitrate(settings.codec, settings.width, settings.height, settings.fps ?? 30, settings.encoding), bitrateMode: 'constant' }),
     hardwareAcceleration,
+    latencyMode: 'quality',
     keyFrameInterval: settings.keyFrameIntervalSeconds ?? 2,
     // Every frame comes from the same fixed-size capture target; a size change
     // would mean the capture chain was reallocated mid-export, which should

@@ -91,6 +91,8 @@ type OrbitChunkResponse = {
     referenceCx: string
     referenceCy: string
     orbit: Float32Array<ArrayBuffer>
+    /** Worker time spent computing this reference's orbit so far (ms). */
+    computeMs: number
 }
 
 type TableBuildStage = 'coefficients' | 'transfer'
@@ -119,6 +121,8 @@ type BlaReadyResponse = {
     // the reset/setter messages). The Engine drops mismatches: builds that were
     // in flight when a parameter change was posted.
     tableGeneration: number
+    /** Worker time spent building this table (coefficients + copy), ms. */
+    buildMs: number
 }
 
 type ErrorResponse = {
@@ -174,7 +178,16 @@ let needsReferenceValidation = false
 let refCounter = 0
 let currentRefId = 0
 
-const ORBIT_CHUNK_SIZE = 50
+// Orbit chunks are sized by time, not iteration count: the per-iteration cost
+// varies with the precision budget and along the orbit (descending profile), and a
+// fixed 50-iteration chunk left the loop spending most of its wall time yielding.
+// ~8 ms of compute per chunk keeps reset/updateView preemption under a frame while
+// the yield overhead stays a few percent. The first chunk of every job is small so
+// the first orbit prefix reaches the GPU quickly.
+const ORBIT_CHUNK_BUDGET_MS = 8
+const ORBIT_CHUNK_MIN = 50
+const ORBIT_CHUNK_MAX = 1 << 16
+let orbitChunkSize = ORBIT_CHUNK_MIN
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
 // raises maxIter) finds the orbit already long enough — no transient black frame while it
 // catches up. Capped at the GPU reference buffer's step capacity (mirrors Engine's 10M-step buffer).
@@ -187,8 +200,18 @@ function postResponse(message: ReferenceWorkerResponse, transfer?: Transferable[
     ctx.postMessage(message, transfer ?? [])
 }
 
+// Yield through a MessageChannel rather than setTimeout(0): nested timers are
+// clamped to ≥ 4 ms, which on a 36k-iteration orbit cost several seconds of idle
+// wall time. A port message is a plain task queued behind any message the Engine
+// already posted, so reset/updateView still preempt a running job at every yield.
+const yieldChannel = new MessageChannel()
+const pendingYields: Array<() => void> = []
+yieldChannel.port1.onmessage = () => pendingYields.shift()?.()
 function yieldToWorkerEvents(): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, 0))
+    return new Promise(resolve => {
+        pendingYields.push(resolve)
+        yieldChannel.port2.postMessage(null)
+    })
 }
 
 function postError(jobId: number, error: unknown) {
@@ -220,6 +243,7 @@ function resetNavigator(message: ResetMessage) {
     // re-enters this reset path, so the orbit is always rebuilt at the current budget.
     navigator.set_precision_budget(message.precisionBudget)
     activeJobId = message.jobId
+    orbitChunkSize = ORBIT_CHUNK_MIN
     lastBlaMaxIterations = 0
     tableGeneration = message.tableGeneration ?? 0
     targetMaxIterations = message.maxIterations
@@ -294,6 +318,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     }
     postTableProgress(0, 'coefficients')
     assertBlaStepLayout()
+    const buildStart = performance.now()
     const info = navigator.compute_bla_reference_ptr(tableMaxIterations)
     postTableProgress(0.9, 'transfer')
     const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * BLA_STEP_FLOATS)
@@ -303,6 +328,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const levels: Uint32Array<ArrayBuffer> = new Uint32Array(levelsSource.length)
     levels.set(levelsSource)
     lastBlaMaxIterations = tableMaxIterations
+    const buildMs = performance.now() - buildStart
     postResponse({
         type: 'blaReady',
         jobId,
@@ -312,21 +338,39 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         levels,
         levelCount: info.level_count,
         tableGeneration,
+        buildMs,
     }, [steps.buffer, levels.buffer])
 }
 
+/** Worker compute time of the current reference orbit (reset at each restart). */
+let refComputeMs = 0
+
 function computeAndPostOrbitChunk(jobId: number, maxIterations: number, orbitTarget: number): number {
     if (!navigator) return 0
-    const info = navigator.compute_reference_orbit_chunk(ORBIT_CHUNK_SIZE, orbitTarget)
+    const chunkStart = performance.now()
+    const info = navigator.compute_reference_orbit_chunk(orbitChunkSize, orbitTarget)
+    const orbitMs = performance.now() - chunkStart
     needsReferenceValidation = false
     const orbit = copyOrbitSlice(info.ptr, info.offset, info.count)
     const [referenceCx, referenceCy] = navigator.get_reference_params()
+    // Retarget the next chunk on the measured per-iteration cost, only from full
+    // chunks (a chunk truncated by orbitTarget or an escape says nothing about the rate).
+    // Growth is capped at ×4 per chunk so one noisy fast sample cannot overshoot.
+    const computed = info.count - info.offset
+    if (computed >= orbitChunkSize && orbitMs > 0.05) {
+        const ideal = orbitChunkSize * ORBIT_CHUNK_BUDGET_MS / orbitMs
+        orbitChunkSize = Math.round(Math.min(ORBIT_CHUNK_MAX, orbitChunkSize * 4, Math.max(ORBIT_CHUNK_MIN, ideal)))
+    } else if (computed >= orbitChunkSize) {
+        orbitChunkSize = Math.min(ORBIT_CHUNK_MAX, orbitChunkSize * 4)
+    }
     if (info.offset === 0) {
         currentRefId = ++refCounter
         lastBlaMaxIterations = 0
+        refComputeMs = 0
         console.log('[REF worker] orbit (re)start refId=', currentRefId, 'ref=', referenceCx.slice(0, 14))
     }
     const availableIter = Math.max(0, info.count - 1)
+    refComputeMs += performance.now() - chunkStart
     postResponse({
         type: 'orbitChunk',
         jobId,
@@ -337,6 +381,7 @@ function computeAndPostOrbitChunk(jobId: number, maxIterations: number, orbitTar
         referenceCx,
         referenceCy,
         orbit,
+        computeMs: refComputeMs,
     }, [orbit.buffer])
     return availableIter
 }

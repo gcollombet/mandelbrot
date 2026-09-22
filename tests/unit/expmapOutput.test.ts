@@ -10,7 +10,7 @@ describe('ExpMap output preferences',()=>{
     vi.stubGlobal('localStorage',{getItem:()=>text,setItem:(_key:string,value:string)=>{text=value}})
     expect(loadExpmapOutput()).toMatchObject({width:3840,height:2160,fps:60,codec:'auto'})
     const custom={width:1920,height:1080,fps:24,codec:'hevc' as const,maxSamples:64,sampleDistribution:'r2' as const}
-    saveExpmapOutput(custom);expect(loadExpmapOutput()).toEqual(custom)
+    saveExpmapOutput(custom);expect(loadExpmapOutput()).toEqual({ ...custom, encoding: { profile: 'high', bitrateMbps: 100 } })
     text=JSON.stringify({width:NaN,height:-1,fps:999,codec:'bad',maxSamples:3})
     expect(loadExpmapOutput()).toMatchObject({width:3840,height:2160,fps:60,codec:'auto',maxSamples:16})
   })

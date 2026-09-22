@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "size": 512,
+  "about": "Banc d'essai fixe des modes d'itération : voir src/devBench.ts. Ne jamais modifier une scène en place : en ajouter une nouvelle (nouveau GUID).",
+  "look": {
+    "angle": 0,
+    "antialiasLevel": 1,
+    "aaAuto": false,
+    "aaAdaptive": false,
+    "dprMultiplier": 1,
+    "zoomMagnificationThreshold": 16,
+    "palettePeriod": 256,
+    "paletteOffset": 0,
+    "paletteMirror": false,
+    "iterationPaletteCurve": "linear",
+    "interpolationMode": "lab",
+    "colorStops": [
+      {
+        "color": "#0b1e5b",
+        "position": 0,
+        "reliefGain": 0,
+        "zebra": 0
+      },
+      {
+        "color": "#f2f2e6",
+        "position": 0.35,
+        "reliefGain": 0,
+        "zebra": 0
+      },
+      {
+        "color": "#e08a1e",
+        "position": 0.6,
+        "reliefGain": 0,
+        "zebra": 0
+      },
+      {
+        "color": "#5a0f2e",
+        "position": 0.85,
+        "reliefGain": 0,
+        "zebra": 0
+      },
+      {
+        "color": "#0b1e5b",
+        "position": 1,
+        "reliefGain": 0,
+        "zebra": 0
+      }
+    ],
+    "microBumpStrength": 0,
+    "displacementAmount": 0,
+    "tessellationLevel": 0,
+    "ambientOcclusionStrength": 0,
+    "localShadowStrength": 0,
+    "varnishStrength": 0,
+    "orbitTrapStrength": 0,
+    "phaseColoringStrength": 0,
+    "activateAnimate": false,
+    "debugShading": false
+  },
+  "scenes": [
+    {
+      "id": "2db5532d-dbfd-497a-8e19-1eb7710c542d",
+      "name": "seahorse-6",
+      "regime": "shallow · frontière dense",
+      "sourcePreset": "d49805ae-7fe1-4157-9a22-27bdf4b84720",
+      "cx": "-0.74317041988734533194",
+      "cy": "0.14345633280522154638",
+      "scale": "0.00000590833990556250257337",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.3,
+      "maxIterations": 5214,
+      "precisionBudget": "1e-30",
+      "notes": "Vallée des hippocampes, spirales ; cas facile, contrôle de base."
+    },
+    {
+      "id": "6bb055fa-6389-4260-aad2-7f3d780d8224",
+      "name": "minibrot-10",
+      "regime": "shallow · intérieur minibrot",
+      "sourcePreset": "0d4554f0-35e6-4f4a-953a-ff2dff2f44b1",
+      "cx": "-1.749958884857760505663141",
+      "cy": "-0.000000000004607867161192",
+      "scale": "0.000000000442389699776086620356",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.5,
+      "maxIterations": 15540,
+      "precisionBudget": "1e-30",
+      "notes": "Minibrot près de −1,75 : classification intérieur/extérieur."
+    },
+    {
+      "id": "5eeef64d-06ce-4ebb-9cd9-a2df943453d9",
+      "name": "false-escape-14",
+      "regime": "shallow · régression fausse échappée",
+      "sourcePreset": "1c27e36d-9487-4a91-a4a3-7587103d86b8",
+      "cx": "-1.7499588855044830573694467103",
+      "cy": "-0.0000000002609120196733691673",
+      "scale": "0.0000000000000257066341663212077497",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.8,
+      "maxIterations": 36119,
+      "precisionBudget": "1e-30",
+      "notes": "Scène du bug de borne de boucle (rebasage au-delà de maxIter, 2026-09-22) ; ~36k itérations."
+    },
+    {
+      "id": "0b0d152f-6081-4bf6-b297-bb2d8f335cb7",
+      "name": "egypt-17",
+      "regime": "shallow · antenne −1,977, périodes longues",
+      "sourcePreset": "14d443d3-82e4-4e17-88bb-13f1eae4e8d5",
+      "cx": "-1.9771846174955660463474624630827",
+      "cy": "0.0000056766680726663394717987511",
+      "scale": "0.0000000000000000385339047622699357954",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.3,
+      "maxIterations": 16361,
+      "precisionBudget": "1e-30",
+      "notes": "Preset « Egypt » : motifs fins emboîtés, beaucoup de rebasages."
+    },
+    {
+      "id": "a00348dd-f18e-48e3-bba5-d2d9209561db",
+      "name": "difficile-35",
+      "regime": "deep · floatexp juste sous la plage f32",
+      "sourcePreset": "381b9666-ab67-40a4-a34f-c3bd5bf9df7b",
+      "cx": "-1.74999417926155007604416092006233463860591124932570",
+      "cy": "0.00000000000000000142386904494904747246250857445951",
+      "scale": "0.0000000000000000000000000000000000089789113480157272",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.3,
+      "maxIterations": 34930,
+      "precisionBudget": "1e-56",
+      "notes": "Preset « Difficile » : dc sous le plus petit f32 normal ⇒ chemin floatexp."
+    },
+    {
+      "id": "ef7432b8-ff5e-48d6-a3bd-e4a44c769432",
+      "name": "deep-53",
+      "regime": "deep · floatexp profond, frontière dense",
+      "sourcePreset": "1c30ff87-9412-452c-9d5f-869f5f6d06ca",
+      "cx": "-1.97718468222559097474603256497722622960934219239757276598535830365382",
+      "cy": "-0.00000214816732219223426169897132518323375753483954310833614692772636",
+      "scale": "0.00000000000000000000000000000000000000000000000000000137599457669306603119",
+      "mu": 1000,
+      "maxIterationMultiplier": 0.2,
+      "maxIterations": 35788,
+      "precisionBudget": "1e-75",
+      "notes": "Famille « Parcours Boule » (−1,97718468…), e-53 : chemin floatexp avec ~10 % d'intérieur. Remplace deep-132 (e-132 entièrement intérieur à 44k itérations, inutilisable)."
+    }
+  ]
+}
