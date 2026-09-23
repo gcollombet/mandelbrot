@@ -12,6 +12,12 @@ alias hcol = f32;
 // Global height/phase coloring, zebra, traps, grading and analytic AA work in both.
 override ENABLE_SURFACE_EFFECTS: bool = true;
 override HDR_OUTPUT: bool = false;
+// false when no palette path is bound: apply_palette_path folds to a no-op, so
+// the compiler sees `parameters` as the uniform copy and pathA == pathB == 0
+// (one palette/tile/sky layer, uniform branches). Measured ~×1.9 on this pass.
+// Defaults to true so every other consumer of this module (expmap, previews)
+// keeps the general path.
+override ENABLE_PALETTE_PATH: bool = true;
 
 struct Uniforms {
   palettePeriod: f32,
@@ -189,6 +195,7 @@ fn path_radial_depth(base: f32, radius: f32) -> f32 {
 }
 fn apply_palette_path(depthIn: f32) {
   pathA = 0u; pathB = 0u; pathT = 0.0;
+  if (!ENABLE_PALETTE_PATH) { return; }
   let count = u32(palettePath.config.x);
   if (count < 2u) { return; }
   let first = path_value(1u, 0u); let last = path_value(count, 0u);
@@ -630,11 +637,11 @@ fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>
   var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
   var levelsA = f32(textureNumLevels(skyboxTex));
   var levelsB = levelsA;
-  if (textureNumLayers(skyboxTex) > 1u && palettePath.config.x < 2.0) {
+  if (textureNumLayers(skyboxTex) > 1u && (!ENABLE_PALETTE_PATH || palettePath.config.x < 2.0)) {
     levelsA = floor(parameters.skyboxTransitionLevels / 32.0);
     levelsB = parameters.skyboxTransitionLevels - levelsA * 32.0;
   }
-  if (palettePath.config.x >= 2.0) {
+  if (ENABLE_PALETTE_PATH && palettePath.config.x >= 2.0) {
     layerA = i32(path_value(pathA, 3u)); layerB = i32(path_value(pathB, 3u)); blend = pathT;
     levelsA = path_value(pathA, 32u); levelsB = path_value(pathB, 32u);
   }
@@ -666,7 +673,7 @@ fn tile_tessellation(tex_: texture_2d_array<f32>, v: f32, dist: f32, repeat: f32
   let local = t - 2.0 * floor(t * 0.5);
   if (textureNumLayers(tex_) < 2u) { return sample_tile(tex_, local, 0, ddx, ddy); }
   var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
-  if (palettePath.config.x >= 2.0) { layerA = i32(path_value(pathA, 2u)); layerB = i32(path_value(pathB, 2u)); blend = pathT; }
+  if (ENABLE_PALETTE_PATH && palettePath.config.x >= 2.0) { layerA = i32(path_value(pathA, 2u)); layerB = i32(path_value(pathB, 2u)); blend = pathT; }
   let a = sample_tile(tex_, local, layerA, ddx, ddy);
   if (blend <= 0.0 || layerA == layerB) { return a; }
   let b = sample_tile(tex_, local, layerB, ddx, ddy);
@@ -1059,8 +1066,12 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
   let distribution = ggx_distribution(nDotH, roughness);
   let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
   let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
-  let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
-  let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
+  // The anisotropic lobe weighs exactly 0 on isotropic materials: skip it.
+  var specularLobe = specularTerm;
+  if (anisotropy > 0.0) {
+    let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
+    specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
+  }
   let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
   let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
   let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
@@ -1116,6 +1127,8 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
   }
 
   var envColor = vec3<f32>(0.0);
+  // Environment sample kept for the clear coat (see below).
+  var environmentSky = vec3<f32>(0.0);
   if (fx.wSkybox > 0.001) {
     // Anisotropic environment lookup, historical form: the rendered height
     // gradient is tilted along the brushing flow by a fixed slope of
@@ -1132,6 +1145,7 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
       roughness,
       vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
     );
+    environmentSky = skyboxColor;
     let environmentFresnel = fresnel_schlick_roughness(nDotV, f0, roughness);
     let neutralEnvironmentFresnel = vec3<f32>(luminance(environmentFresnel));
     let environmentTint = clamp(metalResponse * metallic, 0.0, 1.0);
@@ -1162,13 +1176,23 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
     let coatSpec = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * (0.30 + 0.85 * varnish);
     var coatEnvironment = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
-      let coatReflectDir = reflect(-viewDir, normal);
-      let coatSky = rough_skybox_reflection(
-        uv_screen,
-        coatReflectDir,
-        0.05,
-        vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
-      );
+      // Isotropic material: the environment's bent normal IS the normal, so
+      // the coat reads the same direction. At roughness <= 0.05 the two mip
+      // floors (roughness × (levels − 4)) differ by a fraction of a level,
+      // mostly under the screen footprint: reuse the environment read
+      // (~0.3 ms on scattered reflections; measured ≤ 2/255 on 0.2 % of
+      // pixels). The condition only depends on the material, never on the
+      // footprint, so quads stay coherent for the derivatives below.
+      var coatSky = environmentSky;
+      if (anisotropy > 0.0 || roughness > 0.05) {
+        let coatReflectDir = reflect(-viewDir, normal);
+        coatSky = rough_skybox_reflection(
+          uv_screen,
+          coatReflectDir,
+          0.05,
+          vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
+        );
+      }
       coatEnvironment = coatSky * fresnel_schlick_roughness(nDotV, vec3<f32>(0.025), 0.05) * fx.wSkybox * specular_occlusion(nDotV, ao, 0.05);
     }
     // Wet look: internal reflections darken and saturate, hue untouched.
@@ -1759,7 +1783,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   parameters = baseParameters;
   let screenLocal = vec2<f32>((fragCoord.x * 2.0 - 1.0) * parameters.aspect, fragCoord.y * 2.0 - 1.0);
   var depth = palettePath.geometry.x;
-  if (palettePath.config.y > 1.5) { depth = path_radial_depth(depth, length(screenLocal)); }
+  if (ENABLE_PALETTE_PATH && palettePath.config.y > 1.5) { depth = path_radial_depth(depth, length(screenLocal)); }
   apply_palette_path(depth);
   let uv_screen = fragCoord;
 

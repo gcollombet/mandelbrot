@@ -144,6 +144,8 @@ interface ColorPipelines {
     accum: GPURenderPipeline
 }
 
+interface ColorPipelineFamily { full: ColorPipelines, simple: ColorPipelines }
+
 interface GpuSetupProfile {
     raiseLimits: boolean   // request the adapter's maxBufferSize & co. instead of WebGPU defaults
     timestamps: boolean    // request 'timestamp-query' when the adapter offers it
@@ -610,7 +612,7 @@ export class Engine {
     private hdrExport = false
     private get hdrRendering() { return this.videoExportActive ? this.hdrExport : this.hdrDisplay }
     private get canvasFormat(): GPUTextureFormat { return this.hdrRendering ? 'rgba16float' : this.format }
-    private hdrColorPipelines?: { full: ColorPipelines, simple: ColorPipelines }
+    private hdrColorPipelines?: ColorPipelineFamily
     private presentationPipelines?: {
         sdr: GPURenderPipeline; hdr: GPURenderPipeline
         rotationSdr: GPURenderPipeline; rotationHdr: GPURenderPipeline
@@ -751,7 +753,11 @@ export class Engine {
     bindGroupResolve?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
-    private colorPipelines?: { full: ColorPipelines, simple: ColorPipelines }
+    private colorPipelines?: ColorPipelineFamily
+    /** Palette-path variants (ENABLE_PALETTE_PATH), compiled on first path use. */
+    private pathColorPipelines?: { sdr: ColorPipelineFamily, hdr: ColorPipelineFamily }
+    private pathColorPipelinesPromise?: Promise<void>
+    private colorPipelineSource?: { device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout }
 
     // ── Settled non-AA rotation resolve ───────────────────────────────
     /** Existing color shader rendered once into a scene-aligned linear cache. */
@@ -1894,6 +1900,9 @@ export class Engine {
         this.presentationPipelines = undefined
         this.colorPipelines = undefined
         this.hdrColorPipelines = undefined
+        this.pathColorPipelines = undefined
+        this.pathColorPipelinesPromise = undefined
+        this.colorPipelineSource = undefined
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
         this.configureOutput()
@@ -2138,7 +2147,10 @@ export class Engine {
 
         // All color variants share a layout and the same authoritative shader.
         // Compile off the render path, including the simple palette family.
+        // These are the palette-path-free variants; the path ones compile on
+        // first use (ensurePathColorPipelines).
         const colorLayout = device.createPipelineLayout({ bindGroupLayouts: [layoutColor] })
+        this.colorPipelineSource = { device, module: moduleColor, layout: colorLayout }
         const [full, simple, hdrFull, hdrSimple] = await Promise.all([
             this.createColorPipelines(device, moduleColor, colorLayout, true),
             this.createColorPipelines(device, moduleColor, colorLayout, false),
@@ -2148,6 +2160,10 @@ export class Engine {
         if (this.device !== device || this.destroyed) return
         this.colorPipelines = { full, simple }
         this.hdrColorPipelines = { full: hdrFull, simple: hdrSimple }
+        // A path prepared before the pipelines existed must not fall back to
+        // the path-free variants (they ignore the bound path entirely).
+        if (this.palettePathGpu) await this.ensurePathColorPipelines()
+        if (this.device !== device || this.destroyed) return
         this.selectColorPipelines(true)
 
         // ── In-place compute pipeline (fused brush+mandelbrot+count on A) ──
@@ -2552,14 +2568,19 @@ export class Engine {
         return compilation
     }
 
-    private async createColorPipelines(device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout, surfaceEffects: boolean, hdr = false): Promise<ColorPipelines> {
+    private async createColorPipelines(device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout, surfaceEffects: boolean, hdr = false, palettePath = false): Promise<ColorPipelines> {
+        const constants = {
+            ENABLE_SURFACE_EFFECTS: surfaceEffects ? 1 : 0,
+            HDR_OUTPUT: hdr ? 1 : 0,
+            ENABLE_PALETTE_PATH: palettePath ? 1 : 0,
+        }
         const create = (entryPoint: string, target: GPUColorTargetState, rotation = false) =>
             device.createRenderPipelineAsync({
                 layout,
                 vertex: { module, entryPoint: rotation ? 'vs_rotation_cache' : 'vs_main' },
-                fragment: { module, entryPoint, constants: { ENABLE_SURFACE_EFFECTS: surfaceEffects ? 1 : 0, HDR_OUTPUT: hdr ? 1 : 0 }, targets: [target] },
+                fragment: { module, entryPoint, constants, targets: [target] },
                 primitive: { topology: 'triangle-list' },
-                label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}, ${entryPoint}${target.blend ? ', accum' : ''})`,
+                label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}${palettePath ? ', path' : ''}, ${entryPoint}${target.blend ? ', accum' : ''})`,
             })
         const [direct, rotation, clear, accum] = await Promise.all([
             create('fs_main_direct', { format: hdr ? 'rgba16float' : this.format }),
@@ -2576,8 +2597,38 @@ export class Engine {
         return { direct, rotation, clear, accum }
     }
 
+    /**
+     * Compile the ENABLE_PALETTE_PATH variants once. Awaited before a palette
+     * path is bound, so selection never has to fall back to the path-free
+     * pipelines while a path is active.
+     */
+    private ensurePathColorPipelines(): Promise<void> {
+        const source = this.colorPipelineSource
+        if (!source) return Promise.resolve()
+        this.pathColorPipelinesPromise ??= (async () => {
+            const { device, module, layout } = source
+            const [full, simple, hdrFull, hdrSimple] = await Promise.all([
+                this.createColorPipelines(device, module, layout, true, false, true),
+                this.createColorPipelines(device, module, layout, false, false, true),
+                this.createColorPipelines(device, module, layout, true, true, true),
+                this.createColorPipelines(device, module, layout, false, true, true),
+            ])
+            if (this.device !== device || this.destroyed) return
+            this.pathColorPipelines = { sdr: { full, simple }, hdr: { full: hdrFull, simple: hdrSimple } }
+        })()
+        return this.pathColorPipelinesPromise
+    }
+
+    private colorPipelineFamily(hdr: boolean): ColorPipelineFamily | undefined {
+        if (this.palettePathGpu) {
+            const path = this.pathColorPipelines
+            return path ? (hdr ? path.hdr : path.sdr) : undefined
+        }
+        return hdr ? this.hdrColorPipelines : this.colorPipelines
+    }
+
     private selectColorPipelines(surfaceEffects: boolean): void {
-        const family = this.hdrRendering ? this.hdrColorPipelines : this.colorPipelines
+        const family = this.colorPipelineFamily(this.hdrRendering)
         const pipelines = surfaceEffects ? family?.full : family?.simple
         if (!pipelines) return
         this.pipelineColor = pipelines.direct
@@ -6583,7 +6634,7 @@ export class Engine {
                       storeOp: 'store',
                     }]
                   });
-                  renderPass.setPipeline(this.colorPipelines!.full.direct);
+                  renderPass.setPipeline((this.colorPipelineFamily(false) ?? this.colorPipelines!).full.direct);
                   renderPass.setBindGroup(0, colorBindGroup!);
                   renderPass.draw(6, 1, 0, 0);
                   renderPass.end();
@@ -6945,6 +6996,8 @@ export class Engine {
                 }
                 const data = [base, ...path.stops.map(s => s.appearance)].map(p => float32ArrayToFloat16(new Palette(p.colorStops, p.interpolationMode).generateTexture().data))
                 prepared = new GpuPalettePath(this.device, path, base, data, textures, assets.indices)
+                await this.ensurePathColorPipelines()
+                if (generation !== this.palettePathGeneration || this.destroyed) { prepared.destroy(); return }
             } finally { assets.dispose(); textures.forEach(t => t.destroy()) }
             this.palettePathGpu?.destroy(); this.palettePathGpu = prepared
             this.palettePathSignature = signature
