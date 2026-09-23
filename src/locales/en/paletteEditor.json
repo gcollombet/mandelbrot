@@ -31,7 +31,11 @@
     "metalReflectance": "Metal reflectance",
     "metalEnvironmentTint": "Environment tint",
     "tessellation": "Image blend",
-    "webcam": "Webcam blend"
+    "webcam": "Webcam blend",
+    "diffraction": "Diffraction",
+    "cloisonne": "Cloisonné",
+    "cloisonneRays": "Cloisonné rays",
+    "translucency": "Translucency"
   },
   "descs": {
     "palette": "Strength of this point's base color in the gradient",
@@ -55,7 +59,11 @@
     "reliefGain": "Multiplies the analytic relief for this material; 1 is neutral, independent of the global Relief depth",
     "protrusion": "Accentuates the relief near smoothed iteration crossings; 0 is neutral",
     "metalReflectance": "Multiplies the metal reflectance without directly changing its tint",
-    "metalEnvironmentTint": "Blends between the legacy perceptual metal response (0) and a linear, colored, roughness-compensated physical response (1)"
+    "metalEnvironmentTint": "Blends between the legacy perceptual metal response (0) and a linear, colored, roughness-compensated physical response (1)",
+    "diffraction": "Holographic grating engraved along the iteration bands: a rainbow that turns with the light",
+    "cloisonne": "Raised gold wires on band and external-ray boundaries, glossy enamel inside the cells",
+    "cloisonneRays": "Number of external rays splitting the cells (2^n); 0 = rings only",
+    "translucency": "Light passes through the thin matter near the set (jade, wax), shadow side included"
   },
   "presets": {
     "title": "Point presets",

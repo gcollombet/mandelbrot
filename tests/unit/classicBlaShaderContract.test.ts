@@ -31,7 +31,9 @@ describe('affine BLA shader safety contract', () => {
 
   it('uses outward-rounded classic BLA radius evaluation in both kernels', () => {
     expect(shader).toContain('fn bla_affine_radius_log2(block: BlaStep, log2Dc: f32, log2Dz: f32) -> f32');
-    expect(shader.match(/let radiusLog2 = bla_affine_radius_log2\(bla, (?:log2Dc, log2Dz|log2_dc, log2_dz)\);/g)).toHaveLength(2);
+    // Both paths select their block through the one monotone level walk.
+    expect(shader.match(/let radiusLog2 = bla_affine_radius_log2\(bla, log2Dc, log2Dz\);/g)).toHaveLength(1);
+    expect(shader.match(/bla_accepted_level\(\*ref_i, /g)).toHaveLength(2);
   });
 
   it('never constructs a non-finite f32 constant in WGSL', () => {

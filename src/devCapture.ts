@@ -116,7 +116,7 @@ async function waitForReference(engine: Engine, mode: ApproximationMode, timeout
     for (;;) {
         const s = engineState(engine)
         const orbitReady = !s.pendingRefActive && s.currentReferenceAvailableIter >= s.currentMaxIterations
-        const tableReady = mode !== 'bla'
+        const tableReady = mode === 'perturbation'
             || (s.currentBlaLevelCount > 0 && s.referenceBlaReadyMaxIterations >= s.currentMaxIterations)
         if (orbitReady && tableReady) return
         if (performance.now() - t0 > timeoutMs) {

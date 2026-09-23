@@ -43,7 +43,10 @@ describe('analytic AA approximation-mode eligibility', () => {
     expect(brush).toContain('snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS)')
     expect(brush).toMatch(/try_apply_bla\([^;]+&sndM, &sndS\)/)
     expect(brush).toMatch(/try_apply_bla_deep\([^;]+&sndM, &sndS\)/)
-    // z″ ← A·z″ through every accepted affine block, on both paths.
-    expect(brush.match(/apply_affine_derivatives\(/g)).toHaveLength(3)
+    // z″ ← A·z″ through every accepted affine block, on both paths; Padé
+    // blocks add their curvature on top of the same update (definition +
+    // two affine call sites + the one inside apply_pade_derivatives).
+    expect(brush.match(/apply_affine_derivatives\(/g)).toHaveLength(4)
+    expect(brush.match(/apply_pade_derivatives\(/g)).toHaveLength(3)
   })
 })

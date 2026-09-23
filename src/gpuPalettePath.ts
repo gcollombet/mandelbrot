@@ -1,5 +1,6 @@
 import { t } from './i18n'
 import { packTextureLayers } from './mipmaps'
+import { PALETTE_TEXTURE_ROWS } from './Palette'
 import { PALETTE_PATH_TEXTURE_BUDGET, PATH_NODE_FLOATS, pathNodeValues, type PalettePath, type PathAppearance } from './palettePath'
 
 export class GpuPalettePath {
@@ -15,13 +16,13 @@ export class GpuPalettePath {
         this.stops = [base, ...path.stops.map(s => s.appearance)].flatMap(a => a.colorStops)
         const tileIds = [...new Set(indices.map(i => i.tile))], skyIds = [...new Set(indices.map(i => i.sky))]
         // Conservative bound including all mip levels and all endpoint palettes.
-        const bytes = path.textureSize ** 2 * 4 * 4 / 3 * (tileIds.length + skyIds.length) + data.length * 4096 * 7 * 8
+        const bytes = path.textureSize ** 2 * 4 * 4 / 3 * (tileIds.length + skyIds.length) + data.length * 4096 * PALETTE_TEXTURE_ROWS * 8
         if (bytes > PALETTE_PATH_TEXTURE_BUDGET) throw new Error(t('palettes.budgetExceeded'))
         try {
         this.tile = packTextureLayers(device, tileIds.map(i => images[i]), path.textureSize)
         this.sky = packTextureLayers(device, skyIds.map(i => images[i]), path.textureSize)
-        this.palettes = device.createTexture({ label: 'Palette path layers', size: [4096, 7, data.length], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST })
-        data.forEach((values, layer) => device.queue.writeTexture({ texture: this.palettes, origin: [0, 0, layer] }, values.buffer as ArrayBuffer, { bytesPerRow: 4096 * 8 }, [4096, 7]))
+        this.palettes = device.createTexture({ label: 'Palette path layers', size: [4096, PALETTE_TEXTURE_ROWS, data.length], format: 'rgba16float', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST })
+        data.forEach((values, layer) => device.queue.writeTexture({ texture: this.palettes, origin: [0, 0, layer] }, values.buffer as ArrayBuffer, { bytesPerRow: 4096 * 8 }, [4096, PALETTE_TEXTURE_ROWS]))
         const metadata = new Float32Array(12 + PATH_NODE_FLOATS * data.length)
         const nodes = [{ id: 'manual', magnitude: 0, name: 'Manuelle', curve: 'linear' as const, appearance: base }, ...path.stops]
         nodes.forEach((stop, i) => metadata.set(pathNodeValues({ ...stop, magnitude: stop.magnitude - path.stops[0].magnitude }, tileIds.indexOf(indices[i].tile), skyIds.indexOf(indices[i].sky), this.sky.mipLevelCount), 12 + i * PATH_NODE_FLOATS))

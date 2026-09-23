@@ -21,7 +21,7 @@ import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {generateMipmaps, mipLevelCountFor, packTextureLayers, TEXTURE_MAX_ANISOTROPY} from './mipmaps'
-import {Palette} from './Palette.ts'
+import {Palette, PALETTE_TEXTURE_ROWS} from './Palette.ts'
 import {needsSurfaceColorPipeline} from './colorPipelineFeatures'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString, log10FromDecimalString} from './floatexp'
 import type {ZoomState} from './zoomState'
@@ -129,7 +129,8 @@ const BLA_LINEARIZATION_EPSILON = 1e-6
 // Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
 // (#[repr(C)] of 8 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta — and the WGSL BlaStep of mandelbrot_brush.wgsl.
-const BLA_STEP_FLOATS = 8
+const BLA_STEP_FLOATS = 11
+const BLA_LEVEL_U32S = 5 // mirrors the Rust #[repr(C)] BlaLevel
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
@@ -478,23 +479,21 @@ export type RenderOptions = {
     textureMappingMode?: number,
 }
 
-export type ApproximationMode = 'perturbation' | 'bla'
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade'
 
-/** Folds a stored mode name onto the two the engine implements. Presets saved
- *  by earlier builds may carry the retired tiers (auto, pade, jet, mobius):
- *  they run affine BLA. */
+/** Folds a stored mode name onto the three the engine implements. A missing
+ *  mode or a retired tier from an earlier build (auto, jet, mobius) runs the
+ *  default, Padé; an explicit 'bla' stays affine BLA. */
 export function kernelApproximationMode(mode: string | undefined): ApproximationMode {
-    return mode === 'perturbation' ? 'perturbation' : 'bla'
+    return mode === 'perturbation' || mode === 'bla' ? mode : 'pade'
 }
 
-function readNavigatorApproximationMode(navigator: { get_approximation_mode(): number, use_bla(): void }): ApproximationMode {
-    if (navigator.get_approximation_mode() > 1) {
-        // Block-table modes are not part of the minimal kernel (see
-        // kernelApproximationMode); fold the navigator back to affine BLA so
-        // it never builds a table the kernel cannot read.
-        navigator.use_bla()
-    }
-    return navigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+/** Shader flag of each mode (Mandelbrot.approximationMode in the kernel). */
+const APPROXIMATION_MODE_FLAG: Record<ApproximationMode, number> = { perturbation: 0, bla: 1, pade: 2 }
+
+function readNavigatorApproximationMode(navigator: { get_approximation_mode(): number }): ApproximationMode {
+    const flag = navigator.get_approximation_mode()
+    return flag === 2 ? 'pade' : flag === 1 ? 'bla' : 'perturbation'
 }
 
 export type Mandelbrot = {
@@ -2000,7 +1999,7 @@ export class Engine {
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
         this.mandelbrotBlaLevelBuffer = this.device.createBuffer({
-            size: 4 * 4,
+            size: 4 * BLA_LEVEL_U32S,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Level Storage Buffer',
         })
@@ -2682,7 +2681,7 @@ export class Engine {
 
         this.mandelbrotBlaLevelBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer = this.device.createBuffer({
-            size: safeRequiredEntries * 4 * 4,
+            size: safeRequiredEntries * 4 * BLA_LEVEL_U32S,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Level Storage Buffer',
         })
@@ -4455,7 +4454,9 @@ export class Engine {
             return
         }
 
-        if (mode === 'bla') {
+        if (mode === 'pade') {
+            this.mandelbrotNavigator.use_pade()
+        } else if (mode === 'bla') {
             this.mandelbrotNavigator.use_bla()
         } else {
             this.mandelbrotNavigator.use_perturbation()
@@ -4520,7 +4521,7 @@ export class Engine {
         })
         // ε sets the validity radius (ε·|A|), so a change must rebuild the
         // table and re-render in BLA mode.
-        if (this.approximationMode === 'bla') {
+        if (this.approximationMode !== 'perturbation') {
             this.currentBlaLevelCount = 0
             this.requestTableClear(true)
             this.needRender = true
@@ -4638,7 +4639,7 @@ export class Engine {
             maxBlaSkip: pow2,
             tableGeneration: this.tableGeneration,
         })
-        if (this.approximationMode === 'bla') {
+        if (this.approximationMode !== 'perturbation') {
             this.currentBlaLevelCount = 0
             this.requestTableClear(true)
             this.needRender = true
@@ -5291,11 +5292,11 @@ export class Engine {
         // form and try_apply_bla_deep does its radius test in log space. The
         // uniform flag carries 1 = affine BLA, 0 = exact perturbation.
         const tableCoversView = this.referenceBlaReadyMaxIterations >= guardedMaxIter
-        const blocksReady = this.approximationMode === 'bla'
+        const blocksReady = this.approximationMode !== 'perturbation'
             && orbitComplete
             && this.currentBlaLevelCount > 0
             && tableCoversView
-        const tableApproximationModeFlag = blocksReady ? 1 : 0
+        const tableApproximationModeFlag = blocksReady ? APPROXIMATION_MODE_FLAG[this.approximationMode] : 0
         // Exact orbit-trap evaluation deliberately unfolds every uncertified
         // block. Reflect that choice in the CPU-side diagnostic as well as in
         // the shader guard so performance traces never label it "Auto/BLA".
@@ -7004,7 +7005,7 @@ export class Engine {
             const textures: GPUTexture[] = []
             let prepared: GpuPalettePath | undefined
             try {
-                if (assets.images.length * path.textureSize ** 2 * 4 * 4 / 3 * 2 + (path.stops.length + 1) * 4096 * 7 * 8 > PALETTE_PATH_TEXTURE_BUDGET)
+                if (assets.images.length * path.textureSize ** 2 * 4 * 4 / 3 * 2 + (path.stops.length + 1) * 4096 * PALETTE_TEXTURE_ROWS * 8 > PALETTE_PATH_TEXTURE_BUDGET)
                     throw new Error(t('engine.palettePath.budgetExceeded'))
                 for (const asset of assets.images) {
                     textures.push(await this._loadTexture(asset.url, true, path.textureSize))

@@ -19,7 +19,7 @@ describe('palette protrusion effect', () => {
     expect(createInterpolatedColorStop(stops, 0.5, '#808080').protrusion).toBeCloseTo(0.5);
   });
 
-  it('packs protrusion into palette row 6 alpha without adding a row', () => {
+  it('packs protrusion into palette row 6 alpha alongside the material rows', () => {
     const palette = new Palette([
       {color: '#000000', position: 0, protrusion: 0},
       {color: '#ffffff', position: 1, protrusion: 1},
@@ -27,7 +27,7 @@ describe('palette protrusion effect', () => {
     const texture = palette.generateTexture();
     const row6Alpha = (x: number) => texture.data[(6 * texture.width + x) * 4 + 3];
 
-    expect(texture.height).toBe(7);
+    expect(texture.height).toBe(8);
     expect(row6Alpha(0)).toBe(0);
     expect(row6Alpha(texture.width - 1)).toBe(1);
     expect(row6Alpha(Math.floor((texture.width - 1) / 2))).toBeCloseTo(0.5, 3);

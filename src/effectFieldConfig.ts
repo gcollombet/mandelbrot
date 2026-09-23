@@ -21,6 +21,10 @@ export const EFFECT_FIELD_NAMES = [
   'metalReflectance',
   'metalEnvironmentTint',
   'iridescencePower',
+  'diffraction',
+  'cloisonne',
+  'cloisonneRays',
+  'translucency',
 ] as const;
 
 export type EffectFieldName = (typeof EFFECT_FIELD_NAMES)[number];
@@ -63,6 +67,12 @@ export const EFFECT_FIELD_CONFIG: Record<EffectFieldName, EffectFieldMeta> = {
   metalReflectance:   { label: 'Metal Reflectance', defaultValue: 1.0, min: 0, max: 2,     step: 0.01, unit: '', textureRow: 6, textureChannel: 1, uiGroup: 'lighting' },
   metalEnvironmentTint: { label: 'Metal Env Tint', defaultValue: 0.0, min: 0, max: 1,      step: 0.01, unit: '', textureRow: 6, textureChannel: 2, uiGroup: 'lighting' },
   iridescencePower:   { label: 'Iridescence Strength', defaultValue: 0.0, min: 0, max: 1, step: 0.01, unit: '', textureRow: 4, textureChannel: 3, uiGroup: 'iridescence' },
+  // Row 7: fractal-native materials. The band/ray geometry they draw comes
+  // from the analytic Laplacian, so they need no extra per-pixel payload.
+  diffraction:        { label: 'Diffraction',       defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 7, textureChannel: 0, uiGroup: 'lighting' },
+  cloisonne:          { label: 'Cloisonné',         defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 7, textureChannel: 1, uiGroup: 'lighting' },
+  cloisonneRays:      { label: 'Cloisonné Rays',    defaultValue: 3.0, min: 0, max: 6,     step: 1,    unit: '', textureRow: 7, textureChannel: 2, uiGroup: 'lighting' },
+  translucency:       { label: 'Translucency',      defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 7, textureChannel: 3, uiGroup: 'lighting' },
 };
 
 export const DEFAULT_VALUES: Record<EffectFieldName, number> = Object.fromEntries(

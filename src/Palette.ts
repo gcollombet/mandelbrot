@@ -17,10 +17,11 @@ const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: num
 /** Width of the palette texture (one texel per iteration bucket). */
 const TEXTURE_WIDTH = 4096;
 
-/** Height of the palette texture (7 rows for RGB, effects, iridescence, and orbit metrics). */
-const TEXTURE_HEIGHT = 7;
+/** Height of the palette texture (8 rows for RGB, effects, iridescence, orbit metrics and fractal materials). */
+export const PALETTE_TEXTURE_ROWS = 8;
+const TEXTURE_HEIGHT = PALETTE_TEXTURE_ROWS;
 
-/** Effect-only texture rows (1, 2, 3, 5, 6) — fields grouped by row. */
+/** Effect-only texture rows (1, 2, 3, 5, 6, 7) — fields grouped by row. */
 const EFFECT_ROWS: Array<{ row: number; fields: EffectFieldName[] }> = [];
 {
   const rowFields = new Map<number, EffectFieldName[]>();
@@ -136,11 +137,11 @@ export class Palette {
   }
 
   /**
-   * Generate a 4096 x 7 float texture as a Float32Array.
+   * Generate a 4096 x 8 float texture as a Float32Array.
    * All values are stored in their natural ranges — no normalization.
    * The Engine will encode these as float16 for the GPU texture.
    *
-   * Layout (7 rows of 4096 RGBA texels):
+   * Layout (8 rows of 4096 RGBA texels):
    *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
    *   Row 1: zebra, tessellation, shading, skybox
    *   Row 2: webcam, smoothness, shadingLevel, specularPower
@@ -148,6 +149,7 @@ export class Palette {
    *   Row 4: iridescence R, G, B, strength
    *   Row 5: stripeAverage, rotationMean, stripeReliefTilt, directionCoherenceReliefTilt
    *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, protrusion
+   *   Row 7: diffraction, cloisonne, cloisonneRays, translucency
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;

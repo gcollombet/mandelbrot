@@ -172,7 +172,9 @@ let orbitChunkSize = ORBIT_CHUNK_MIN
 const REFERENCE_ITER_HEADROOM = 2
 const ORBIT_STEP_CAPACITY = 10_000_000
 // Floats per affine BlaStep; mirrors the Rust #[repr(C)] BlaStep and Engine's BLA_STEP_FLOATS.
-const BLA_STEP_FLOATS = 8
+const BLA_STEP_FLOATS = 11
+// u32 words per BlaLevel; mirrors the Rust #[repr(C)] BlaLevel and Engine's BLA_LEVEL_U32S.
+const BLA_LEVEL_U32S = 5
 
 function postResponse(message: ReferenceWorkerResponse, transfer?: Transferable[]) {
     ctx.postMessage(message, transfer ?? [])
@@ -201,7 +203,9 @@ function applyApproximationMode(mode: ApproximationMode) {
     if (!navigator) {
         return
     }
-    if (mode === 'bla') {
+    if (mode === 'pade') {
+        navigator.use_pade()
+    } else if (mode === 'bla') {
         navigator.use_bla()
     } else {
         navigator.use_perturbation()
@@ -302,7 +306,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * BLA_STEP_FLOATS)
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)
-    const levelsSource = new Uint32Array(wasmMemory.buffer, info.levels_ptr, info.level_count * 4)
+    const levelsSource = new Uint32Array(wasmMemory.buffer, info.levels_ptr, info.level_count * BLA_LEVEL_U32S)
     const levels: Uint32Array<ArrayBuffer> = new Uint32Array(levelsSource.length)
     levels.set(levelsSource)
     lastBlaMaxIterations = tableMaxIterations

@@ -6,7 +6,7 @@ import type {OrbitTrapConfig} from "./OrbitTrap.ts";
 import type {IterationPaletteCurve} from "./IterationPaletteCurve.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
-export type ApproximationMode = 'perturbation' | 'bla';
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade';
 
 /** Maximum interactive/export AA accumulation budget. */
 export const MAX_ANTIALIAS_LEVEL = 256;
@@ -94,6 +94,9 @@ export const SESSION_PERFORMANCE_FIELDS = [
     // The kernel (exact / BLA) is a session choice: presets never carry it,
     // and a legacy preset that still does is ignored on load.
     'approximationMode',
+    // Same for the approximation tolerance ε: always 1e-6 by default, never
+    // taken from a preset.
+    'blaEpsilon',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
 export const EXPLORATION_STATE_FIELDS = [
@@ -197,5 +200,6 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         targetFps: current.targetFps,
         zoomMagnificationThreshold: current.zoomMagnificationThreshold,
         approximationMode: current.approximationMode,
+        blaEpsilon: current.blaEpsilon,
     };
 }

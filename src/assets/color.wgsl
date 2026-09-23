@@ -131,7 +131,7 @@ var<private> parameters: Uniforms;
 @group(0) @binding(2) var tileTex: texture_2d_array<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d_array<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d_array<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d_array<f32>;  // 4096 x 7 rgba16float
+@group(0) @binding(5) var paletteTex: texture_2d_array<f32>;  // 4096 x 8 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen values
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var mirrorSampler: sampler;  // anisotropic trilinear, mirror-repeat: skybox + mirrored tiles
@@ -293,6 +293,11 @@ struct EffectParams {
   wRotationMean: f32,
   wStripeRelief: f32,            // decoded slope [0, 1]
   wDirectionCoherenceRelief: f32, // decoded slope [0, 100]
+  // Row 7: fractal-native materials
+  wDiffraction: f32,   // [0, 1] holographic grating along the bands
+  wCloisonne: f32,     // [0, 1] gold wires + enamel cells
+  cloisonneRays: f32,  // [0, 6] log2 of the external-ray wall count
+  wTranslucency: f32,  // [0, 1] transmission through thin matter
 };
 
 // ── Relief amplitude controls ───────────────────────────────────────
@@ -310,7 +315,7 @@ fn decode_relief_tilt(control: f32, tiltMax: f32) -> f32 {
 }
 
 fn palette_row_y(row: f32) -> f32 {
-  return (row + 0.5) / 7.0;
+  return (row + 0.5) / 8.0;
 }
 
 fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
@@ -414,6 +419,13 @@ fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
   (*e).metalReflectance = clamp(row6.g, 0.0, 2.0);
   (*e).metalEnvironmentTint = clamp(row6.b, 0.0, 1.0);
   (*e).protrusion = clamp(row6.a, 0.0, 1.0);
+
+  // Row 7: diffraction, cloisonné, cloisonné rays, translucency.
+  let row7 = sample_palette(palettePhase, 7.0);
+  (*e).wDiffraction = clamp(row7.r, 0.0, 1.0);
+  (*e).wCloisonne = clamp(row7.g, 0.0, 1.0);
+  (*e).cloisonneRays = clamp(row7.b, 0.0, 6.0);
+  (*e).wTranslucency = clamp(row7.a, 0.0, 1.0);
 }
 
 @vertex
@@ -879,6 +891,17 @@ struct Surface {
   albedo: vec3<f32>,      // sRGB base color after the palette overlays
   curvature: f32,         // signed concavity of the rendered height field
   flow: vec2<f32>,        // brushing direction in the screen plane (unit)
+  // Escape geometry for the fractal-native materials. With
+  // H = log|z'| - log|z| - log log|z|, the cached Laplacian is
+  // ΔH = |z'/z|² / log²|z| per texel², hence exactly
+  //   |∇ν| = √ΔH / ln2          (iteration bands per texel)
+  //   |∇arg z| = √ΔH · log|z|    (external-ray phase per texel)
+  //   DE ≈ 1 / (2√ΔH)            (distance to the set in texels)
+  nu: f32,                // smooth iteration count
+  escapeArg: f32,         // arg z at escape
+  logZ: f32,              // log|z| at escape
+  bandRate: f32,          // √ΔH, unscaled by any relief control
+  bandDir: vec2<f32>,     // screen-space unit direction of increasing ν
 };
 
 // The ridge, iridescence and shadow thresholds were tuned on
@@ -1015,10 +1038,100 @@ fn build_surface(
   s.albedo = albedo;
   s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;
   s.flow = select(fieldDir, surfaceGradient / max(slope, 1e-5), slope > 1e-5);
+  s.nu = v_smooth;
+  s.escapeArg = atan2(z.y, z.x);
+  s.logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
+  s.bandRate = sqrt(max(cachedCurvature, 0.0));
+  let bandGradient = rotate_inverse_sincos(cachedGradient, sceneSin, sceneCos);
+  s.bandDir = select(fieldDir, bandGradient / max(length(bandGradient), 1e-8), dot(bandGradient, bandGradient) > 1e-16);
   return s;
 }
 
-fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32> {
+// Cloisonné: raised gold wires along the iteration band boundaries and the
+// external rays arg z = 2πk/2ⁿ (binary decomposition), glossy vitreous enamel
+// inside the cells. Distances are in texels through the analytic |∇ν| and
+// |∇arg z|, so the wire keeps a constant on-screen width at any depth; a wall
+// family fades out where its cells shrink below a few wire widths. Rewrites
+// the surface and material so the ordinary lighting lights the wire.
+const LN2_C: f32 = 0.6931471805599453;
+const CLOISONNE_GOLD: vec3<f32> = vec3<f32>(1.0, 0.80, 0.42);
+fn apply_cloisonne(s: ptr<function, Surface>, fx: ptr<function, EffectParams>) {
+  let w = (*fx).wCloisonne;
+  let rate = (*s).bandRate;
+  let halfWidth = 1.2;
+  // Rings: ν crosses an integer.
+  let nuRate = max(rate / LN2_C, 1e-6);
+  let f = fract((*s).nu);
+  let ringDist = min(f, 1.0 - f) / nuRate;
+  let ringFade = smoothstep(3.0 * halfWidth, 6.0 * halfWidth, 1.0 / nuRate);
+  // Rays: arg z crosses a multiple of 2π/2ⁿ.
+  let rays = exp2(round((*fx).cloisonneRays));
+  let argRate = max(rate * (*s).logZ, 1e-6);
+  let a = fract((*s).escapeArg / TWO_PI * rays + 1.0);
+  let rayDist = min(a, 1.0 - a) * (TWO_PI / rays) / argRate;
+  let rayFade = select(0.0, smoothstep(3.0 * halfWidth, 6.0 * halfWidth, TWO_PI / rays / argRate), (*fx).cloisonneRays > 0.5);
+  // Nearest visible wall, and the direction in which its distance grows.
+  let ringWall = ringFade * (1.0 - smoothstep(0.0, halfWidth, ringDist));
+  let rayWall = rayFade * (1.0 - smoothstep(0.0, halfWidth, rayDist));
+  let useRay = rayWall > ringWall;
+  let tangent = vec2<f32>(-(*s).bandDir.y, (*s).bandDir.x);
+  let awayDir = select((*s).bandDir * select(-1.0, 1.0, f < 0.5), tangent * select(-1.0, 1.0, a < 0.5), useRay);
+  let dist = select(ringDist, rayDist, useRay);
+  let wall = max(ringWall, rayWall);
+  let wire = wall * w;
+  // Round wire profile h = √(1 − t²); its slope feeds the one surface normal.
+  let t = clamp(dist / halfWidth, 0.0, 0.97);
+  let slope = t / sqrt(1.0 - t * t) * 0.9;
+  let baseGradient = -(*s).normal.xy / max((*s).normal.z, 1e-4);
+  let wireGradient = -awayDir * slope;
+  (*s).normal = surface_normal_from_gradient(mix(baseGradient, baseGradient * 0.25 + wireGradient, wire));
+  (*s).flow = select((*s).flow, tangent, wire > 0.01 && !useRay);
+  // Wire: polished gold. Cells: flat glossy glass over the palette color.
+  let cell = w * (1.0 - wall);
+  (*s).albedo = mix((*s).albedo, CLOISONNE_GOLD, wire);
+  (*fx).metallic = mix(mix((*fx).metallic, 0.0, cell), 0.9, wire);
+  (*fx).roughness = mix(mix((*fx).roughness, 0.06, cell), 0.22, wire);
+  (*fx).dielectricSpecular = mix((*fx).dielectricSpecular, 0.05, cell);
+  (*fx).metalReflectance = mix((*fx).metalReflectance, 1.0, wire);
+  (*fx).specularPower = max((*fx).specularPower, 22.0 * w);
+  (*fx).anisotropy = mix((*fx).anisotropy, 0.6, wire);
+}
+
+// Diffraction grating: grooves follow the iteration bands, so the grating
+// vector is the in-surface band direction g. Orders 1–3 obey
+// λ_m = d·(L·g + V·g)/m; the groove-parallel mismatch between L and V sets
+// the brightness lobe, which draws the classic rotating CD cross. The pitch
+// breathes with the local band density so a fixed light still paints the
+// spectrum across the image.
+fn spectral_color(lambda: f32) -> vec3<f32> {
+  let r = exp(-pow((lambda - 605.0) / 45.0, 2.0)) + 0.30 * exp(-pow((lambda - 440.0) / 22.0, 2.0));
+  let g = exp(-pow((lambda - 540.0) / 45.0, 2.0));
+  let b = exp(-pow((lambda - 455.0) / 32.0, 2.0));
+  return vec3<f32>(r, g, b);
+}
+
+fn diffraction_response(s: Surface, lightDir: vec3<f32>, viewDir: vec3<f32>, roughness: f32) -> vec3<f32> {
+  let n = s.normal;
+  let g0 = vec3<f32>(s.bandDir, 0.0);
+  let g3 = normalize(g0 - n * dot(g0, n) + vec3<f32>(1e-6, 0.0, 0.0));
+  let t3 = normalize(cross(n, g3));
+  let pitchTexels = LN2_C / max(s.bandRate, 1e-6);
+  let d = 1600.0 * clamp(pow(pitchTexels / 12.0, 0.25), 0.55, 1.9);
+  let across = abs(dot(lightDir, g3) + dot(viewDir, g3));
+  let along = dot(lightDir, t3) + dot(viewDir, t3);
+  let lobeWidth = 0.05 + 0.45 * roughness;
+  let lobe = exp(-along * along / (lobeWidth * lobeWidth));
+  var c = vec3<f32>(0.0);
+  for (var m = 1; m <= 3; m++) {
+    c += spectral_color(d * across / f32(m)) / f32(m);
+  }
+  return c * lobe;
+}
+
+fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3<f32> {
+  var s = sIn;
+  var fx = fxIn;
+  if (fx.wCloisonne > 0.001) { apply_cloisonne(&s, &fx); }
   let effShading = fx.wShading;
   // PBR runs in linear light: gamma-space products distort hues and harden
   // falloffs. Only the shaded result converts back to sRGB (with a highlight
@@ -1124,6 +1237,29 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
     materialColor = mix(materialColor, pearlColor, clamp(coatWeight, 0.0, 0.92));
     // Sheen interferes at the half-vector angle (specular path through the film).
     materialColor += iridLin * thin_film_tint(vDotH, filmCycles) * pearlSheen * (0.56 + 0.92 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
+  }
+
+  if (fx.wDiffraction > 0.001) {
+    // Linear-light spectral energy, strongest on the lit side.
+    let diffraction = diffraction_response(s, lightDir, viewDir, roughness);
+    materialColor += diffraction * fx.wDiffraction * (0.25 + 1.6 * shadowedNDotL) * (0.4 + 0.6 * luminance(colorLin) + 0.6 * metallic);
+  }
+
+  if (fx.wTranslucency > 0.001) {
+    // Thickness is the distance to the set, DE ≈ 1/(2√ΔH) texels: the thin
+    // matter hugging the boundary transmits, the far field stays opaque.
+    // The light is always frontal here, so the transmitted part shows on the
+    // slopes facing away from it, colored by the path length (Beer–Lambert).
+    // Scattered light also fills the shadows with the saturated body color
+    // (the skin/jade look) instead of letting them go black.
+    let thickness = 0.5 / max(s.bandRate, 1e-4);
+    let transmission = exp(-thickness / 12.0);
+    let lightPlane = lightDir.xy / max(length(lightDir.xy), 1e-5);
+    let awaySide = clamp(-dot(normal.xy, lightPlane) / max(tilt, 1e-4), 0.0, 1.0) * smoothstep(0.0, 0.25, tilt);
+    let absorbed = pow(max(colorLin, vec3<f32>(1e-4)), vec3<f32>(1.6 + 2.0 * (1.0 - transmission)));
+    let shadowSide = 1.0 - shadowedNDotL;
+    let scatter = absorbed * (0.9 * shadowSide * (0.3 + 0.7 * transmission) + 1.0 * transmission * (0.35 + 0.65 * awaySide)) * (1.0 - metallic);
+    materialColor += scatter * fx.wTranslucency;
   }
 
   var envColor = vec3<f32>(0.0);

@@ -275,7 +275,7 @@ const model =  defineModel<MandelbrotParams>({
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
-     approximationMode: 'bla',
+     approximationMode: 'pade',
      targetFps: 60,
   }
 });
@@ -536,9 +536,10 @@ function nearestPreset(value: number, presets: readonly number[]): number {
 }
 const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
-// The engine implements exact perturbation and affine BLA only; presets
-// carrying a retired mode (auto / pade / jet / mobius) run BLA.
+// The engine implements Padé blocks (default), affine BLA and exact
+// perturbation; presets carrying a retired mode (auto / jet / mobius) run Padé.
 const calculationOptions = computed(() => [
+  { label: 'Padé', value: 'pade' },
   { label: 'BLA', value: 'bla' },
   { label: t('settings.performance.advanced.noSkips'), value: 'perturbation' },
 ]);
@@ -3801,7 +3802,7 @@ async function startVideoExport(payload: {
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           /></div>
-        <DenseSelect :label="t('settings.performance.advanced.algorithm')" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
+        <DenseSelect :label="t('settings.performance.advanced.algorithm')" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode)" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
         <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">{{ t('settings.performance.advanced.orbitTrapExactNote') }}</p>
         <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
             :label="t('settings.performance.advanced.approxTolerance')" :min="-12" :max="-4" :step="1" :default="-3"

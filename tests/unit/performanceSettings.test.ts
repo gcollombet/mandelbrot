@@ -57,6 +57,12 @@ describe('performance settings helpers', () => {
     expect(stripped).toEqual({scale: '1.0'});
   });
 
+  it('never lets a preset change the approximation tolerance', () => {
+    const merged = preserveSessionPerformanceFields({scale: '1.0', blaEpsilon: 1e-4} as any, {blaEpsilon: 1e-6} as any);
+    expect(merged.blaEpsilon).toBe(1e-6);
+    expect(stripSessionPerformanceFields({scale: '1.0', blaEpsilon: 1e-4} as Record<string, unknown>)).toEqual({scale: '1.0'});
+  });
+
   it('strips exploration fields from preset payloads', () => {
     const payload = {
       scale: '1.0',

@@ -51,7 +51,7 @@ export const BENCH: BenchFile = scenesFile as BenchFile
 export type BenchOptions = {
     /** Scene ids or names (default: all). */
     scenes?: string[]
-    /** Modes compared with perturbation (default ['bla']). */
+    /** Modes compared with perturbation (default ['pade'], the engine default). */
     modes?: ApproximationMode[]
     eps?: number
     runId?: string
@@ -144,7 +144,7 @@ const NU_TOLERANCE = 0.5
 const FRACTION_TOLERANCE = 1e-3
 const TABLE_TIMEOUT_MS = 60_000
 const REFERENCE_TIMEOUT_MS = 300_000
-const EXPECTED_FLAG: Partial<Record<string, number>> = { perturbation: 0, bla: 1 }
+const EXPECTED_FLAG: Partial<Record<string, number>> = { perturbation: 0, bla: 1, pade: 2 }
 
 // A MessageChannel task is not clamped in a hidden tab (setTimeout is, to 1 s).
 const macrotask = () => new Promise<void>(resolve => {
@@ -330,7 +330,7 @@ export function createDevBench(deps: DevBenchDeps) {
         const size = BENCH.size
         const eps = options.eps ?? deps.getEps()
         const runId = options.runId ?? new Date().toISOString().replace(/[:.]/g, '-')
-        const modes = (options.modes ?? ['bla']).filter(m => m !== 'perturbation')
+        const modes = (options.modes ?? ['pade']).filter(m => m !== 'perturbation')
         const selected = BENCH.scenes
             .map((scene, index) => ({ scene, index }))
             .filter(({ scene }) => !options.scenes || options.scenes.includes(scene.id) || options.scenes.includes(scene.name))
@@ -366,7 +366,7 @@ export function createDevBench(deps: DevBenchDeps) {
                         const previousTable = state.blaBuildTiming
                         deps.resetParams({ ...params, approximationMode: mode })
                         await macrotask()
-                        if (mode === 'bla') tableBuildMs = await waitTable(state, previousTable)
+                        tableBuildMs = await waitTable(state, previousTable)
                     }
                     const first = await screenshot(size, scene.mu, true)
                     if (!first.raw) throw new Error('[bench] champ brut manquant')

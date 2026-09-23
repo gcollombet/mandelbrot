@@ -31,7 +31,11 @@
     "metalReflectance": "Réflectance métal",
     "metalEnvironmentTint": "Teinte environnement",
     "tessellation": "Mélange image",
-    "webcam": "Mélange webcam"
+    "webcam": "Mélange webcam",
+    "diffraction": "Diffraction",
+    "cloisonne": "Cloisonné",
+    "cloisonneRays": "Rayons cloisonné",
+    "translucency": "Transluscence"
   },
   "descs": {
     "palette": "Force de la couleur de base de ce point dans le dégradé",
@@ -55,7 +59,11 @@
     "reliefGain": "Multiplie le relief analytique pour ce matériau ; 1 est neutre, indépendamment de la Profondeur relief globale",
     "protrusion": "Accentue le relief près des passages entre itérations lissées ; 0 est neutre",
     "metalReflectance": "Multiplie la réflectance du métal sans modifier directement sa teinte",
-    "metalEnvironmentTint": "Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)"
+    "metalEnvironmentTint": "Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)",
+    "diffraction": "Réseau holographique gravé le long des bandes d’itération : arc-en-ciel qui tourne avec la lumière",
+    "cloisonne": "Fils d’or en relief sur les frontières de bandes et de rayons externes, émail vitreux dans les cellules",
+    "cloisonneRays": "Nombre de rayons externes qui recoupent les cellules (2^n) ; 0 = anneaux seuls",
+    "translucency": "La lumière traverse la matière fine près de l’ensemble (jade, cire) ; côté ombre compris"
   },
   "presets": {
     "title": "Préréglages du point",

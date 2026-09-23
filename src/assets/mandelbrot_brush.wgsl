@@ -55,7 +55,7 @@ struct Mandelbrot {
   iterationOffset: f32,
   globalMaxIter: f32,   // total iteration target for the current view
   orbitComplete: f32,   // 1.0 = orbit fully built, 0.0 = still building
-  approximationMode: f32, // 0 = exact perturbation, 1 = affine BLA; anything else runs exact
+  approximationMode: f32, // 0 = exact perturbation, 1 = affine BLA, 2 = Padé blocks; anything else runs exact
   blaLevelCount: f32,
   blaEpsilon: f32,
   stripeFrequency: f32,
@@ -103,6 +103,10 @@ struct BlaStep {
   radius_alpha: f32,
   alpha_exp: i32,
   radius_beta: f32,
+  // Padé denominator d = (dx,dy)·2^d_exp of the Möbius part A·z/(1 + d·z).
+  dx: f32,
+  dy: f32,
+  d_exp: i32,
 };
 
 struct BlaLevel {
@@ -112,6 +116,9 @@ struct BlaLevel {
   // Largest radius_alpha among this level's entries; effective radii are
   // always <= radius_alpha, so |dz| above this bound rejects the whole level.
   maxRadius: f32,
+  // Median of log2(α/β) over the level's entries: a block is dead whatever dz
+  // once β·|dc| ≥ α, so at log2|dc| above level 0's median most blocks are.
+  cReachLog2Median: f32,
 };
 
 // Same layout as reproject_cs.wgsl — the CPU-side uniform buffer is shared.
@@ -592,107 +599,189 @@ fn apply_affine_derivatives(
   der_refresh_cache(derM, derS, derSLo, derInvScale);
 }
 
-// Walks the level directory from the largest aligned skip downward and applies
-// the first block whose certified radius accepts the current |dz|. Returns the
-// skip, or 0 when no block qualifies.
+// ── Padé blocks ─────────────────────────────────────────────────────
+// Same table as BLA, applied as z ← A·z/(1 + D·z) + B·c. The step is exact to
+// second order in z (D = −1/2Z), so the table's α/β certify it with |dz|
+// scaled by √ε: √ε·|dz| + β·|dc| ≤ α (see bla_seed in lib.rs). The gain is
+// log2(√ε) rounded up (toward rejection); 0 for affine BLA.
+fn pade_mode() -> bool {
+  return mandelbrot.approximationMode == 2.0;
+}
+
+fn bla_dz_gain_log2() -> f32 {
+  if (!pade_mode()) {
+    return 0.0;
+  }
+  return validity_next_up(0.5 * validity_next_up(log2(mandelbrot.blaEpsilon)));
+}
+
+// 1/(1 + D·dz), or a zero vector when the block sits near its pole
+// (|1 + D·dz| < 1/2; the radius keeps |D·dz| far below that in practice).
+fn pade_inv_denominator(bla: BlaStep, dz: fe) -> vec2<f32> {
+  let m = vec2<f32>(1.0, 0.0) + fe_to_vec(fe_cmul(fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp), dz));
+  let mm = dot(m, m);
+  if (!(mm >= 0.25) || !bla_vec2_is_finite(m)) {
+    return vec2<f32>(0.0);
+  }
+  return vec2<f32>(m.x, -m.y) / mm;
+}
+
+// Derivatives through Φ(z) = A·z/M + B·c, M = 1 + D·z:
+//   z′ ← (A/M²)·z′ + B,   z″ ← (A/M²)·z″ − (2AD/M³)·z′²  (old z′).
+fn apply_pade_derivatives(
+  a: fe, bMantissa: vec2<f32>, d: fe, invM: vec2<f32>,
+  derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>,
+  snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>,
+) {
+  let invM2 = cmul(invM, invM);
+  let curvature = scaled_complex_normalize(
+    -2.0 * cmul(cmul(cmul(a.m, d.m), cmul(invM2, invM)), cmul(*derM, *derM)),
+    f32(a.e + d.e) * LN2 + 2.0 * (*derS + *derSLo),
+  );
+  apply_affine_derivatives(fe(cmul(a.m, invM2), a.e), bMantissa, derM, derS, derSLo, derInvScale, snd, sndScale);
+  let next = scaled_complex_add(ScaledComplex(*snd, *sndScale), curvature);
+  *snd = next.m;
+  *sndScale = next.s;
+}
+
+// Largest aligned block level at ref_i, or -1 when ref_i starts no block.
+fn bla_top_level(ref_i: i32, skip0Log: i32) -> i32 {
+  return min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(ref_i - 1))) - skip0Log);
+}
+
+// Largest block level (≤ top) whose certified radius accepts (|dz|, |dc|),
+// or -1. Acceptance is monotone in the level: a block's α is ≤
+// and its β ≥ those of its first half (min/max in bla_merge), so the walk goes
+// up from the smallest block and stops at the first rejection. Where blocks
+// are dead for this |dc| (β·|dc| ≥ α), that costs one entry, not one per level.
+fn bla_accepted_level(ref_i: i32, top: i32, log2Dz: f32, log2Dc: f32, levelGate: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+  let shiftedRef = ref_i - 1;
+  var best = -1;
+  for (var level = 0; level <= top; level += 1) {
+    let levelInfo = mandelbrotBlaLevels[level];
+    let slot = shiftedRef >> u32(skip0Log + level);
+    // Whole-level fast reject: every entry's radius is bounded by the level's
+    // maxRadius (levelGate = log2|dz| scaled like log2Dz; below -1e37 = open).
+    if (ref_i + i32(levelInfo.skip) > maxIterI || u32(slot) >= levelInfo.count
+        || levelGate > log2(max(levelInfo.maxRadius, 1e-30))) {
+      break;
+    }
+    let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
+    let radiusLog2 = bla_affine_radius_log2(bla, log2Dc, log2Dz);
+    if (validity_is_neg_inf(radiusLog2) || log2Dz > radiusLog2) {
+      break;
+    }
+    best = level;
+  }
+  return best;
+}
+
+// Applies the largest certified block at ref_i (affine or Padé). A candidate
+// that is non-finite, sits at a Padé pole or escapes falls back to the next
+// smaller block. Returns the skip, or 0 when no block applies.
 fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, bailout: f32, skip0Log: i32, maxIterI: i32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
-  if (*ref_i <= 0) {
+  // Most turns start no block (ref_i off the level-0 alignment): leave before
+  // the log2 work below.
+  let top = bla_top_level(*ref_i, skip0Log);
+  if (*ref_i <= 0 || top < 0) {
     return 0;
   }
   // dot(dz,dz) flushes to 0 in f32 below |dz| ~ 1e-19 (routine at mid-deep
   // shallow zooms): gate on length() in log2 space. When even length() has
   // underflowed the magnitude test is treated as open — the certified radius
-  // test below is what actually validates.
+  // test is what actually validates.
   let dzMag = length(*dz);
-  let dzMagTiny = dzMag < 1.2e-38;
+  let pade = pade_mode();
+  let dzGain = bla_dz_gain_log2();
   let log2Dc = validity_log2_complex(dc, 0);
-  let log2Dz = validity_log2_complex(*dz, 0);
+  let log2Dz = validity_next_up(validity_log2_complex(*dz, 0) + dzGain);
+  let levelGate = select(log2(dzMag) + dzGain, validity_neg_inf(), dzMag < 1.2e-38);
   let shiftedRef = *ref_i - 1;
-  var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
-  while (level >= 0) {
+  for (var level = bla_accepted_level(*ref_i, top, log2Dz, log2Dc, levelGate, skip0Log, maxIterI); level >= 0; level -= 1) {
     let levelInfo = mandelbrotBlaLevels[level];
     let skip = i32(levelInfo.skip);
-    // Whole-level fast reject: every entry's effective radius is bounded by
-    // the level's maxRadius, so a too-large |dz| skips the entry fetch.
-    if ((dzMagTiny || log2(dzMag) <= log2(max(levelInfo.maxRadius, 1e-30))) && *ref_i + skip <= maxIterI) {
-      let slot = shiftedRef >> u32(skip0Log + level);
-      if (u32(slot) < levelInfo.count) {
-        let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
-        let radiusLog2 = bla_affine_radius_log2(bla, log2Dc, log2Dz);
-        if (!validity_is_neg_inf(radiusLog2) && log2Dz <= radiusLog2) {
-          // ── affine BLA: z ← A·z + B·c ──
-          let aMantissa = vec2<f32>(bla.ax, bla.ay);
-          let bMantissa = vec2<f32>(bla.bx, bla.by);
-          let useF32 = bla_coefficients_fit_f32(bla);
-          var candidate = vec2<f32>(0.0);
-          if (useF32) {
-            let a = ldexp(aMantissa, vec2<i32>(bla.ab_exp));
-            let b = ldexp(bMantissa, vec2<i32>(bla.ab_exp));
-            candidate = cmul(a, *dz) + cmul(b, dc);
-          } else {
-            // Large exponents are common even above DEEP_EXP: evaluate in
-            // floatexp instead of materializing Inf/0 in f32.
-            candidate = fe_to_vec(fe_add(
-              fe_cmul(fe(aMantissa, bla.ab_exp), fe_from_vec(*dz, 0)),
-              fe_cmul(fe(bMantissa, bla.ab_exp), fe_from_vec(dc, 0)),
-            ));
-          }
-          let candidateZ = getOrbit(*ref_i + skip) + candidate;
-          // NaN compares false against bailout, so finiteness is an explicit
-          // fail-closed condition before accepting the block.
-          if (bla_vec2_is_finite(candidate) && bla_vec2_is_finite(candidateZ)
-              && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
-            *dz = candidate;
-            *zOut = candidateZ;
-            apply_affine_derivatives(fe(aMantissa, bla.ab_exp), bMantissa, derM, derS, derSLo, derInvScale, snd, sndScale);
-            g_workBudget += select(3u, 1u, useF32);
-            *ref_i += skip;
-            return skip;
-          }
-        }
-      }
+    let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + (shiftedRef >> u32(skip0Log + level))];
+    // ── affine BLA: z ← A·z + B·c; Padé: z ← A·z/(1 + D·z) + B·c ──
+    let aMantissa = vec2<f32>(bla.ax, bla.ay);
+    let bMantissa = vec2<f32>(bla.bx, bla.by);
+    let useF32 = bla_coefficients_fit_f32(bla);
+    // invM = 1/(1 + D·dz), zero at a pole (the block is rejected below).
+    var invM = vec2<f32>(1.0, 0.0);
+    if (pade) {
+      invM = pade_inv_denominator(bla, fe_from_vec(*dz, 0));
     }
-    level -= 1;
+    var candidate = vec2<f32>(0.0);
+    if (useF32) {
+      let a = ldexp(aMantissa, vec2<i32>(bla.ab_exp));
+      let b = ldexp(bMantissa, vec2<i32>(bla.ab_exp));
+      candidate = cmul(cmul(a, *dz), invM) + cmul(b, dc);
+    } else {
+      // Large exponents are common even above DEEP_EXP: evaluate in
+      // floatexp instead of materializing Inf/0 in f32.
+      candidate = fe_to_vec(fe_add(
+        fe_cmul_f32(invM, fe_cmul(fe(aMantissa, bla.ab_exp), fe_from_vec(*dz, 0))),
+        fe_cmul(fe(bMantissa, bla.ab_exp), fe_from_vec(dc, 0)),
+      ));
+    }
+    let candidateZ = getOrbit(*ref_i + skip) + candidate;
+    // NaN compares false against bailout, so finiteness is an explicit
+    // fail-closed condition before accepting the block.
+    if (bla_vec2_is_finite(candidate) && bla_vec2_is_finite(candidateZ)
+        && any(invM != vec2<f32>(0.0))
+        && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+      *dz = candidate;
+      *zOut = candidateZ;
+      if (pade) {
+        apply_pade_derivatives(fe(aMantissa, bla.ab_exp), bMantissa, fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp), invM, derM, derS, derSLo, derInvScale, snd, sndScale);
+      } else {
+        apply_affine_derivatives(fe(aMantissa, bla.ab_exp), bMantissa, derM, derS, derSLo, derInvScale, snd, sndScale);
+      }
+      g_workBudget += select(3u, 1u, useF32) + select(0u, 2u, pade);
+      *ref_i += skip;
+      return skip;
+    }
   }
   return 0;
 }
 
-// ── affine BLA, deep floatexp path ──────────────────────────────────
+// ── affine BLA / Padé, deep floatexp path ───────────────────────────
 fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
-  if (*ref_i <= 0) {
+  let top = bla_top_level(*ref_i, skip0Log);
+  if (*ref_i <= 0 || top < 0) {
     return 0;
   }
-  let log2_dz = validity_log2_complex((*dz).m, (*dz).e);
+  let pade = pade_mode();
+  let log2_dz = validity_next_up(validity_log2_complex((*dz).m, (*dz).e) + bla_dz_gain_log2());
   let log2_dc = validity_log2_complex(dc.m, dc.e);
   let shiftedRef = *ref_i - 1;
-  var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
-  while (level >= 0) {
+  // Deep radii underflow the f32 level bound: no whole-level gate.
+  for (var level = bla_accepted_level(*ref_i, top, log2_dz, log2_dc, validity_neg_inf(), skip0Log, maxIterI); level >= 0; level -= 1) {
     let levelInfo = mandelbrotBlaLevels[level];
     let skip = i32(levelInfo.skip);
-    if (*ref_i + skip <= maxIterI) {
-      let slot = shiftedRef >> u32(skip0Log + level);
-      if (u32(slot) < levelInfo.count) {
-        let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
-        let radiusLog2 = bla_affine_radius_log2(bla, log2_dc, log2_dz);
-        if (!validity_is_neg_inf(radiusLog2) && log2_dz <= radiusLog2) {
-          // ── affine: dz ← A·dz + B·dc ──
-          let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
-          let bMantissa = vec2<f32>(bla.bx, bla.by);
-          let num = fe_add(fe_cmul(a, *dz), fe_cmul(fe(bMantissa, bla.ab_exp), dc));
-          let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(num);
-          if (bla_vec2_is_finite(num.m) && bla_vec2_is_finite(candidateZ)
-              && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
-            *dz = num;
-            *zOut = candidateZ;
-            apply_affine_derivatives(a, bMantissa, derM, derS, derSLo, derInvScale, snd, sndScale);
-            g_workBudget += 3u;
-            *ref_i += skip;
-            return skip;
-          }
-        }
-      }
+    let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + (shiftedRef >> u32(skip0Log + level))];
+    // ── affine: dz ← A·dz + B·dc; Padé: dz ← A·dz/(1 + D·dz) + B·dc ──
+    let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
+    let bMantissa = vec2<f32>(bla.bx, bla.by);
+    var invM = vec2<f32>(1.0, 0.0);
+    if (pade) {
+      invM = pade_inv_denominator(bla, *dz);
     }
-    level -= 1;
+    let num = fe_add(fe_cmul_f32(invM, fe_cmul(a, *dz)), fe_cmul(fe(bMantissa, bla.ab_exp), dc));
+    let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(num);
+    if (bla_vec2_is_finite(num.m) && bla_vec2_is_finite(candidateZ)
+        && any(invM != vec2<f32>(0.0))
+        && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+      *dz = num;
+      *zOut = candidateZ;
+      if (pade) {
+        apply_pade_derivatives(a, bMantissa, fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp), invM, derM, derS, derSLo, derInvScale, snd, sndScale);
+      } else {
+        apply_affine_derivatives(a, bMantissa, derM, derS, derSLo, derInvScale, snd, sndScale);
+      }
+      g_workBudget += select(3u, 5u, pade);
+      *ref_i += skip;
+      return skip;
+    }
   }
   return 0;
 }
@@ -1069,12 +1158,18 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var escaped = false;
   var shadingHeight = 0.0;
 
-  // approximationMode: 0 = exact perturbation, 1 = affine BLA. The exact
+  // approximationMode: 0 = exact perturbation, 1 = affine BLA, 2 = Padé. The exact
   // orbit-trap mode (3) samples every iteration and forbids skipping.
-  let useBla = mandelbrot.approximationMode >= 0.5
-            && mandelbrot.approximationMode < 1.5
+  var useBla = mandelbrot.approximationMode >= 0.5
+            && mandelbrot.approximationMode < 2.5
             && mandelbrot.blaLevelCount >= 1.0
             && mandelbrot.orbitTrapMode < 2.5;
+  // Most blocks are dead for this |dc| (β·|dc| ≥ α): skip the table. Every
+  // lane of a warp pays for any lane's block attempt, and |dc| is coherent
+  // across neighbours, so this gate removes whole warps of wasted attempts.
+  if (useBla) {
+    useBla = validity_log2_complex(dc, 0) < mandelbrotBlaLevels[0].cReachLog2Median;
+  }
   var skip0Log = 0;
   // Level 0 carries the loosest per-level radius bound (merged radii only
   // shrink), so one compare against it tells whether any BLA entry could
@@ -1083,7 +1178,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var logMaxBlaR = -3.0e38;
   if (useBla) {
     skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
-    logMaxBlaR = log2(max(mandelbrotBlaLevels[0].maxRadius, 1e-30));
+    logMaxBlaR = log2(max(mandelbrotBlaLevels[0].maxRadius, 1e-30)) - bla_dz_gain_log2();
   }
 
   // Bound on the pixel's TOTAL iteration count, not on ref_i: the end-of-orbit
@@ -1236,10 +1331,14 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var escaped = false;
   var shadingHeight = 0.0;
 
-  let useBla = mandelbrot.approximationMode >= 0.5
-            && mandelbrot.approximationMode < 1.5
+  var useBla = mandelbrot.approximationMode >= 0.5
+            && mandelbrot.approximationMode < 2.5
             && mandelbrot.blaLevelCount >= 1.0
             && mandelbrot.orbitTrapMode < 2.5;
+  // Most blocks are dead for this |dc|: skip the table (see the shallow path).
+  if (useBla) {
+    useBla = validity_log2_complex(dc.m, dc.e) < mandelbrotBlaLevels[0].cReachLog2Median;
+  }
   var skip0Log = 0;
   if (useBla) {
     skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));

@@ -111,6 +111,14 @@ export type ColorStop = {
   metalEnvironmentTint?: number;
   /** Iridescence intensity, range [0, 1] (default 0) */
   iridescencePower?: number;
+  /** Holographic grating along the iteration bands, range [0, 1] (default 0) */
+  diffraction?: number;
+  /** Gold wires on band/ray boundaries over glossy enamel cells, range [0, 1] (default 0) */
+  cloisonne?: number;
+  /** log2 of the external-ray wall count of the cloisonné cells, range [0, 6] (default 3; 0 = rings only) */
+  cloisonneRays?: number;
+  /** Light transmitted through the thin matter near the set, range [0, 1] (default 0) */
+  translucency?: number;
 };
 
 /**

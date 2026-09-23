@@ -732,7 +732,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   ],
   activateAnimate: false,
   debugShading: false,
-  approximationMode: 'bla',
+  approximationMode: 'pade',
   blaEpsilon: 1e-6,
   maxBlaSkip: 65536,
   precisionBudget: '1e-30',
@@ -778,6 +778,12 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.iterationPaletteCurve = normalizeIterationPaletteCurve(params.iterationPaletteCurve);
   params.colorStops = normalizeColorStops(Array.isArray(params.colorStops) ? params.colorStops : DEFAULT_MANDELBROT_PARAMS.colorStops);
   stripExplorationStateFields(params);
+  // The kernel is never restored: presets already drop it (session field),
+  // and the last-session copy would pin an old default (BLA). Every start
+  // runs the default kernel; the menu choice lasts for the session.
+  params.approximationMode = DEFAULT_MANDELBROT_PARAMS.approximationMode;
+  // Same for ε: the last-session copy may carry a value loaded from an old preset.
+  params.blaEpsilon = DEFAULT_MANDELBROT_PARAMS.blaEpsilon;
   const stored = params as unknown as Record<string, unknown>;
   for (const obsoleteKey of [
     'gpuLoadMultiplier',
