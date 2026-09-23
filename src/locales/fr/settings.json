@@ -46,6 +46,7 @@
     "frameMinibrotTitle": "Même détection, puis cadre le minibrot entier au centre de l'écran (~50 % de celui-ci)",
     "frameMinibrot": "Cadrer minibrot",
     "framing": "Cadrage…",
+    "cancelSearchTitle": "Recherche en cours : cliquer à nouveau pour annuler",
     "decade": "Décade",
     "decadeBack": "Une décade en arrière (×10)",
     "initialZoom": "Zoom initial (échelle 1)",

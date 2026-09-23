@@ -5,6 +5,7 @@ import {resolvePalettePathImages} from './palettePathResources'
 import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
 import {GpuPaletteTransition} from './gpuPaletteTransition'
 import type { ExpmapKernelProjection } from './expmap/producerProjection'
+import type { MinibrotSearchRequest, MinibrotSearchResponse } from './minibrotWorker'
 // Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
 
 import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
@@ -257,14 +258,6 @@ type ReferenceWorkerRequest =
         maxBlaSkip: number
         tableGeneration: number
     }
-    | {
-        type: 'findMinibrot'
-        jobId: number
-        maxIter: number
-        radiusFactor: number
-        /** When set, also frame the copy: the reply carries the target view scale. */
-        fill?: number
-    }
     | { type: 'dispose' }
 
 type BlaTablePayload = {
@@ -315,15 +308,6 @@ type ReferenceWorkerResponse =
         message: string
     }
     | {
-        type: 'minibrotFound'
-        jobId: number
-        status: 'ok' | 'none' | 'nonewton' | 'nosize'
-        cx: string | null
-        cy: string | null
-        period: number | null
-        scale: string | null
-    }
-    | {
         type: 'ready'
     }
 
@@ -349,9 +333,9 @@ export type MinibrotResult = {
     /**
      * 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but
      * Newton did not converge; 'nosize' = nucleus found but the size estimate degenerated
-     * (framed request only).
+     * (framed request only); 'cancelled' = cancelMinibrot() or a newer search stopped it.
      */
-    status: 'ok' | 'none' | 'nonewton' | 'nosize'
+    status: 'ok' | 'none' | 'nonewton' | 'nosize' | 'cancelled'
     cx: string | null
     cy: string | null
     period: number | null
@@ -998,7 +982,10 @@ export class Engine {
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
     // Changing it forces a full reference recompute. See fix-reference-precision-budget.
     private precisionBudget = '1e-30'
-    private pendingMinibrotResolve: ((r: MinibrotResult) => void) | null = null
+    /** In-flight minibrot search: its disposable worker and the caller's promise. */
+    private minibrotSearch: { worker: Worker; resolve: (r: MinibrotResult) => void; reject: (e: Error) => void } | null = null
+    /** Last view sent to the reference worker, which a minibrot search starts from. */
+    private minibrotView: { cx: string; cy: string; scale: string; angle: number } | null = null
     // Time-to-completion of the last render session (ms). Wall includes everything;
     // GPU is the accumulated mandelbrot-pass compute (the part blocks reduce).
     lastCompletionWallMs = 0
@@ -1516,6 +1503,7 @@ export class Engine {
         // and the worker must get a chance to re-solve/re-post the radii.
         const aspectKey = (this.width / Math.max(1, this.height)).toFixed(6)
         const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}\n${aspectKey}`
+        this.minibrotView = { cx: mandelbrot.cx, cy: mandelbrot.cy, scale: scaleString, angle: mandelbrot.angle }
         if (nextKey === this.referenceViewKey) {
             return
         }
@@ -1539,18 +1527,6 @@ export class Engine {
     }
 
     private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
-        if (message.type === 'minibrotFound') {
-            const resolve = this.pendingMinibrotResolve
-            this.pendingMinibrotResolve = null
-            resolve?.({
-                status: message.status,
-                cx: message.cx,
-                cy: message.cy,
-                period: message.period,
-                scale: message.scale,
-            })
-            return
-        }
         if (message.type === 'ready') {
             this.referenceWorkerReady = true
             const queue = this.pendingWorkerMessages
@@ -4581,30 +4557,69 @@ export class Engine {
     }
 
     // Find the minibrot under the current view (deep period detection + Newton
-    // nucleus refinement, both arbitrary-precision in the worker). Resolves with
-    // the exact nucleus coordinates so the caller can recentre the view on it.
+    // nucleus refinement, both arbitrary-precision). Resolves with the exact
+    // nucleus coordinates so the caller can recentre the view on it.
     // `radiusFactor` scales the view radius used by the ball test (~2–4 covers a
     // centred minibrot; larger snaps to a bigger parent atom).
     //
-    // With `fill` set, the worker also runs the size estimate and returns a
+    // With `fill` set, the search also runs the size estimate and returns a
     // *framing* instead of a bare nucleus: `cx`/`cy` is the copy's centre and
     // `scale` the view half-height that makes the copy span `fill` of the
     // limiting screen axis (0.5 = half the screen).
+    //
+    // The search is one synchronous wasm call that can run for minutes at
+    // depth, so it gets its own disposable worker: cancelMinibrot() terminates
+    // it, and the reference worker keeps extending the orbit meanwhile.
     findMinibrot(radiusFactor = 4, fill?: number): Promise<MinibrotResult> {
-        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null, scale: null }
-        // Supersede any in-flight request so its caller does not hang.
-        this.pendingMinibrotResolve?.(empty)
-        this.pendingMinibrotResolve = null
-        return new Promise<MinibrotResult>((resolve) => {
-            this.pendingMinibrotResolve = resolve
-            this.postReferenceWorker({
-                type: 'findMinibrot',
-                jobId: this.referenceJobId,
-                maxIter: this.currentMaxIterations,
-                radiusFactor,
-                fill,
-            })
+        // Supersede any in-flight search so its caller does not hang.
+        this.cancelMinibrot()
+        const view = this.minibrotView
+        if (!view) return Promise.reject(new Error('[Engine] no view sent to the reference worker yet'))
+        const request: MinibrotSearchRequest = {
+            ...view,
+            precisionBudget: this.precisionBudget,
+            viewportAspect: this.width / Math.max(1, this.height),
+            maxIter: this.currentMaxIterations,
+            radiusFactor,
+            fill,
+        }
+        return new Promise<MinibrotResult>((resolve, reject) => {
+            const worker = new Worker(new URL('./minibrotWorker.ts', import.meta.url), { type: 'module' })
+            const search = { worker, resolve, reject }
+            this.minibrotSearch = search
+            const finish = () => {
+                worker.terminate()
+                if (this.minibrotSearch === search) this.minibrotSearch = null
+            }
+            worker.onmessage = (event: MessageEvent<MinibrotSearchResponse>) => {
+                if (this.minibrotSearch !== search) return
+                const message = event.data
+                if (message.type === 'ready') {
+                    worker.postMessage(request)
+                } else if (message.type === 'minibrotFound') {
+                    finish()
+                    resolve({ status: message.status, cx: message.cx, cy: message.cy, period: message.period, scale: message.scale })
+                } else {
+                    finish()
+                    reject(new Error(message.message))
+                }
+            }
+            worker.onerror = (event) => {
+                if (this.minibrotSearch !== search) return
+                finish()
+                reject(new Error(event.message))
+            }
         })
+    }
+
+    /** Stop the in-flight minibrot search, if any; its caller gets status 'cancelled'. */
+    cancelMinibrot(): boolean {
+        const search = this.minibrotSearch
+        if (!search) return false
+        this.minibrotSearch = null
+        search.worker.terminate()
+        search.resolve({ status: 'cancelled', cx: null, cy: null, period: null, scale: null })
+        return true
     }
 
     setMaxBlaSkip(maxSkip: number) {
@@ -6697,6 +6712,7 @@ export class Engine {
         this.palettePathDummy?.destroy()
         this.destroyed = true
         this.stopRenderLoop()
+        this.cancelMinibrot()
         this.postReferenceWorker({ type: 'dispose' })
         this.referenceWorker?.terminate()
         this.referenceWorker = undefined

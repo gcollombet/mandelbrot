@@ -3,6 +3,7 @@
   "nucleusNotConverged": "Période {period} trouvée, mais le nucléus n'a pas convergé",
   "noneUnderView": "Aucun minibrot sous la vue : zoomer sur un d’abord",
   "searchFailed": "Recherche du minibrot échouée",
+  "cancelled": "Recherche du minibrot annulée",
   "framed": "Minibrot de période {period} cadré",
   "sizeDegenerate": "Période {period} trouvée, mais l'estimation de taille a dégénéré",
   "frameFailed": "Cadrage du minibrot échoué"

@@ -46,6 +46,7 @@
     "frameMinibrotTitle": "Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)",
     "frameMinibrot": "Frame minibrot",
     "framing": "Framing…",
+    "cancelSearchTitle": "Search in progress: click again to cancel",
     "decade": "Decade",
     "decadeBack": "One decade back (×10)",
     "initialZoom": "Initial zoom (scale 1)",

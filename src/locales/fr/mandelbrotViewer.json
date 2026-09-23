@@ -54,7 +54,8 @@
     "minibrot": "Minibrot",
     "minibrotTitle": "Minibrot — centrer ou cadrer l'atome sous la vue",
     "minibrotCenter": "Centrer sur le minibrot",
-    "minibrotFrame": "Centrer et cadrer le minibrot"
+    "minibrotFrame": "Centrer et cadrer le minibrot",
+    "minibrotCancelTitle": "Recherche de minibrot en cours : cliquer pour annuler"
   },
   "pins": {
     "travelTo": "Voyager vers {name}",

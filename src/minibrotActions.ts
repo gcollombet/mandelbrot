@@ -9,7 +9,7 @@ import { t } from './i18n'
 
 export type MinibrotEngine = {
   findMinibrot(radiusFactor?: number, fill?: number): Promise<{
-    status: 'ok' | 'none' | 'nonewton' | 'nosize'
+    status: 'ok' | 'none' | 'nonewton' | 'nosize' | 'cancelled'
     cx: string | null
     cy: string | null
     period: number | null
@@ -40,6 +40,9 @@ export async function centerOnMinibrot(engine: MinibrotEngine, model: Mandelbrot
     if (res.status === 'ok' && res.cx && res.cy) {
       return { next: { ...model, cx: res.cx, cy: res.cy }, status: t('minibrotActions.centered', { period: res.period }) }
     }
+    if (res.status === 'cancelled') {
+      return { next: null, status: t('minibrotActions.cancelled') }
+    }
     if (res.status === 'nonewton') {
       return { next: null, status: t('minibrotActions.nucleusNotConverged', { period: res.period }) }
     }
@@ -66,6 +69,9 @@ export async function frameMinibrot(engine: MinibrotEngine, model: MandelbrotPar
         next.precisionBudget = `1e-${Math.min(1000, depth)}`
       }
       return { next, status: t('minibrotActions.framed', { period: res.period }) }
+    }
+    if (res.status === 'cancelled') {
+      return { next: null, status: t('minibrotActions.cancelled') }
     }
     if (res.status === 'nosize') {
       return { next: null, status: t('minibrotActions.sizeDegenerate', { period: res.period }) }

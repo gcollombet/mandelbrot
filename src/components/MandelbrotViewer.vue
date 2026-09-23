@@ -162,6 +162,11 @@ function toggleScreenshotMenu() {
   screenshotMenuOpen.value = open;
 }
 function toggleMinibrotMenu() {
+  // While a search runs the button shows a spinner: a second click cancels it.
+  if (minibrotBusy.value) {
+    mandelbrotEngine.value?.cancelMinibrot();
+    return;
+  }
   const open = !minibrotMenuOpen.value;
   closeFabMenus();
   minibrotMenuOpen.value = open;
@@ -2301,7 +2306,7 @@ async function startTravelToPreset(preset: PresetRecord) {
           :class="{ 'is-open': minibrotMenuOpen }"
           type="button"
           :aria-expanded="minibrotMenuOpen"
-          :title="t('mandelbrotViewer.fab.minibrotTitle')"
+          :title="minibrotBusy ? t('mandelbrotViewer.fab.minibrotCancelTitle') : t('mandelbrotViewer.fab.minibrotTitle')"
           @click="toggleMinibrotMenu"
           @touchstart.stop
           @touchend.stop

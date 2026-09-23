@@ -54,7 +54,8 @@
     "minibrot": "Minibrot",
     "minibrotTitle": "Minibrot — centre on or frame the atom under the view",
     "minibrotCenter": "Centre on the minibrot",
-    "minibrotFrame": "Centre and frame the minibrot"
+    "minibrotFrame": "Centre and frame the minibrot",
+    "minibrotCancelTitle": "Minibrot search in progress: click to cancel"
   },
   "pins": {
     "travelTo": "Travel to {name}",

@@ -593,7 +593,8 @@ function updateCy(val: string) {
 
 // Deep "find minibrot": ask the engine to detect the atom under the current
 // view (full-precision period detection + Newton nucleus), then recentre the
-// view exactly on its nucleus, keeping the current zoom.
+// view exactly on its nucleus, keeping the current zoom. The search can run
+// for minutes at depth: a second click on the running button cancels it.
 const findingMinibrot = ref(false);
 const zoomingMinibrot = ref(false);
 const findMinibrotStatus = ref<string | null>(null);
@@ -607,7 +608,8 @@ function setMinibrotStatus(text: string) {
 }
 
 async function findMinibrot() {
-  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
+  if (findingMinibrot.value) { props.engine?.cancelMinibrot(); return; }
+  if (!props.engine || zoomingMinibrot.value) return;
   findingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
@@ -624,7 +626,8 @@ async function findMinibrot() {
 // Neighbour of "Find minibrot": same detection, but the view is *framed* on the
 // copy instead of merely centred on its nucleus (see minibrotActions.ts).
 async function zoomToMinibrot() {
-  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
+  if (zoomingMinibrot.value) { props.engine?.cancelMinibrot(); return; }
+  if (!props.engine || findingMinibrot.value) return;
   zoomingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
@@ -3016,8 +3019,8 @@ async function startVideoExport(payload: {
         <div class="find-minibrot-row">
           <button
             class="mini-btn"
-            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            :title="t('settings.navigation.findMinibrotTitle')"
+            :disabled="!props.engine || zoomingMinibrot"
+            :title="findingMinibrot ? t('settings.navigation.cancelSearchTitle') : t('settings.navigation.findMinibrotTitle')"
             @click="findMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
@@ -3025,8 +3028,8 @@ async function startVideoExport(payload: {
           </button>
           <button
             class="mini-btn"
-            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            :title="t('settings.navigation.frameMinibrotTitle')"
+            :disabled="!props.engine || findingMinibrot"
+            :title="zoomingMinibrot ? t('settings.navigation.cancelSearchTitle') : t('settings.navigation.frameMinibrotTitle')"
             @click="zoomToMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>

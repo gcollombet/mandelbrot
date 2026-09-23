@@ -19,7 +19,7 @@ type ResetMessage = {
     // Engine's table-parameter generation at reset time — a fresh worker starts
     // at 0, so without this every blaReady it posts would be dropped as stale.
     tableGeneration: number
-    // Canvas aspect (width/height): frames minibrot searches.
+    // Canvas aspect (width/height): bounds the per-view c_max.
     viewportAspect?: number
 }
 
@@ -55,15 +55,6 @@ type SetMaxBlaSkipMessage = {
     tableGeneration: number
 }
 
-type FindMinibrotMessage = {
-    type: 'findMinibrot'
-    jobId: number
-    maxIter: number
-    radiusFactor: number
-    /** When set, also frame the copy (fraction of the limiting screen axis it should span). */
-    fill?: number
-}
-
 type DisposeMessage = {
     type: 'dispose'
 }
@@ -74,7 +65,6 @@ type ReferenceWorkerMessage =
     | SetApproximationModeMessage
     | SetBlaEpsilonMessage
     | SetMaxBlaSkipMessage
-    | FindMinibrotMessage
     | DisposeMessage
 
 type OrbitChunkResponse = {
@@ -135,24 +125,12 @@ type ReadyResponse = {
     type: 'ready'
 }
 
-type MinibrotFoundResponse = {
-    type: 'minibrotFound'
-    jobId: number
-    status: 'ok' | 'none' | 'nonewton' | 'nosize'
-    cx: string | null
-    cy: string | null
-    period: number | null
-    /** Framed request only: view half-height that frames the copy. */
-    scale: string | null
-}
-
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | TableProgressResponse
     | BlaReadyResponse
     | ErrorResponse
     | ReadyResponse
-    | MinibrotFoundResponse
 
 type WorkerContext = typeof globalThis & {
     postMessage(message: unknown, transfer?: Transferable[]): void
@@ -485,38 +463,6 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
-                }
-                break
-            case 'findMinibrot':
-                if (navigator && message.jobId === activeJobId) {
-                    // The worker navigator already tracks the current view (set on
-                    // every updateView); detect the atom period at full precision
-                    // and refine to its nucleus. With `fill`, the framed variant
-                    // adds the size estimate and returns the copy's centre plus
-                    // the view scale that frames it.
-                    const framed = message.fill !== undefined
-                    const res = framed
-                        ? navigator.find_minibrot_framed(
-                              message.maxIter,
-                              message.radiusFactor,
-                              message.fill as number,
-                          )
-                        : navigator.find_minibrot(message.maxIter, message.radiusFactor)
-                    const status = res[0] as 'ok' | 'none' | 'nonewton' | 'nosize'
-                    postResponse({
-                        type: 'minibrotFound',
-                        jobId: message.jobId,
-                        status,
-                        cx: status === 'ok' ? res[1] : null,
-                        cy: status === 'ok' ? res[2] : null,
-                        period:
-                            status === 'ok'
-                                ? Number(res[3])
-                                : status === 'nonewton' || status === 'nosize'
-                                  ? Number(res[1])
-                                  : null,
-                        scale: status === 'ok' && framed ? res[4] : null,
-                    })
                 }
                 break
             case 'dispose':
