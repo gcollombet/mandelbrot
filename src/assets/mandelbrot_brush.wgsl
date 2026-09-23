@@ -436,6 +436,24 @@ fn der_renormalize(derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, der
   der_refresh_cache(derM, derS, derSLo, derInvScale);
 }
 
+// Deep exact step z′ ← 2z·z′ + 1 for a z close to 0 (a close approach of a
+// deep minibrot). The fast path's "+1" is derInvScale, clamped at e^-80, so
+// past derS = 80 it overstates the seed by e^(derS-80) — negligible while
+// |2z·derM| is large, dominant right after such an approach — and below
+// ~1e-38 z itself flushes to 0 in f32, dropping 2z·z′. Here z is carried in
+// floatexp and the product rescaled against the exact seed. Callers take this
+// path only for |z| < 1e-18, where |2z·derM| (|derM| ≥ 1e-8) can reach the
+// clamped seed's size; above it the fast path's error is below 1e-9.
+fn der_exact_step_fe(zPrev: fe, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>) {
+  let s = *derS + *derSLo;
+  let t = 2.0 * cmul(zPrev.m, *derM);
+  let tScale = s + f32(zPrev.e) * LN2;
+  let top = max(log(max(max(abs(t.x), abs(t.y)), 1e-37)) + tScale, 0.0);
+  *derM = t * exp(tScale - top) + vec2<f32>(exp(-top), 0.0);
+  der_scale_add(derS, derSLo, top - s);
+  der_refresh_cache(derM, derS, derSLo, derInvScale);
+}
+
 fn der_to_polar(m: vec2<f32>, s: f32) -> vec2<f32> {
   let mm = dot(m, m);
   if (mm <= 1e-30) {
@@ -1246,14 +1264,18 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     }
     if (skipped == 0) {
       let zPrev = refZ + fe_to_vec(dz);
+      if (sndValid) {
+        snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);
+      }
+      if (max(abs(zPrev.x), abs(zPrev.y)) >= 1e-18) {
+        derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
+      } else {
+        der_exact_step_fe(fe_add(fe_from_vec(refZ, 0), dz), &derM, &derS, &derSLo, &derInvScale);
+      }
       dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
       ref_i += 1;
       refZ = getOrbit(ref_i);
       z = refZ + fe_to_vec(dz);
-      if (sndValid) {
-        snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);
-      }
-      derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
     }
 
