@@ -68,7 +68,8 @@ The crate lives at `reference_calculus/` and uses `dashu-float` for arbitrary pr
   `--release ... -- --ignored --nocapture`, e.g.
   `cargo test --release --manifest-path reference_calculus/Cargo.toml --lib box_dimension_census -- --ignored --nocapture`.
   Current ones: `reach_census`, `nu_branch_census` (`reach.rs`), `box_dimension_census`,
-  `skip_ceiling_census` (`boxdim.rs`). Findings live in the root `*.md` notes.
+  `skip_ceiling_census` (`boxdim.rs`), `minibrot_detection_census` (`lib.rs`, minibrot
+  search success vs the pre-ladder single shot). Findings live in the root `*.md` notes.
 - No JS/TS unit test runner configured (no Vitest/Jest).
 
 ### Testing the engine's output (mandatory method for agents)

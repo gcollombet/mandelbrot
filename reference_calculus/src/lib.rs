@@ -1434,28 +1434,16 @@ impl MandelbrotNavigator {
         self.bla_source_epsilon = 0.0;
     }
 
-    /// Deep-capable period detection via the ball/atom method, evaluated at the
-    /// arbitrary-precision view centre. Unlike `detect_period_f64` — which
-    /// truncates the centre to f64 and is therefore blind past ~1e-15 — this
-    /// carries the critical orbit `z_n` and its derivative `dz_n/dc` in DBig, so
-    /// it works at any zoom depth. The smallest `n` whose image-disk of the view
-    /// (radius `radius` ≈ a few · `scale`) covers the origin — i.e.
-    /// `|z_n| ≤ radius · |dz_n/dc|` — is the period of the smallest atom
-    /// containing the view centre. Returns `None` if the orbit escapes
-    /// (`|z| > 2`) before any such `n`, meaning no minibrot sits under the view.
-    fn detect_period_ball(&self, max_iter: usize, radius: &DBig) -> Option<usize> {
-        detect_period_ball_at(&self.cx, &self.cy, max_iter, radius)
-    }
-
     /// Locate the minibrot under the current view and return its exact nucleus.
     ///
     /// Two stages, both arbitrary-precision so they hold at any depth:
-    ///   1. `detect_period_ball` finds the period `p` of the atom containing the
-    ///      view centre.
-    ///   2. `newton_nucleus` refines the view centre to the period-`p` nucleus
-    ///      (`z_p = 0`) in full precision.
+    ///   1. `minibrot_period_candidates_at` lists candidate periods from one
+    ///      critical orbit at the view centre (ball tests at several radii, plus
+    ///      the atom-domain period).
+    ///   2. `newton_nucleus` refines the view centre to each candidate's nucleus
+    ///      (`z_p = 0`) in full precision; the first one accepted wins.
     ///
-    /// `radius_factor` scales the view radius used by the ball test (≈2–4 covers
+    /// `radius_factor` scales the view radius of the first ball test (≈2–4 covers
     /// a centred minibrot; larger snaps to a bigger parent atom). Returns
     /// `["ok", cx, cy, period]` on success, `["nonewton", period]` if the period
     /// was found but Newton did not converge within range, or `["none"]` if no
@@ -1549,9 +1537,19 @@ impl MandelbrotNavigator {
             .max(64)
     }
 
-    /// Ball-detection + Newton refinement shared by the two `find_minibrot*`
-    /// entry points. `Err(None)` = nothing under the view, `Err(Some(p))` = the
-    /// period was found but Newton did not converge.
+    /// Period detection + Newton refinement shared by the two `find_minibrot*`
+    /// entry points. `Err(None)` = nothing under the view, `Err(Some(p))` = a
+    /// period was found but Newton converged for none of the candidates.
+    ///
+    /// Success first: a single ball test followed by Newton fails on a large
+    /// share of real views — the view sits in a big component whose nucleus is
+    /// outside the ball, or the detected atom's nucleus lies outside Newton's
+    /// basin from the view centre (Newton basins do not follow atom domains,
+    /// Heiland-Allen 2021). So one critical orbit yields an ordered candidate
+    /// list — the requested radius, a tighter one (the atom right under the
+    /// centre), the atom-domain period, then wider radii — and each is tried in
+    /// turn; the first accepted nucleus wins. When the first candidate
+    /// converges, the cost is the same as the single-shot path.
     ///
     /// `want_size` carries the Munafo/Jung `Λ` out of the nucleus acceptance
     /// pass, which walks the period-long orbit the estimate needs anyway — the
@@ -1561,22 +1559,70 @@ impl MandelbrotNavigator {
         max_iter: u32,
         radius_factor: f64,
         want_size: bool,
-    ) -> Result<(usize, DBig, DBig, Option<(DBig, DBig)>), Option<usize>> {
-        const NEWTON_STEPS: usize = 80;
+    ) -> Result<LocatedMinibrot, Option<usize>> {
         self.ensure_precision();
 
-        let factor =
-            DBig::from_str(&radius_factor.max(1e-6).to_string()).unwrap_or_else(|_| dbig_i(4));
-        let radius = &self.scale * &factor;
-
-        let Some(period) = self.detect_period_ball(max_iter as usize, &radius) else {
-            return Err(None);
+        let rf = if radius_factor.is_finite() {
+            radius_factor.max(1e-6)
+        } else {
+            4.0
         };
+        // Ball radii in view scales. Newton's reach grows with the radius so a
+        // wide ball can still reach the atom it detected.
+        let ladder = [rf, rf / 4.0, rf * 4.0, rf * 16.0, rf * 64.0];
+        let radii: Vec<DBig> = ladder.iter().map(|&f| &self.scale * dbig_f64(f)).collect();
+        let reach = |f: f64| (250.0 * f).max(1000.0);
 
-        // The nucleus is within ~scale of the view centre; bound Newton's reach
-        // generously but not wildly, so a stray detection cannot teleport the
-        // view far off-screen.
-        let max_distance = &self.scale * dbig_i(1000);
+        // Fast path, the historical single shot: its orbit stops at the first
+        // ball hit, where the full candidate scan may have to run to escape.
+        let first = detect_period_ball_at(&self.cx, &self.cy, max_iter as usize, &radii[0]);
+        if let Some(period) = first {
+            if let Some(found) = self.refine_minibrot(period, reach(ladder[0]), want_size) {
+                return Ok(found);
+            }
+        }
+
+        let (ball_periods, atom_period) =
+            minibrot_period_candidates_at(&self.cx, &self.cy, max_iter as usize, &radii);
+        let mut candidates: Vec<(usize, f64)> = Vec::new();
+        let mut push = |period: Option<usize>, reach_scales: f64| {
+            if let Some(p) = period {
+                // `first` was already tried by the fast path.
+                if Some(p) != first && !candidates.iter().any(|&(q, _)| q == p) {
+                    candidates.push((p, reach_scales));
+                }
+            }
+        };
+        push(ball_periods[0], reach(ladder[0]));
+        push(ball_periods[1], reach(ladder[1]));
+        push(atom_period, reach(ladder[0]));
+        for i in 2..ladder.len() {
+            push(ball_periods[i], reach(ladder[i]));
+        }
+
+        // Report "found but not converged" only for a ball hit: the atom-domain
+        // period always exists, and alone it says nothing sits under the view.
+        let reported = first.or_else(|| ball_periods.iter().flatten().next().copied());
+        for (period, reach_scales) in candidates {
+            if let Some(found) = self.refine_minibrot(period, reach_scales, want_size) {
+                return Ok(found);
+            }
+        }
+        Err(reported)
+    }
+
+    /// Newton refinement of the view centre to a period-`period` nucleus within
+    /// `reach_scales` view scales, at the tolerance the working precision allows.
+    fn refine_minibrot(
+        &self,
+        period: usize,
+        reach_scales: f64,
+        want_size: bool,
+    ) -> Option<LocatedMinibrot> {
+        const NEWTON_STEPS: usize = 80;
+        // Bound Newton's reach generously but not wildly, so a stray detection
+        // cannot teleport the view arbitrarily far.
+        let max_distance = &self.scale * dbig_f64(reach_scales);
         // Converge/validate to (most of) the working precision, NOT to the
         // current view scale. A nucleus only resolved to ~scale is accurate
         // enough to *display* at the current zoom, but its absolute error
@@ -1593,7 +1639,7 @@ impl MandelbrotNavigator {
         let tol_digits = prec.saturating_sub(margin_digits).max(16);
         let tolerance =
             DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
-        match newton_nucleus_with_size(
+        newton_nucleus_with_size(
             &self.cx,
             &self.cy,
             period,
@@ -1601,10 +1647,8 @@ impl MandelbrotNavigator {
             &max_distance,
             &tolerance,
             want_size,
-        ) {
-            Some((ncx, ncy, size)) => Ok((period, ncx, ncy, size)),
-            None => Err(Some(period)),
-        }
+        )
+        .map(|(ncx, ncy, size)| (period, ncx, ncy, size))
     }
 
     pub fn scale(&mut self, value: &str) {
@@ -2118,9 +2162,14 @@ fn minibrot_frame_scale_factor(theta: f64, view_angle: f64, aspect: f64, fill: f
     (half_x / aspect).max(half_y) / fill.clamp(0.05, 1.0)
 }
 
-/// Ball-arithmetic period detection at an arbitrary centre, extracted from
-/// `MandelbrotNavigator::detect_period_ball` so build-only censuses can drive the
-/// production path instead of a copy of it.
+/// Deep-capable period detection via the ball/atom method at an
+/// arbitrary-precision centre. Unlike `detect_period_f64` — which truncates the
+/// centre to f64 and is therefore blind past ~1e-15 — this carries the critical
+/// orbit `z_n` and its derivative `dz_n/dc` in DBig, so it works at any zoom
+/// depth. The smallest `n` whose image-disk of the view (radius `radius` ≈ a
+/// few · `scale`) covers the origin — i.e. `|z_n| ≤ radius · |dz_n/dc|` — is the
+/// period of the smallest atom containing the view centre. Returns `None` if the
+/// orbit escapes (`|z| > 2`) before any such `n`.
 pub(crate) fn detect_period_ball_at(
     cx: &DBig,
     cy: &DBig,
@@ -2161,6 +2210,71 @@ pub(crate) fn detect_period_ball_at(
         }
     }
     None
+}
+
+/// `(period, nucleus x, nucleus y, size estimate Λ)` of a minibrot search hit.
+type LocatedMinibrot = (usize, DBig, DBig, Option<(DBig, DBig)>);
+
+/// Every period candidate one critical orbit at `(cx, cy)` offers, for the
+/// minibrot search's fallbacks.
+///
+/// Returns, per entry of `radii`, the ball-test period of
+/// [`detect_period_ball_at`] at that radius, plus the *atom-domain* period: the
+/// last `n` at which `|z_n|` reached a new minimum (Heiland-Allen, "Atom
+/// domains"). Atom domains are much larger than their components, so this
+/// period stays available when the centre is far from any nucleus and every ball
+/// misses. The orbit stops once every radius has its period, at escape, or at
+/// `max_iter`.
+pub(crate) fn minibrot_period_candidates_at(
+    cx: &DBig,
+    cy: &DBig,
+    max_iter: usize,
+    radii: &[DBig],
+) -> (Vec<Option<usize>>, Option<usize>) {
+    let two = dbig_i(2);
+    let one = dbig_i(1);
+    let four = dbig_i(4);
+    let radii_sq: Vec<DBig> = radii.iter().map(|r| r * r).collect();
+    let mut periods: Vec<Option<usize>> = vec![None; radii.len()];
+    let mut open = radii.len();
+
+    let mut zx = dbig_i(0);
+    let mut zy = dbig_i(0);
+    let mut dx = dbig_i(0);
+    let mut dy = dbig_i(0);
+    let mut min_z2: Option<DBig> = None;
+    let mut atom = None;
+
+    for n in 1..=max_iter {
+        let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+        let dy_new = &two * (&zx * &dy + &zy * &dx);
+        let zx_new = &zx * &zx - &zy * &zy + cx;
+        let zy_new = &two * &zx * &zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+        dx = dx_new;
+        dy = dy_new;
+
+        let z2 = &zx * &zx + &zy * &zy;
+        if z2 > four {
+            break;
+        }
+        if min_z2.as_ref().is_none_or(|m| z2 < *m) {
+            atom = Some(n);
+            min_z2 = Some(z2.clone());
+        }
+        let d2 = &dx * &dx + &dy * &dy;
+        for (period, r2) in periods.iter_mut().zip(&radii_sq) {
+            if period.is_none() && z2 <= r2 * &d2 {
+                *period = Some(n);
+                open -= 1;
+            }
+        }
+        if open == 0 {
+            break;
+        }
+    }
+    (periods, atom)
 }
 
 /// Digits the Newton ladder starts from, and never drops below: enough signal in
@@ -2352,7 +2466,19 @@ pub(crate) fn newton_nucleus_with_size(
     } else {
         0
     };
-    let mut working = target.min(NEWTON_LADDER_MIN_DIGITS);
+    // Ladder floor, relative to the search reach and not absolute: rounding c to
+    // a fixed 24 digits moves it by ~1e-24, which past a 1e-24 zoom is further
+    // than the whole reach — the first steps then aim at a random point and
+    // Newton fails every deep view. `MIN_DIGITS` below the reach keeps the
+    // rounding far under the distance to the nucleus.
+    let reach_digits = dbig_neg_log10(max_distance);
+    let floor = if reach_digits.is_finite() {
+        reach_digits.ceil().max(0.0) as usize + NEWTON_LADDER_MIN_DIGITS
+    } else {
+        NEWTON_LADDER_MIN_DIGITS
+    }
+    .min(target);
+    let mut working = floor;
 
     for _ in 0..steps {
         let at_full = !laddered || working >= target;
@@ -2371,8 +2497,12 @@ pub(crate) fn newton_nucleus_with_size(
         let mut zy = zero.clone();
         let mut dx = zero.clone();
         let mut dy = zero.clone();
+        // Σ z_d′/z_d over the proper divisors d | period: the log-derivative of
+        // the lower-period factors, divided out below.
+        let mut hx = zero.clone();
+        let mut hy = zero.clone();
 
-        for _ in 0..period {
+        for n in 1..=period {
             let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
             let dy_new = &two * (&zx * &dy + &zy * &dx);
             let zx_new = &zx * &zx - &zy * &zy + &cxw;
@@ -2382,15 +2512,35 @@ pub(crate) fn newton_nucleus_with_size(
             zy = zy_new;
             dx = dx_new;
             dy = dy_new;
+
+            if n < period && period % n == 0 {
+                let zn2 = &zx * &zx + &zy * &zy;
+                if zn2 != zero {
+                    hx = &hx + (&dx * &zx + &dy * &zy) / &zn2;
+                    hy = &hy + (&dy * &zx - &dx * &zy) / &zn2;
+                }
+            }
         }
 
-        let denom = &dx * &dx + &dy * &dy;
-        if denom == zero {
+        // Newton on the *reduced* function g = z_p / ∏_{d|p, d<p} z_d
+        // (Heiland-Allen, "Newton's method for periodic points", 2018): the
+        // lower-period nuclei are poles of g instead of roots, so Newton is
+        // pushed away from them rather than landing on one and failing the
+        // primitivity check. Step = g/g′ = 1/(z_p′/z_p − Σ z_d′/z_d); near the
+        // target root z_p′/z_p dominates and this is the plain step.
+        let zp2 = &zx * &zx + &zy * &zy;
+        if zp2 == zero {
+            break;
+        }
+        let qx = (&dx * &zx + &dy * &zy) / &zp2 - &hx;
+        let qy = (&dy * &zx - &dx * &zy) / &zp2 - &hy;
+        let qn = &qx * &qx + &qy * &qy;
+        if qn == zero {
             return None;
         }
 
-        let step_x = (&zx * &dx + &zy * &dy) / &denom;
-        let step_y = (&zy * &dx - &zx * &dy) / &denom;
+        let step_x = &qx / &qn;
+        let step_y = &zero - &qy / &qn;
         cx = &cx - &step_x;
         cy = &cy - &step_y;
 
@@ -2415,7 +2565,7 @@ pub(crate) fn newton_nucleus_with_size(
             } else {
                 target
             };
-            working = next.clamp(NEWTON_LADDER_MIN_DIGITS.min(target), target);
+            working = next.clamp(floor, target);
         }
     }
 
@@ -2767,6 +2917,66 @@ mod tests {
             "nucleus only resolved to view-scale precision: offset²={}",
             offset_sq
         );
+    }
+
+    #[test]
+    fn find_minibrot_resolves_below_the_ladder_floor() {
+        // Regression: the Newton precision ladder started every search at 24
+        // digits, i.e. it rounded the view centre by ~1e-24. Past a 1e-24 zoom
+        // that is further than Newton's whole reach, so every deep search failed.
+        // Here: 3e-41 off the period-3 nucleus, at scale 1e-40.
+        let start = DBig::from_str("-1.7548776662466927")
+            .unwrap()
+            .with_precision(80)
+            .value();
+        let zero = raise_precision(dbig_i(0), 80);
+        let tol = DBig::from_str("1e-70").unwrap();
+        let (nx, _) =
+            newton_nucleus(&start, &zero, 3, 80, &dbig_i(1), &tol).expect("period-3 nucleus");
+        let offset = DBig::from_str("3e-41").unwrap();
+        let view_x = (&nx + &offset).to_string();
+        let mut nav = MandelbrotNavigator::new(&view_x, "0", "1e-40", 0.0);
+        let res = nav.find_minibrot(4096, 4.0);
+        assert_eq!(res[0], "ok", "expected a deep hit, got {:?}", res);
+        assert_eq!(res[3], "3");
+        let cx = DBig::from_str(&res[1]).unwrap();
+        let err = dbig_to_f64(&((&cx - &nx) / DBig::from_str("1e-40").unwrap()));
+        assert!(err.abs() < 1e-6, "nucleus off by {} view scales", err);
+    }
+
+    #[test]
+    fn reduced_newton_skips_lower_period_roots() {
+        // From c = -1.05 plain Newton on z_4 falls into the period-2 root c = -1
+        // (z_4 vanishes there too) and primitivity rejects it. Dividing out the
+        // divisor factors lands on the real period-4 nucleus instead.
+        let start = DBig::from_str("-1.05").unwrap().with_precision(60).value();
+        let zero = raise_precision(dbig_i(0), 60);
+        let tol = DBig::from_str("1e-30").unwrap();
+        let (cx, cy) = newton_nucleus(&start, &zero, 4, 80, &dbig_i(1), &tol)
+            .expect("reduced Newton must reach a period-4 nucleus");
+        assert!(
+            (dbig_to_f64(&cx) + 1.3107026413368328).abs() < 1e-12,
+            "cx={}",
+            cx
+        );
+        assert!(dbig_to_f64(&cy).abs() < 1e-12);
+    }
+
+    #[test]
+    fn find_minibrot_falls_back_when_the_first_ball_misses() {
+        // Inside a large component, far from its nucleus: the 4-scale ball finds
+        // nothing, the wider candidates reach the neighbouring period-6 atom.
+        let cx = DBig::from_str("-0.12").unwrap();
+        let cy = DBig::from_str("0.75").unwrap();
+        let scale = DBig::from_str("1e-3").unwrap();
+        assert_eq!(
+            detect_period_ball_at(&cx, &cy, 4096, &(&scale * dbig_i(4))),
+            None
+        );
+        let mut nav = MandelbrotNavigator::new("-0.12", "0.75", "1e-3", 0.0);
+        let res = nav.find_minibrot(4096, 4.0);
+        assert_eq!(res[0], "ok", "expected a fallback hit, got {:?}", res);
+        assert_eq!(res[3], "6");
     }
 
     #[test]
@@ -4255,5 +4465,234 @@ mod gpu_bla_mirror {
             turns_bla * 3 < turns_exact * 2,
             "BLA no longer skips: {turns_bla} vs {turns_exact} turns"
         );
+    }
+}
+
+#[cfg(test)]
+mod minibrot_census {
+    use super::*;
+
+    // Pre-ladder Newton (a6c7976^): full precision every step, plain step.
+    fn newton_full(
+        sx: &DBig,
+        sy: &DBig,
+        period: usize,
+        steps: usize,
+        maxd: &DBig,
+        tol: &DBig,
+    ) -> Option<(DBig, DBig)> {
+        let two = dbig_i(2);
+        let one = dbig_i(1);
+        let zero = dbig_i(0);
+        let maxd2 = maxd * maxd;
+        let tol2 = tol * tol;
+        let (mut cx, mut cy) = (sx.clone(), sy.clone());
+        for _ in 0..steps {
+            let (mut zx, mut zy, mut dx, mut dy) =
+                (zero.clone(), zero.clone(), zero.clone(), zero.clone());
+            for _ in 0..period {
+                let dxn = &two * (&zx * &dx - &zy * &dy) + &one;
+                let dyn_ = &two * (&zx * &dy + &zy * &dx);
+                let zxn = &zx * &zx - &zy * &zy + &cx;
+                let zyn = &two * &zx * &zy + &cy;
+                zx = zxn;
+                zy = zyn;
+                dx = dxn;
+                dy = dyn_;
+            }
+            let den = &dx * &dx + &dy * &dy;
+            if den == zero {
+                return None;
+            }
+            let stx = (&zx * &dx + &zy * &dy) / &den;
+            let sty = (&zy * &dx - &zx * &dy) / &den;
+            cx = &cx - &stx;
+            cy = &cy - &sty;
+            let ddx = &cx - sx;
+            let ddy = &cy - sy;
+            if &ddx * &ddx + &ddy * &ddy > maxd2 {
+                return None;
+            }
+            if &stx * &stx + &sty * &sty <= tol2 {
+                break;
+            }
+        }
+        verify_nucleus(&cx, &cy, period, &tol2, false)?;
+        Some((cx, cy))
+    }
+
+    fn escape_count(cx: &DBig, cy: &DBig, max_iter: usize) -> usize {
+        let two = dbig_i(2);
+        let four = dbig_i(4);
+        let (mut zx, mut zy) = (dbig_i(0), dbig_i(0));
+        for n in 0..max_iter {
+            let zxn = &zx * &zx - &zy * &zy + cx;
+            let zyn = &two * &zx * &zy + cy;
+            zx = zxn;
+            zy = zyn;
+            if &zx * &zx + &zy * &zy > four {
+                return n;
+            }
+        }
+        max_iter
+    }
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
+        }
+    }
+
+    /// Success census of the minibrot search. Zoom walks toward the boundary
+    /// (keep the highest escaping-count sample), then compare the production
+    /// search against the pre-ladder single shot (one ball at 4·scale + a
+    /// full-precision plain Newton). `DIAG=1` prints the candidates of every
+    /// failure. 2026-09-23 (12 walks × 1e-8..1e-48): production 40/60, single
+    /// shot 25/60, the 24-digit-floor ladder 18/60 (0 % past 1e-24); the
+    /// remaining failures are centres escaping before any atom period.
+    #[test]
+    #[ignore]
+    fn minibrot_detection_census() {
+        let walks: usize = std::env::var("WALKS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(12);
+        let depths: Vec<i32> = std::env::var("DEPTHS")
+            .unwrap_or_else(|_| "8,16,24,32,48".into())
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect();
+        let max_iter = 20000usize;
+        let mut rng = Lcg(0x5eed);
+        let starts = [
+            ("-0.75", "0.1"),
+            ("-0.1", "0.8"),
+            ("0.28", "0.01"),
+            ("-1.25", "0.02"),
+            ("-0.16", "1.035"),
+            ("0.36", "0.1"),
+        ];
+        let mut tallies: std::collections::BTreeMap<i32, [usize; 5]> = Default::default();
+        let (mut tp, mut tf) = (0.0f64, 0.0f64);
+        for w in 0..walks {
+            let (sx, sy) = starts[w % starts.len()];
+            let mut nav = MandelbrotNavigator::new(sx, sy, "1e-2", 0.0);
+            nav.set_precision_budget("1e-30");
+            let mut exp = 2i32;
+            for &target in &depths {
+                while exp < target {
+                    exp += 1;
+                    let prec = nav.working_precision();
+                    let scale = nav.scale.clone();
+                    let mut best: Option<(usize, DBig, DBig)> = None;
+                    for _ in 0..12 {
+                        let ox = dbig_f64(rng.next() * 2.0 - 1.0);
+                        let oy = dbig_f64(rng.next() * 2.0 - 1.0);
+                        let px = raise_precision(&nav.cx + &ox * &scale, prec);
+                        let py = raise_precision(&nav.cy + &oy * &scale, prec);
+                        let n = escape_count(&px, &py, 4000);
+                        if n < 4000 && best.as_ref().is_none_or(|b| n > b.0) {
+                            best = Some((n, px, py));
+                        }
+                    }
+                    let Some((_, px, py)) = best else { break };
+                    let s = format!("1e-{}", exp);
+                    nav.origin(&px.to_string(), &py.to_string());
+                    nav.scale(&s);
+                }
+                let t0 = std::time::Instant::now();
+                let prod = nav.find_minibrot(max_iter as u32, 4.0);
+                let t_prod = t0.elapsed().as_secs_f64();
+                // Reference: same period & tolerance, full-precision Newton.
+                let radius = &nav.scale * dbig_i(4);
+                let period = detect_period_ball_at(&nav.cx, &nav.cy, max_iter, &radius);
+                let t1 = std::time::Instant::now();
+                let full = period.and_then(|p| {
+                    let prec = nav.working_precision();
+                    let margin = 24 + (p as f64).log10().ceil() as usize;
+                    let tol =
+                        DBig::from_str(&format!("1e-{}", prec.saturating_sub(margin).max(16)))
+                            .unwrap();
+                    newton_full(&nav.cx, &nav.cy, p, 80, &(&nav.scale * dbig_i(1000)), &tol)
+                });
+                let t_full = t1.elapsed().as_secs_f64();
+                tp += t_prod;
+                tf += t_full;
+                if prod[0] != "ok" && std::env::var("DIAG").is_ok() {
+                    let radii: Vec<DBig> = [4.0, 1.0, 16.0, 64.0, 256.0]
+                        .iter()
+                        .map(|&f| &nav.scale * dbig_f64(f))
+                        .collect();
+                    let (bp, ap) =
+                        minibrot_period_candidates_at(&nav.cx, &nav.cy, max_iter, &radii);
+                    let esc = escape_count(&nav.cx, &nav.cy, max_iter);
+                    println!(
+                        "   scale {} esc {esc} balls {:?} atom {:?}",
+                        nav.scale.clone().with_precision(3).value(),
+                        bp,
+                        ap
+                    );
+                    if let Some(p) = ap {
+                        let prec = nav.working_precision();
+                        let tol = DBig::from_str(&format!(
+                            "1e-{}",
+                            prec.saturating_sub(24 + (p as f64).log10().ceil() as usize)
+                                .max(16)
+                        ))
+                        .unwrap();
+                        let far = newton_nucleus(
+                            &nav.cx,
+                            &nav.cy,
+                            p,
+                            200,
+                            &DBig::from_str("1").unwrap(),
+                            &tol,
+                        );
+                        println!(
+                            "   atom newton unbounded: {:?}",
+                            far.map(|(x, y)| {
+                                let dx = &x - &nav.cx;
+                                let dy = &y - &nav.cy;
+                                dbig_to_f64(&((&dx * &dx + &dy * &dy) / (&nav.scale * &nav.scale)))
+                                    .sqrt()
+                            })
+                        );
+                    }
+                }
+                let e = tallies.entry(target).or_default();
+                e[0] += 1;
+                if prod[0] == "ok" {
+                    e[1] += 1;
+                }
+                if full.is_some() {
+                    e[2] += 1;
+                }
+                if prod[0] == "none" {
+                    e[3] += 1;
+                }
+                if prod[0] == "nonewton" {
+                    e[4] += 1;
+                }
+                println!(
+                    "walk {w} 1e-{target} period {:?} prod {:?} p={} ({:.2}s) old {} ({:.2}s)",
+                    period,
+                    prod[0],
+                    prod.get(3).map(|s| s.as_str()).unwrap_or("-"),
+                    t_prod,
+                    full.is_some(),
+                    t_full
+                );
+            }
+        }
+        println!("time prod {tp:.1}s  old {tf:.1}s");
+        println!("depth: total prod_ok old_ok none nonewton");
+        for (d, t) in tallies {
+            println!("1e-{d}: {:?}", t);
+        }
     }
 }
