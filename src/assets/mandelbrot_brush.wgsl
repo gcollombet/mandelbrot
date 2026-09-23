@@ -558,8 +558,19 @@ fn apply_affine_derivatives(
   snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>,
 ) {
   snd_apply_affine(a, snd, sndScale);
-  *derM = cmul(*derM, a.m) + bMantissa * (*derInvScale);
-  der_scale_add(derS, derSLo, f32(a.e) * LN2);
+  // B enters at its own scale, not through derInvScale: that cache is clamped
+  // at e^-80, so past derS = 80 (deep zooms) it inflated B by e^(derS-80),
+  // which dominates whenever the block crosses a close approach of the
+  // reference (|B/A| huge). Rescale on the larger of the two terms instead
+  // (A = a.m·2^e, B = bMantissa·2^e, top = ln of the larger term / 2^e):
+  //   derM ← aDer·e^(s−top) + bMantissa·e^(−top),  derS ← e·ln2 + top.
+  let s = *derS + *derSLo;
+  let aDer = cmul(*derM, a.m);
+  let aLog = log(max(max(abs(aDer.x), abs(aDer.y)), 1e-37)) + s;
+  let bLog = log(max(max(abs(bMantissa.x), abs(bMantissa.y)), 1e-37));
+  let top = max(aLog, bLog);
+  *derM = aDer * exp(s - top) + bMantissa * exp(-top);
+  der_scale_add(derS, derSLo, f32(a.e) * LN2 + (top - s));
   der_refresh_cache(derM, derS, derSLo, derInvScale);
 }
 
