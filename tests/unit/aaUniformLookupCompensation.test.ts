@@ -9,10 +9,10 @@ const preview = read('../../src/components/PalettePreview.vue')
 describe('uniform AA shifted-lattice lookup', () => {
   it('passes the current scene-space jitter only for non-adaptive AA', () => {
     expect(engine).toContain(
-      'renderOptions.aaAdaptive === false ? this.aaOffsetX : 0, // 19: uniform-AA inverse lookup X',
+      'aaLookupOffsetX: renderOptions.aaAdaptive === false ? this.aaOffsetX : 0,',
     )
     expect(engine).toContain(
-      'renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y',
+      'aaLookupOffsetY: renderOptions.aaAdaptive === false ? this.aaOffsetY : 0,',
     )
   })
 
@@ -30,7 +30,7 @@ describe('uniform AA shifted-lattice lookup', () => {
     expect(shader).toContain('let aaLookupUvOffset = select(')
     expect(shader).toContain('applyAaGate\n  );')
     expect(shader).toContain('let c = shade_srgb(fragCoord, false);')
-    expect(preview).toContain('0, // aaLookupOffsetX (preview never accumulates AA)')
-    expect(preview).toContain('0, // aaLookupOffsetY')
+    expect(preview).toContain('aaLookupOffsetX: 0, // the preview never accumulates AA')
+    expect(preview).toContain('aaLookupOffsetY: 0,')
   })
 })

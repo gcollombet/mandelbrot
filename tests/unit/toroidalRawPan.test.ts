@@ -45,8 +45,8 @@ describe('toroidal raw pan (origin shift instead of reprojection copy)', () => {
   })
 
   it('keeps every raw-origin consumer uniform in sync', () => {
-    expect(engine).toContain('const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96')
-    expect(engine).toContain('this.rawOriginX,                      // 96: raw toroidal origin X')
+    expect(engine).toContain("colorUniformByteOffset('rawOriginX'),")
+    expect(engine).toContain('rawOriginX: this.rawOriginX,')
     expect(engine).toContain('this.rawOriginX, this.rawOriginY,')
     expect(engine).toContain('tiledTile?.originX ?? 0, tiledTile?.originY ?? 0,')
     expect(engine).toMatch(/uniformBufferResolve = this\.device\.createBuffer\(\{\s+size: 4 \* 12,/)

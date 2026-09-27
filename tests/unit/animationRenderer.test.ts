@@ -44,11 +44,11 @@ describe('expanded animation renderer wiring', () => {
   it('writes effective values through the existing color uniform ABI', () => {
     const engine = read('../../src/Engine.ts');
 
-    expect(engine).toContain('effectiveReliefDepth,            // 20: reliefDepth');
-    expect(engine).toContain('effectiveOrbitTrap.strength,         // 33: legacy-compatible orbitTrapStrength');
-    expect(engine).toContain('effectiveGradeContrast,              // 43: gradeContrast');
-    expect(engine).toContain('effectiveGradeSaturation,            // 64: gradeSaturation');
-    expect(engine).toContain('effectiveProtrusionPhase,             // 68: protrusionPhase');
-    expect(engine).toContain('...orbitTrapColorUniformValues(effectiveOrbitTrap)');
+    expect(engine).toContain('reliefDepth: effectiveReliefDepth,');
+    expect(engine).toContain('orbitTrapStrength: effectiveOrbitTrap.strength,');
+    expect(engine).toContain('gradeContrast: effectiveGradeContrast,');
+    expect(engine).toContain('gradeSaturation: effectiveGradeSaturation,');
+    expect(engine).toContain('protrusionPhase: effectiveProtrusionPhase,');
+    expect(engine).toContain('...orbitTrapUniforms(effectiveOrbitTrap),');
   });
 });

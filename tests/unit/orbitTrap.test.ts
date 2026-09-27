@@ -110,10 +110,9 @@ describe('terminal logarithmic-rosette shader contract', () => {
     const params = read('../../src/Mandelbrot.ts');
     const paletteStore = read('../../src/paletteStore.ts');
 
-    expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104');
-    expect(engine).toContain('...orbitTrapColorUniformValues(effectiveOrbitTrap)');
-    expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104;');
-    expect(preview).toContain('device.queue.writeBuffer(uniformBuffer, 72 * 4');
+    expect(engine).toContain('...orbitTrapUniforms(effectiveOrbitTrap),');
+    expect(preview).toContain('...orbitTrapUniforms(orbitTrap),');
+    expect(preview).toContain('packColorUniforms(previewUniforms())');
     expect(settings).toContain('orbitTrap: normalizeOrbitTrapFromLegacy(model.value)');
     expect(settings).toContain(`:title="t('settings.palettes.orbitTrap.title')"`);
     expect(params).toContain('orbitTrap?: OrbitTrapConfig;');

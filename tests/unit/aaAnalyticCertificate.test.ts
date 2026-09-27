@@ -39,7 +39,7 @@ describe('analytic AA Taylor certificate', () => {
   })
 
   it('binds only coherent center values needed by the bailout guard', () => {
-    expect(engine).toContain("{ binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }")
+    expect(engine).toContain("// Coherent sample-0 centre iter/z paired with raw Taylor layers 8..12.\n            bind.data('2d-array'),")
     expect(engine).toContain('{ binding: 5, resource: this.resolvedDisplay.valuesArrayView }')
     expect(reseed).toContain('textureLoad(valuesTex, coord, 0, 0)')
     expect(reseed).toContain('textureLoad(valuesTex, coord, 1, 0)')

@@ -100,19 +100,17 @@ describe('palette protrusion effect', () => {
     expect(settings).toContain(`<DenseField :label="t('settings.palettes.surface.protrusionGeometry')" :min="0" :max="1"`);
     expect(settings).toContain(`:label="t('settings.palettes.surface.geometricPeriod')"`);
 
-    expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104');
-    expect(engine).toContain('effectiveProtrusionPhase,             // 68: protrusionPhase');
-    expect(engine).toContain('renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness');
-    expect(engine).toContain('renderOptions.protrusionGeometryMix ?? 0,');
-    expect(engine).toContain('renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod');
-    expect(engine).toContain('renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification');
+    expect(engine).toContain('protrusionPhase: effectiveProtrusionPhase,');
+    expect(engine).toContain('protrusionSharpness: renderOptions.protrusionSharpness ?? 2,');
+    expect(engine).toContain('protrusionGeometryMix: renderOptions.protrusionGeometryMix ?? 0,');
+    expect(engine).toContain('protrusionPeriod: renderOptions.protrusionPeriod ?? 1,');
+    expect(engine).toContain('protrusionStrength: renderOptions.protrusionStrength ?? 1,');
     expect(shader).toContain('protrusionPhase: f32');
     expect(shader).toContain('protrusionSharpness: f32');
     expect(shader).toContain('protrusionStrength: f32');
     expect(shader).toContain('protrusionGeometryMix: f32');
     expect(shader).toContain('protrusionPeriod: f32');
-    expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104;');
-    expect(preview).toContain('device.queue.writeBuffer(uniformBuffer, 68 * 4');
+    expect(preview).toContain('packColorUniforms(previewUniforms())');
     expect(preview).toContain('props.protrusionPhase ?? 0');
     expect(preview).toContain('props.protrusionSharpness ?? 2');
     expect(preview).toContain('props.protrusionStrength ?? 1');

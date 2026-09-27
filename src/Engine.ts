@@ -1,4 +1,4 @@
-import { readHdrGpuOutput, type HdrGpuOptions } from './hdrGpuOutput'
+import type { HdrGpuOptions } from './hdrGpuOutput'
 import type { StereoColorPass } from './stereoVideo'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
@@ -38,6 +38,9 @@ import {
 } from './zoomState'
 import {advanceTile, createExportSession, currentTile, resolveSurface, restartKeyframe, validateExportSettings, type ExpmapLayout, type ExportSession, type ExportSessionSettings, type TiledLayout} from './exportSession'
 import {ORBIT_STEP_CAPACITY, ReferenceChannel, type BlaTablePayload, type TableBuildStage} from './referenceChannel'
+import {COLOR_UNIFORM_BYTES, colorUniformByteOffset, orbitTrapUniforms, packColorUniformRun, packColorUniforms, type ColorUniforms} from './colorUniforms'
+import {bind, computePipelineDescriptor, createPassLayout, fullscreenPipelineDescriptor} from './gpuPipelines'
+import {ExportCapture} from './exportCapture'
 import {FrameRequests, frameClears, planFrame, type FramePlan} from './framePlan'
 import {ViewGrids, ZERO, neutralSizeFor, cameraShiftTexels, iterationDispatchBox, padRect, tileLocalRect, toUv, type GridMapping, type MergeUniforms} from './viewGrids'
 import {
@@ -64,7 +67,7 @@ import {
     READ_WRITE_STORAGE_TEXTURES_FEATURE,
     recommendedGpuMemoryBudgetBytes,
 } from './gpuCompatibility'
-import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
+import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
 import {t} from './i18n'
 import type {
@@ -134,12 +137,6 @@ class GpuDeviceLostDuringSetupError extends Error {
         this.info = info
     }
 }
-const COLOR_UNIFORM_FLOAT_COUNT = 104
-/** Slots 96/97: toroidal origin of the raw texture (analytic-AA payload reads). */
-const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96
-/** Live-grid sub-texel residual, normalized UV (color.wgsl liveShiftU/V). */
-const COLOR_UNIFORM_LIVE_SHIFT_U_SLOT = 65
-const COLOR_UNIFORM_LIVE_SHIFT_V_SLOT = 67
 const TAU = Math.PI * 2
 
 const ORBIT_METRIC_EPSILON = 0.001
@@ -352,37 +349,8 @@ export class Engine {
     private snapshotCallback?: (png: string) => void;
     private snapshotDestWidth?: number;
 
-    // ── Video export capture ──────────────────────────────────────────
-    /** Pending capture request, fulfilled at the end of the next render(). */
-    private exportCaptureRequest?: {
-        outputWidth: number
-        outputHeight: number
-        supersample: number
-        timestampMicros: number
-        durationMicros: number
-        resolve: (frame: VideoFrame) => void
-        resolveHdr?: (pixels: Uint16Array) => void
-        hdrOptions?: HdrGpuOptions
-        reject: (error: unknown) => void
-    };
-    /** Supersampled LINEAR render target — never sRGB: the reduction happens
-     *  after this, and averaging encoded values is the gamma mistake. */
-    private exportLinearTexture?: GPUTexture;
-    private exportLinearView?: GPUTextureView;
-    /** Output-resolution sRGB target the present pass reduces into. */
-    private exportOutputTexture?: GPUTexture;
-    private exportOutputView?: GPUTextureView;
-    private exportReadbackBuffer?: GPUBuffer;
-    /** Present pipelines keyed by reduction factor — the DOWNSCALE override is
-     *  a pipeline-creation constant, so one pipeline per factor. */
-    private exportPresentPipelines = new Map<number, GPURenderPipeline>();
-    private exportPresentBindGroup?: GPUBindGroup;
-    /** Reduce-pass binding onto the AA accumulator, rebuilt when it changes. */
-    private exportAccumBindGroup?: GPUBindGroup;
-    private exportAccumBindGroupSource?: GPUTextureView;
-    /** Present pipeline at 1:1, used to mirror each exported frame on screen. */
-    private exportMirrorPipeline?: GPURenderPipeline;
-    private exportCaptureKey = '';
+    /** Export frame capture chain (see exportCapture.ts). */
+    private readonly capture = new ExportCapture()
     private modulePresent?: GPUShaderModule;
     private layoutPresent?: GPUBindGroupLayout;
     /** Full-size live keyframe. `resolvedDisplay` remains the tile-local resolve target. */
@@ -447,7 +415,7 @@ export class Engine {
         this.resetAaState()
         this.rotationColorCacheReady = false
         this.rotationColorResolvePending = true
-        this.exportMirrorPipeline = undefined
+        this.capture.invalidateMirror()
         this.needRender = true
     }
 
@@ -1267,7 +1235,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
+            size: COLOR_UNIFORM_BYTES,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1339,46 +1307,13 @@ export class Engine {
 
     private async _createPipelines() {
         const device = this.device
-        const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
-        const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
-        const layoutResolve = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: 'write-only', format: 'rgba32float', viewDimension: '2d' } },
-            ],
-            label: 'Engine BindGroupLayout Resolve',
-        })
+        const { VERTEX, FRAGMENT, COMPUTE } = GPUShaderStage
 
-        const layoutColor = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
-                { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-                { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
-                { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
-                // Raw is retained only for analytic-AA Taylor expansion/reach;
-                // ordinary color values always come from the typed display set.
-                { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 20, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-            ],
-            label: 'Engine BindGroupLayout Color',
-        })
-
+        // Display set written by resolve and merge: iteration, z.x, z.y,
+        // packed geometry, metadata. The orbit gradient is a sixth target only
+        // while it is allocated; the null variant lets the same shader run with
+        // that output discarded, keeping 24 bytes per sample for every palette
+        // that asks for no stripe/direction effect.
         const displayTargets: GPUColorTargetState[] = [
             { format: 'r32float' },
             { format: 'r32float' },
@@ -1386,43 +1321,60 @@ export class Engine {
             { format: 'rgba16float' },
             { format: 'r32uint' },
         ]
-
-        // The orbit gradient is a sixth target only while it is allocated; the
-        // null variant lets the same shader run with that output discarded,
-        // which is what keeps the attachment budget at 24 bytes per sample for
-        // every palette that asks for no stripe/direction effect.
-        const displayTargetsWithOrbit: (GPUColorTargetState | null)[] = [
-            ...displayTargets,
-            { format: 'rgba16float' },
-        ]
+        const displayTargetsWithOrbit: (GPUColorTargetState | null)[] = [...displayTargets, { format: 'rgba16float' }]
         const displayTargetsWithoutOrbit: (GPUColorTargetState | null)[] = [...displayTargets, null]
 
-        this.pipelineResolve = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
-            vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargetsWithoutOrbit },
-            primitive: { topology: 'triangle-list' },
+        // ── Resolve (raw → typed display set) ────────────────────────────
+        const resolve = createPassLayout(device, 'Resolve', resolveShader, FRAGMENT, [
+            bind.uniform(),
+            bind.data('2d-array'),
+            bind.storageTexture('write-only', 'rgba32float'),
+        ])
+        this.pipelineResolve = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline Resolve',
-        })
-        this.pipelineResolveOrbit = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
-            vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargetsWithOrbit },
-            primitive: { topology: 'triangle-list' },
+            module: resolve.module, layout: resolve.pipelineLayout, targets: displayTargetsWithoutOrbit,
+        }))
+        this.pipelineResolveOrbit = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline Resolve (orbit gradient)',
-        })
+            module: resolve.module, layout: resolve.pipelineLayout, targets: displayTargetsWithOrbit,
+        }))
 
-        // All color variants share a layout and the same authoritative shader.
+        // ── Colour (display set → final colour) ──────────────────────────
+        // All colour variants share a layout and the same authoritative shader.
         // Compile off the render path, including the simple palette family.
         // These are the palette-path-free variants; the path ones compile on
         // first use (ensurePathColorPipelines).
-        const colorLayout = device.createPipelineLayout({ bindGroupLayouts: [layoutColor] })
-        this.colorPipelineSource = { device, module: moduleColor, layout: colorLayout }
+        const color = createPassLayout(device, 'Color', this.shaderPassColor, FRAGMENT, [
+            bind.uniform(VERTEX | FRAGMENT), // baseParameters
+            bind.data('2d-array'),           // tex: live values
+            bind.image('2d-array'),          // tileTex
+            bind.image('2d-array'),          // skyboxTex
+            bind.image('2d-array'),          // webcamTex
+            bind.image('2d-array'),          // paletteTex
+            bind.data('2d-array'),           // texFrozen: frozen values
+            bind.sampler(),                  // paletteSampler
+            bind.sampler(),                  // mirrorSampler
+            bind.data(),                     // aaTargetTex
+            bind.data(),                     // geometryTex
+            bind.data(),                     // frozenGeometryTex
+            bind.uint(),                     // metadataTex
+            bind.uint(),                     // frozenMetadataTex
+            // Raw is retained only for analytic-AA Taylor expansion/reach;
+            // ordinary colour values always come from the typed display set.
+            bind.data('2d-array'),           // rawTex
+            bind.data(),                     // orbitGradientTex
+            bind.data(),                     // frozenOrbitGradientTex
+            bind.data(),                     // trapPayloadTex
+            bind.data(),                     // frozenTrapPayloadTex
+            bind.readOnlyStorage(),          // palettePath
+            bind.sampler(),                  // tileSampler
+        ])
+        this.colorPipelineSource = { device, module: color.module, layout: color.pipelineLayout }
         const [full, simple, hdrFull, hdrSimple] = await Promise.all([
-            this.createColorPipelines(device, moduleColor, colorLayout, true),
-            this.createColorPipelines(device, moduleColor, colorLayout, false),
-            this.createColorPipelines(device, moduleColor, colorLayout, true, true),
-            this.createColorPipelines(device, moduleColor, colorLayout, false, true),
+            this.createColorPipelines(device, color.module, color.pipelineLayout, true),
+            this.createColorPipelines(device, color.module, color.pipelineLayout, false),
+            this.createColorPipelines(device, color.module, color.pipelineLayout, true, true),
+            this.createColorPipelines(device, color.module, color.pipelineLayout, false, true),
         ])
         if (this.device !== device || this.destroyed) return
         this.colorPipelines = { full, simple }
@@ -1433,230 +1385,164 @@ export class Engine {
         if (this.device !== device || this.destroyed) return
         this.selectColorPipelines(true)
 
-        // ── In-place compute pipeline (fused brush+mandelbrot+count on A) ──
-        const moduleInplace = this.device.createShaderModule({ code: inplaceComputeShader, label: 'Engine ShaderModule InplaceCompute' })
-        const layoutInplace = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'read-write', format: 'r32float', viewDimension: '2d-array' } },
-                { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-            ],
-            label: 'Engine BindGroupLayout InplaceCompute',
-        })
-        this.inplaceModule = moduleInplace
-        this.inplaceBindGroupLayout = layoutInplace
-        this.inplacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layoutInplace] })
-        // Precompile both hot combos up front so no first-frame stall on the
-        // deep⇄shallow transition. All variants share inplacePipelineLayout, so
-        // bindGroupInplace (built from inplaceBindGroupLayout) is compatible with
-        // every one. pipelineInplace stays the deep-capable default (used as the
-        // "ready" guard and for backward compatibility).
-        // Compiled asynchronously: compiling the specialisations synchronously
-        // held the GPU process long enough on Windows/D3D12 (DXC on NVIDIA) to
-        // trip Chromium's GPU watchdog. The shallow kernel is mandatory; the
-        // deep (floatexp) specialisation is heavier and some mobile Vulkan
+        // ── In-place compute (fused brush + iteration + count on A) ──────
+        const inplace = createPassLayout(device, 'InplaceCompute', inplaceComputeShader, COMPUTE, [
+            bind.uniform(),                  // mandelbrot
+            bind.readOnlyStorage(),          // mandelbrotOrbitPointSuite: reference orbit
+            bind.readOnlyStorage(),          // mandelbrotBlaSuite
+            bind.readOnlyStorage(),          // mandelbrotBlaLevels
+            bind.storageTexture('read-write', 'r32float', '2d-array'), // raw
+            bind.uniform(),                  // brush
+            bind.storage(),                  // counter
+        ])
+        this.inplaceModule = inplace.module
+        this.inplaceBindGroupLayout = inplace.bindGroupLayout
+        this.inplacePipelineLayout = inplace.pipelineLayout
+        // Both hot specialisations compile up front, asynchronously: compiling
+        // them synchronously held the GPU process long enough on Windows/D3D12
+        // (DXC on NVIDIA) to trip Chromium's GPU watchdog. The shallow kernel is
+        // mandatory; the deep (floatexp) one is heavier and some mobile Vulkan
         // drivers refuse it with VK_ERROR_INITIALIZATION_FAILED. Losing it
         // costs deep zoom, not the app, so degrade instead of failing init.
+        // pipelineInplace stays the deep-capable default ("ready" guard).
         const { deep: pipelineDeep, shallow: pipelineShallow } = await this.compileInplacePipelines()
         if (this.device !== device || this.destroyed) return
         this.pipelineInplace = pipelineDeep ?? pipelineShallow
 
-        // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
-        // Compute port of the fragment brush: reads A, rewrites B wholesale
-        // (textureStore — no MRT, so the raw layer count is free to grow).
-        const moduleReprojectCs = this.device.createShaderModule({ code: reprojectCsShader, label: 'Engine ShaderModule ReprojectCs' })
-        const layoutReprojectCs = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
-            ],
-            label: 'Engine BindGroupLayout ReprojectCs',
-        })
-        this.pipelineReprojectCs = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutReprojectCs] }),
-            compute: { module: moduleReprojectCs, entryPoint: 'cs_main' },
-            label: 'Engine ComputePipeline ReprojectCs',
-        })
+        // ── Utility compute (clear: reads A, rewrites B wholesale) ───────
+        const reproject = createPassLayout(device, 'ReprojectCs', reprojectCsShader, COMPUTE, [
+            bind.uniform(),
+            bind.data('2d-array'),
+            bind.storageTexture('write-only', 'r32float', '2d-array'),
+        ])
+        this.pipelineReprojectCs = device.createComputePipeline(computePipelineDescriptor({
+            label: 'Engine ComputePipeline ReprojectCs', module: reproject.module, layout: reproject.pipelineLayout,
+        }))
 
-        // ── Pan clear pass (toroidal origin shift, in place on A) ────────
-        const modulePanClear = this.device.createShaderModule({ code: rawPanClearShader, label: 'Engine ShaderModule PanClear' })
-        const layoutPanClear = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
-            ],
-            label: 'Engine BindGroupLayout PanClear',
-        })
-        this.pipelinePanClear = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutPanClear] }),
-            compute: { module: modulePanClear, entryPoint: 'cs_main' },
-            label: 'Engine ComputePipeline PanClear',
-        })
+        // ── Pan clear (toroidal origin shift, in place on A) ─────────────
+        const panClear = createPassLayout(device, 'PanClear', rawPanClearShader, COMPUTE, [
+            bind.uniform(),
+            bind.storageTexture('write-only', 'r32float', '2d-array'),
+        ])
+        this.pipelinePanClear = device.createComputePipeline(computePipelineDescriptor({
+            label: 'Engine ComputePipeline PanClear', module: panClear.module, layout: panClear.pipelineLayout,
+        }))
 
-        // ── Merge pipeline (resolved + frozen → frozen via MRT) ──────────
-        const moduleMerge = this.device.createShaderModule({ code: mergeFrozenShader, label: 'Engine ShaderModule Merge' })
-        const layoutMerge = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
-                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
-                { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 11, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: 'write-only', format: 'rgba32float', viewDimension: '2d' } },
-            ],
-            label: 'Engine BindGroupLayout Merge',
-        })
-        this.pipelineMerge = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
-            vertex: { module: moduleMerge, entryPoint: 'vs_main' },
-            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargetsWithoutOrbit },
-            primitive: { topology: 'triangle-list' },
+        // ── Merge (resolved + frozen → frozen, min-step wins, MRT) ───────
+        const merge = createPassLayout(device, 'Merge', mergeFrozenShader, FRAGMENT, [
+            bind.uniform(FRAGMENT | VERTEX), // uni
+            bind.data('2d-array'),           // liveValues
+            bind.data(),                     // liveGeometry
+            bind.uint(),                     // liveMetadata
+            bind.data('2d-array'),           // frozenValues
+            bind.data(),                     // frozenGeometry
+            bind.uint(),                     // frozenMetadata
+            bind.data(),                     // liveOrbitGradient
+            bind.data(),                     // frozenOrbitGradient
+            bind.data(),                     // liveTrapPayload
+            bind.data(),                     // frozenTrapPayload
+            bind.storageTexture('write-only', 'rgba32float'), // trapOut
+        ])
+        this.pipelineMerge = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline Merge',
-        })
-        this.pipelineMergeOrbit = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
-            vertex: { module: moduleMerge, entryPoint: 'vs_main' },
-            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargetsWithOrbit },
-            primitive: { topology: 'triangle-list' },
+            module: merge.module, layout: merge.pipelineLayout, targets: displayTargetsWithoutOrbit,
+        }))
+        this.pipelineMergeOrbit = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline Merge (orbit gradient)',
-        })
+            module: merge.module, layout: merge.pipelineLayout, targets: displayTargetsWithOrbit,
+        }))
 
-        // ── Present pipeline (accumTexture → swapchain, AA only) ─────────
-        const modulePresent = this.device.createShaderModule({ code: presentShader, label: 'Engine ShaderModule Present' })
-        const layoutPresent = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-            ],
-            label: 'Engine BindGroupLayout Present',
-        })
-        this.pipelinePresent = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutPresent] }),
-            vertex: { module: modulePresent, entryPoint: 'vs_main' },
-            fragment: { module: modulePresent, entryPoint: 'fs_main', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list' },
+        // ── Present (AA accumulator → swapchain) ─────────────────────────
+        // Same module, same transfer function, different reduction factor:
+        // video export builds its pipelines from here so the film and the
+        // screen can never disagree about linear → sRGB.
+        const present = createPassLayout(device, 'Present', presentShader, FRAGMENT, [bind.data()])
+        this.modulePresent = present.module
+        this.layoutPresent = present.bindGroupLayout
+        this.pipelinePresent = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline Present',
-        })
-        // Same module, same transfer function, different reduction factor: video
-        // export builds its pipelines from here so the film and the screen can
-        // never disagree about linear→sRGB.
-        this.modulePresent = modulePresent
-        this.layoutPresent = layoutPresent
+            module: present.module, layout: present.pipelineLayout, targets: [{ format: this.format }],
+        }))
 
-        // Rotation present is intentionally a separate terminal branch from AA:
-        // it samples only the final-color cache and can therefore never become
-        // sample zero (or any other sample) of the AA estimator.
-        const moduleRotationPresent = this.device.createShaderModule({
-            code: rotationPresentShader,
-            label: 'Engine ShaderModule RotationPresent',
-        })
-        const layoutRotationPresent = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
-            ],
-            label: 'Engine BindGroupLayout RotationPresent',
-        })
-        this.pipelineRotationPresent = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutRotationPresent] }),
-            vertex: { module: moduleRotationPresent, entryPoint: 'vs_main' },
-            fragment: { module: moduleRotationPresent, entryPoint: 'fs_main', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list' },
+        // Rotation present is a separate terminal branch from AA: it samples
+        // only the final-colour cache and can therefore never become sample
+        // zero (or any other sample) of the AA estimator.
+        const rotationPresent = createPassLayout(device, 'RotationPresent', rotationPresentShader, FRAGMENT, [
+            bind.uniform(),
+            bind.image(),
+            bind.sampler(),
+        ])
+        this.pipelineRotationPresent = device.createRenderPipeline(fullscreenPipelineDescriptor({
             label: 'Engine RenderPipeline RotationPresent',
-        })
+            module: rotationPresent.module, layout: rotationPresent.pipelineLayout, targets: [{ format: this.format }],
+        }))
 
         this.presentationPipelines = {
-            sdr: this.pipelinePresent, rotationSdr: this.pipelineRotationPresent,
-            hdr: device.createRenderPipeline({
-                layout: device.createPipelineLayout({ bindGroupLayouts: [layoutPresent] }),
-                vertex: { module: modulePresent, entryPoint: 'vs_main' },
-                fragment: { module: modulePresent, entryPoint: 'fs_main', constants: { HDR_OUTPUT: 1 }, targets: [{ format: 'rgba16float' }] },
-                primitive: { topology: 'triangle-list' },
-            }),
-            rotationHdr: device.createRenderPipeline({
-                layout: device.createPipelineLayout({ bindGroupLayouts: [layoutRotationPresent] }),
-                vertex: { module: moduleRotationPresent, entryPoint: 'vs_main' },
-                fragment: { module: moduleRotationPresent, entryPoint: 'fs_main', constants: { HDR_OUTPUT: 1 }, targets: [{ format: 'rgba16float' }] },
-                primitive: { topology: 'triangle-list' },
-            }),
+            sdr: this.pipelinePresent,
+            rotationSdr: this.pipelineRotationPresent,
+            hdr: device.createRenderPipeline(fullscreenPipelineDescriptor({
+                module: present.module, layout: present.pipelineLayout,
+                targets: [{ format: 'rgba16float' }], constants: { HDR_OUTPUT: 1 },
+            })),
+            rotationHdr: device.createRenderPipeline(fullscreenPipelineDescriptor({
+                module: rotationPresent.module, layout: rotationPresent.pipelineLayout,
+                targets: [{ format: 'rgba16float' }], constants: { HDR_OUTPUT: 1 },
+            })),
         }
         this.configureOutput()
 
-        // ── AA target-map bake pipeline (DE ∪ contrast ∪ moiré → per-texel sample count) ──
-        const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
-        const layoutAaTarget = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                // Sample-0 composite (rgba16float, screen res) for the contrast ramp.
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
-            ],
-            label: 'Engine BindGroupLayout AaTarget',
-        })
-        this.pipelineAaTarget = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutAaTarget] }),
-            compute: { module: moduleAaTarget, entryPoint: 'cs_main' },
-            label: 'Engine ComputePipeline AaTarget',
-        })
+        // ── AA target-map bake (DE ∪ contrast ∪ moiré → samples per texel) ──
+        const aaTarget = createPassLayout(device, 'AaTarget', aaTargetShader, COMPUTE, [
+            bind.data('2d-array'),
+            bind.data(),
+            bind.storageTexture('write-only', 'r32float'),
+            bind.uniform(),
+            bind.image(),                    // sample-0 composite (contrast ramp)
+        ])
+        this.pipelineAaTarget = device.createComputePipeline(computePipelineDescriptor({
+            label: 'Engine ComputePipeline AaTarget', module: aaTarget.module, layout: aaTarget.pipelineLayout,
+        }))
         if (!this.uniformBufferAaTarget) {
-            this.uniformBufferAaTarget = this.device.createBuffer({
-                // 16 × f32 (shared bake/reseed): [antialiasLevel, aaSampleIndex,
+            this.uniformBufferAaTarget = device.createBuffer({
+                // Shared bake/reseed parameters: [antialiasLevel, aaSampleIndex,
                 // screenHeightPx, aaLogDelta, aaAnalytic, aspect, sceneSin,
                 // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast,
-                // aaFull, iterationPaletteCurve, pad, rawOriginX, rawOriginY, pad, pad]
+                // aaFull, iterationPaletteCurve, pad, rawOriginX, rawOriginY,
+                // tileOriginX, tileOriginY, neutralSize, rotationUnion]
                 size: 96,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
             })
         }
 
-        // ── AA selective reseed pipeline (Stage B) ───────────────────────
-        const moduleAaReseed = this.device.createShaderModule({ code: aaReseedShader, label: 'Engine ShaderModule AaReseed' })
-        const layoutAaReseed = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'read-write', format: 'r32float', viewDimension: '2d' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                // Coherent sample-0 center iter/z paired with raw Taylor layers 8..12.
-                { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-            ],
-            label: 'Engine BindGroupLayout AaReseed',
-        })
-        this.pipelineAaReseed = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutAaReseed] }),
-            compute: { module: moduleAaReseed, entryPoint: 'cs_main' },
-            label: 'Engine ComputePipeline AaReseed',
-        })
+        // ── AA selective reseed (Stage B) ────────────────────────────────
+        const aaReseed = createPassLayout(device, 'AaReseed', aaReseedShader, COMPUTE, [
+            bind.storageTexture('read-write', 'r32float'),
+            bind.storageTexture('write-only', 'r32float'),
+            bind.uniform(),
+            bind.data('2d-array'),
+            bind.storage(),                  // frontier stats
+            // Coherent sample-0 centre iter/z paired with raw Taylor layers 8..12.
+            bind.data('2d-array'),
+        ])
+        this.pipelineAaReseed = device.createComputePipeline(computePipelineDescriptor({
+            label: 'Engine ComputePipeline AaReseed', module: aaReseed.module, layout: aaReseed.pipelineLayout,
+        }))
         // Frontier stats: [stamped, eligible] u32 pair, cleared before each reseed.
         if (!this.aaFrontierBuffer) {
-            this.aaFrontierBuffer = this.device.createBuffer({
+            this.aaFrontierBuffer = device.createBuffer({
                 size: 8,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
                 label: 'Engine AaFrontier Storage',
             })
-            this.aaFrontierReadback = this.device.createBuffer({
+            this.aaFrontierReadback = device.createBuffer({
                 size: 8,
                 usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
                 label: 'Engine AaFrontier Readback',
             })
         }
 
-        // bind groups seront (ré)créés dans resize car dépend des textures
+        // Bind groups depend on the textures: rebuilt by resize().
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
         this.bindGroupMerge = undefined
@@ -1689,15 +1575,12 @@ export class Engine {
         const key = `d${deep ? 1 : 0}`
         return {
             key,
-            descriptor: {
-                layout: this.inplacePipelineLayout!,
-                compute: {
-                    module: this.inplaceModule!,
-                    entryPoint: 'cs_main',
-                    constants: { ENABLE_DEEP: deep ? 1 : 0 },
-                },
+            descriptor: computePipelineDescriptor({
                 label: `Engine ComputePipeline InplaceBrush (deep=${deep})`,
-            },
+                module: this.inplaceModule!,
+                layout: this.inplacePipelineLayout!,
+                constants: { ENABLE_DEEP: deep ? 1 : 0 },
+            }),
         }
     }
 
@@ -1752,13 +1635,15 @@ export class Engine {
             ENABLE_PALETTE_PATH: palettePath ? 1 : 0,
         }
         const create = (entryPoint: string, target: GPUColorTargetState, rotation = false) =>
-            device.createRenderPipelineAsync({
-                layout,
-                vertex: { module, entryPoint: rotation ? 'vs_rotation_cache' : 'vs_main' },
-                fragment: { module, entryPoint, constants, targets: [target] },
-                primitive: { topology: 'triangle-list' },
+            device.createRenderPipelineAsync(fullscreenPipelineDescriptor({
                 label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}${palettePath ? ', path' : ''}, ${entryPoint}${target.blend ? ', accum' : ''})`,
-            })
+                module,
+                layout,
+                targets: [target],
+                constants,
+                vertexEntry: rotation ? 'vs_rotation_cache' : 'vs_main',
+                fragmentEntry: entryPoint,
+            }))
         const [direct, rotation, clear, accum] = await Promise.all([
             create('fs_main_direct', { format: hdr ? 'rgba16float' : this.format }),
             create('fs_rotation_cache', { format: 'rgba16float' }, true),
@@ -2097,12 +1982,13 @@ export class Engine {
         if (!this.expmapCapturePipeline) {
             const device = this.device
             const module = device.createShaderModule({ code: this.shaderPassColor, label: 'ExpMap Direct Color' })
-            const pipeline = await device.createRenderPipelineAsync({
+            const pipeline = await device.createRenderPipelineAsync(fullscreenPipelineDescriptor({
+                module,
                 layout: device.createPipelineLayout({ bindGroupLayouts: [this.pipelineColor!.getBindGroupLayout(0)] }),
-                vertex: { module, entryPoint: 'vs_main' },
-                fragment: { module, entryPoint: 'fs_expmap', constants: { ENABLE_SURFACE_EFFECTS: 1 }, targets: [{ format: 'rgba16float' }] },
-                primitive: { topology: 'triangle-list' },
-            })
+                fragmentEntry: 'fs_expmap',
+                constants: { ENABLE_SURFACE_EFFECTS: 1 },
+                targets: [{ format: 'rgba16float' }],
+            }))
             if (this.device !== device || this.destroyed) throw new Error('Device changed during ExpMap compilation')
             this.expmapCapturePipeline = pipeline
         }
@@ -2394,99 +2280,6 @@ export class Engine {
         }
     }
 
-    /** Align a row stride to WebGPU's 256-byte copyTextureToBuffer requirement. */
-    private static alignRowBytes(bytes: number): number {
-        return (bytes + 255) & ~255
-    }
-
-    /**
-     * (Re)allocate the capture chain when the requested geometry changes.
-     *
-     * The supersampled target is `rgba16float` and holds LINEAR light: the
-     * reduction to output resolution happens in the present pass, before the
-     * sRGB encode. Capturing through the existing snapshot path instead would
-     * have used `fs_main_direct`, whose output is already sRGB — averaging that
-     * is the gamma mistake this chain exists to avoid.
-     */
-    private ensureExportCaptureResources(outputWidth: number, outputHeight: number, supersample: number, hdr = false): void {
-        const key = `${outputWidth}x${outputHeight}@${supersample}:${this.format}:${hdr}`
-        if (this.exportCaptureKey === key && this.exportPresentPipelines.has(supersample) && this.exportMirrorPipeline) return
-
-        if (this.exportCaptureKey !== key) {
-            this.exportPresentPipelines.clear()
-            this.exportMirrorPipeline = undefined
-            this.exportLinearTexture?.destroy?.()
-            this.exportOutputTexture?.destroy?.()
-            this.exportReadbackBuffer?.destroy?.()
-
-            this.exportLinearTexture = this.device.createTexture({
-                size: { width: outputWidth * supersample, height: outputHeight * supersample },
-                format: 'rgba16float',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-                label: 'Engine ExportLinearTexture',
-            })
-            this.exportLinearView = this.exportLinearTexture.createView({ label: 'Engine ExportLinearView' })
-
-            this.exportOutputTexture = this.device.createTexture({
-                size: { width: outputWidth, height: outputHeight },
-                format: hdr ? 'rgba16float' : this.format,
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
-                label: 'Engine ExportOutputTexture',
-            })
-            this.exportOutputView = this.exportOutputTexture.createView({ label: 'Engine ExportOutputView' })
-
-            this.exportReadbackBuffer = hdr ? undefined : this.device.createBuffer({
-                size: Engine.alignRowBytes(outputWidth * 4) * outputHeight,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-                label: 'Engine ExportReadback',
-            })
-
-            this.exportPresentBindGroup = this.device.createBindGroup({
-                layout: this.layoutPresent!,
-                entries: [{ binding: 0, resource: this.exportLinearView }],
-                label: 'Engine BindGroup ExportPresent',
-            })
-            this.exportCaptureKey = key
-        }
-
-        if (!this.exportMirrorPipeline) {
-            // Mirrors the supersampled linear target onto the swapchain 1:1.
-            // The compute surface is pinned to output x supersample, which is
-            // exactly the linear target's size, so DOWNSCALE stays 1 here.
-            this.exportMirrorPipeline = this.device.createRenderPipeline({
-                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutPresent!] }),
-                vertex: { module: this.modulePresent!, entryPoint: 'vs_main' },
-                fragment: {
-                    module: this.modulePresent!,
-                    entryPoint: 'fs_main',
-                    targets: [{ format: this.canvasFormat }],
-                    constants: { DOWNSCALE: 1, HDR_OUTPUT: this.hdrRendering ? 1 : 0 },
-                },
-                primitive: { topology: 'triangle-list' },
-                label: 'Engine RenderPipeline ExportMirror',
-            })
-        }
-
-        if (!this.exportPresentPipelines.has(supersample)) {
-            this.exportPresentPipelines.set(supersample, this.device.createRenderPipeline({
-                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutPresent!] }),
-                vertex: { module: this.modulePresent!, entryPoint: 'vs_main' },
-                fragment: {
-                    module: this.modulePresent!,
-                    entryPoint: 'fs_main',
-                    targets: [{ format: hdr ? 'rgba16float' : this.format }],
-                    // Mitchell rather than a block average: the box reduction
-                    // folds ~7x more energy back across the output Nyquist, and
-                    // on a fractal that fold-back is what makes boundary detail
-                    // crawl between frames of the film. Set to 0 to A/B the box.
-                    constants: { DOWNSCALE: supersample, REDUCE_MITCHELL: 1, LINEAR_OUTPUT: hdr ? 1 : 0 },
-                },
-                primitive: { topology: 'triangle-list' },
-                label: `Engine RenderPipeline ExportPresent x${supersample}`,
-            }))
-        }
-    }
-
     /**
      * Request a capture of the current view as a `VideoFrame`, at an arbitrary
      * output resolution independent of the canvas.
@@ -2503,14 +2296,9 @@ export class Engine {
      */
     captureHdrFrame(width: number, height: number, supersample = 1, hdrOptions: HdrGpuOptions = {format:'video'}): Promise<Uint16Array> {
         if (!this.session?.hdr) return Promise.reject(new Error(t('engine.export.hdrSessionRequired')))
-        if (this.exportCaptureRequest) return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
-        const max = this.device.limits.maxTextureDimension2D
-        if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error(t('engine.export.hdrDimensionsInvalid')))
-        return new Promise((resolveHdr, reject) => {
-            this.exportCaptureRequest = { outputWidth: width, outputHeight: height, supersample,
-                timestampMicros: 0, durationMicros: 1, resolve: frame => frame.close(), resolveHdr, hdrOptions, reject }
-            this.needRender = true
-        })
+        const frame = this.capture.requestHdr(width, height, supersample, hdrOptions, this.device.limits.maxTextureDimension2D)
+        if (this.capture.isPending) this.needRender = true
+        return frame
     }
 
     captureExportFrame(request: {
@@ -2521,25 +2309,9 @@ export class Engine {
         durationMicros: number
     }): Promise<VideoFrame> {
         if (this.session?.hdr) return Promise.reject(new Error(t('engine.export.useHdrCapture')))
-        if (this.exportCaptureRequest) {
-            return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
-        }
-        if (!Number.isInteger(request.supersample) || request.supersample < 1) {
-            return Promise.reject(new Error(
-                `Capture supersample must be a positive integer (got ${request.supersample}). `
-                + 'A fractional factor has no exact box filter.',
-            ))
-        }
-        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
-        const superWidth = request.outputWidth * request.supersample
-        const superHeight = request.outputHeight * request.supersample
-        if (superWidth > maxDim || superHeight > maxDim) {
-            return Promise.reject(new Error(t('engine.export.captureTargetTooLarge', { width: superWidth, height: superHeight, maxDim })))
-        }
-        return new Promise<VideoFrame>((resolve, reject) => {
-            this.exportCaptureRequest = { ...request, resolve, reject }
-            this.needRender = true
-        })
+        const frame = this.capture.requestFrame(request, this.device?.limits?.maxTextureDimension2D ?? 8192)
+        if (this.capture.isPending) this.needRender = true
+        return frame
     }
 
     /**
@@ -2547,8 +2319,7 @@ export class Engine {
      * no session is active, so it can sit in a `finally` without a guard.
      */
     endVideoExportSession(): void {
-        this.exportCaptureRequest?.reject(new Error('Export session ended before capture completed'))
-        this.exportCaptureRequest = undefined
+        this.capture.cancel('Export session ended before capture completed')
         this.videoExportFrameEvaluationPending = false
         this.expmapCapturePipeline = undefined
         const session = this.session
@@ -3329,7 +3100,8 @@ export class Engine {
         const context = this.shaderReplayContext
         try { await this.update({ ...context, angle, mu: sourceMu ?? context.mu }, options) }
         finally { this.animationTimeOverride = saved; this.shaderReplayContext = context }
-        this.device.queue.writeBuffer(this.uniformBufferColor!, 102 * 4, new Float32Array([stereo?.eyeSlope ?? 0, stereo?.height ? 1 : 0]))
+        const stereoRun = packColorUniformRun({ stereoEyeSlope: stereo?.eyeSlope ?? 0, stereoHeightPass: stereo?.height ? 1 : 0 })
+        this.device.queue.writeBuffer(this.uniformBufferColor!, stereoRun.byteOffset, stereoRun.data)
         if (!this.bindGroupColor || !this.pipelineColor) throw new Error('Color resources unavailable')
         return { code: this.shaderPassColor, layout: this.pipelineColor.getBindGroupLayout(0), bindGroup: this.bindGroupColor }
     }
@@ -3705,97 +3477,99 @@ export class Engine {
             ? Math.log(aaJitterMag) + lnScale
             : 0
 
-        const colorShaderData = new Float32Array([
-            renderOptions.palettePeriod,    // 0: palettePeriod
-            renderOptions.paletteOffset + paletteOffsetAnim, // 1: paletteOffset
-            this.presetTransition?.skyLayers
+        const colorUniforms: ColorUniforms = {
+            palettePeriod: renderOptions.palettePeriod,
+            paletteOffset: renderOptions.paletteOffset + paletteOffsetAnim,
+            skyboxTransitionLevels: this.presetTransition?.skyLayers
                 ? this.skyboxTexture!.mipLevelCount * 32 + this.presetTransition.sky.mipLevelCount
-                : 0,                             // 2: packed source mip counts (each <32)
-            this.time,                      // 3: time
-            aspect,                         // 4: aspect
-            mandelbrot.angle,               // 5: angle
-            renderOptions.activateAnimate ? 1 : 0, // 6: animate
-            mandelbrot.mu,                  // 7: mu
-            zoomFactor,                     // 8: zoomFactor
-            (zoomActive || this.frozenAligned || this.requests.snapshot === 'copy') ? 1.0 : 0.0, // 9: frozenAligned
-            liveZoomFactor,                 // 10: liveZoomFactor
+                : 0,
+            time: this.time,
+            aspect,
+            angle: mandelbrot.angle,
+            animate: renderOptions.activateAnimate ? 1 : 0,
+            mu: mandelbrot.mu,
+            zoomFactor,
+            frozenAligned: (zoomActive || this.frozenAligned || this.requests.snapshot === 'copy') ? 1 : 0,
+            liveZoomFactor,
             // Exact displacement of the frozen grid from this frame's camera
-            // (see ViewGrids): follows the camera, not the rounded shifts
-            // of the live texture.
-            frozenShiftU,                   // 11: frozenShiftU
-            frozenShiftV,                   // 12: frozenShiftV
-            effectiveTessellationLevel,     // 13: tessellationLevel
-            effectiveDisplacementAmount,    // 14: displacementAmount
-            animGlobalSpeed,                // 15: animationSpeed (legacy/global speed)
-            mandelbrot.epsilon,             // 16: epsilon
-            renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
-            effectiveMicroBumpStrength,     // 18: microBumpStrength
-            renderOptions.aaAdaptive === false ? this.aaOffsetX : 0, // 19: uniform-AA inverse lookup X
-            effectiveReliefDepth,            // 20: reliefDepth
-            effectiveLightAngle,              // 21: lightAngle
-            renderOptions.localShadowStrength, // 22: localShadowStrength
-            effectiveVarnishStrength,         // 23: varnishStrength
-            Math.log(mandelbrot.mu),            // 24: logMu
-            sceneSin,                           // 25: sceneSin
-            sceneCos,                           // 26: sceneCos
-            Math.cos(effectiveLightAngle) / lightDirLen, // 27: lightDirX
-            Math.sin(effectiveLightAngle) / lightDirLen, // 28: lightDirY
-            1.85 / lightDirLen,                 // 29: lightDirZ
-            renderOptions.paletteMirror ? 1 : 0, // 30: paletteMirror
-            renderOptions.debugShading ? 1 : 0,  // 31: debugShading
-            effectiveHeightPaletteShift,         // 32: heightPaletteShift [0, 100]
-            effectiveOrbitTrap.strength,         // 33: legacy-compatible orbitTrapStrength [0, 100]
-            effectivePhaseColoringStrength,      // 34: phaseColoringStrength [0, 100]
-            textureMappingVariableId(textureMapping.xVariable), // 35: textureMappingXVariable
-            textureMappingVariableId(textureMapping.yVariable), // 36: textureMappingYVariable
-            textureMapping.xScale,                // 37: textureMappingXScale
-            textureMapping.yScale,                // 38: textureMappingYScale
-            textureMapping.mirrored ? 1 : 0,      // 39: textureMappingMirror
-            parseFloat(mandelbrot.cx),            // 40: centerX
-            parseFloat(mandelbrot.cy),            // 41: centerY
-            mandelbrot.scale,                     // 42: scale
-            effectiveGradeContrast,              // 43: gradeContrast (display grade)
-            0.03 * textureDriftAnimX,             // 44: textureDriftX
-            0.03 * textureDriftAnimY,             // 45: textureDriftY
-            0.02 * skyReflectionDriftAnimX,       // 46: skyDriftX
-            0.02 * skyReflectionDriftAnimY,       // 47: skyDriftY
-            paletteOffsetAnim,                    // 48: paletteOffsetAnimation
-            heightPaletteShiftAnim,               // 49: heightPaletteShiftAnimation
-            lightAngleAnim,                       // 50: lightAngleAnimation
-            textureDriftAnimX,                    // 51: textureDriftAnimation
-            skyReflectionDriftAnimX,              // 52: skyReflectionDriftAnimation
-            phaseColoringAnim,                    // 53: phaseColoringAnimation
-            varnishAnim,                          // 54: varnishAnimation
-            microBumpAnim,                        // 55: microBumpAnimation
-            displacementAnim,                     // 56: displacementAnimation
-            tessellationAnim,                     // 57: tessellationAnimation
-            this.aaSampleIndex,                   // 58: aaSampleIndex (AA accumulation gate)
-            antialiasLevelColor,                  // 59: antialiasLevel (debug sample-count viz)
-            aaJitterMag > 0 ? this.aaOffsetX / aaJitterMag : 0, // 60: aaJitterHatX (δc unit direction)
-            aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0, // 61: aaJitterHatY
-            Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
-            0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
-            effectiveGradeSaturation,            // 64: gradeSaturation (display grade)
-            liveShiftU,                           // 65: liveShiftU (patched in render())
-            Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
-            liveShiftV,                           // 67: liveShiftV (patched in render())
-            effectiveProtrusionPhase,             // 68: protrusionPhase [0, 1)
-            renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
-            renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
-            renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
-            ...orbitTrapColorUniformValues(effectiveOrbitTrap), // 72..92: structured orbit-trap configuration
-            renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
-            iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
-            renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
-            this.rawOriginX,                      // 96: raw toroidal origin X
-            this.rawOriginY,                      // 97: raw toroidal origin Y
-            this.orbitGradientAllocated ? 1 : 0,   // 98: orbit metric payload present
-            this.presetTransition?.progress ?? 0, // 99: texture transition blend
-            renderOptions.paletteScreenShiftX ?? 0, // 100: palette cycles across screen width
-            renderOptions.paletteScreenShiftY ?? 0, // 101: palette cycles across screen height
-            0, 0, // 102..103: stereo replay overrides; interactive and classic exports stay mono
-        ])
-        this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
+            // (see ViewGrids): follows the camera, not the rounded shifts of
+            // the live texture.
+            frozenShiftU,
+            frozenShiftV,
+            tessellationLevel: effectiveTessellationLevel,
+            displacementAmount: effectiveDisplacementAmount,
+            animationSpeed: animGlobalSpeed,
+            epsilon: mandelbrot.epsilon,
+            ambientOcclusionStrength: renderOptions.ambientOcclusionStrength,
+            microBumpStrength: effectiveMicroBumpStrength,
+            aaLookupOffsetX: renderOptions.aaAdaptive === false ? this.aaOffsetX : 0,
+            reliefDepth: effectiveReliefDepth,
+            lightAngle: effectiveLightAngle,
+            localShadowStrength: renderOptions.localShadowStrength,
+            varnishStrength: effectiveVarnishStrength,
+            logMu: Math.log(mandelbrot.mu),
+            sceneSin,
+            sceneCos,
+            lightDirX: Math.cos(effectiveLightAngle) / lightDirLen,
+            lightDirY: Math.sin(effectiveLightAngle) / lightDirLen,
+            lightDirZ: 1.85 / lightDirLen,
+            paletteMirror: renderOptions.paletteMirror ? 1 : 0,
+            debugShading: renderOptions.debugShading ? 1 : 0,
+            heightPaletteShift: effectiveHeightPaletteShift,
+            orbitTrapStrength: effectiveOrbitTrap.strength,
+            phaseColoringStrength: effectivePhaseColoringStrength,
+            textureMappingXVariable: textureMappingVariableId(textureMapping.xVariable),
+            textureMappingYVariable: textureMappingVariableId(textureMapping.yVariable),
+            textureMappingXScale: textureMapping.xScale,
+            textureMappingYScale: textureMapping.yScale,
+            textureMappingMirror: textureMapping.mirrored ? 1 : 0,
+            centerX: parseFloat(mandelbrot.cx),
+            centerY: parseFloat(mandelbrot.cy),
+            scale: mandelbrot.scale,
+            gradeContrast: effectiveGradeContrast,
+            textureDriftX: 0.03 * textureDriftAnimX,
+            textureDriftY: 0.03 * textureDriftAnimY,
+            skyDriftX: 0.02 * skyReflectionDriftAnimX,
+            skyDriftY: 0.02 * skyReflectionDriftAnimY,
+            paletteOffsetAnimation: paletteOffsetAnim,
+            heightPaletteShiftAnimation: heightPaletteShiftAnim,
+            lightAngleAnimation: lightAngleAnim,
+            textureDriftAnimation: textureDriftAnimX,
+            skyReflectionDriftAnimation: skyReflectionDriftAnimX,
+            phaseColoringAnimation: phaseColoringAnim,
+            varnishAnimation: varnishAnim,
+            microBumpAnimation: microBumpAnim,
+            displacementAnimation: displacementAnim,
+            tessellationAnimation: tessellationAnim,
+            aaSampleIndex: this.aaSampleIndex,
+            antialiasLevel: antialiasLevelColor,
+            aaJitterHatX: aaJitterMag > 0 ? this.aaOffsetX / aaJitterMag : 0,
+            aaJitterHatY: aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0,
+            aaJitterLogMag: Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0,
+            aaAnalytic: 0, // finalized in render() once skipResolve is known
+            gradeSaturation: effectiveGradeSaturation,
+            liveShiftU, // patched in render()
+            lnScale: Number.isFinite(lnScale) ? lnScale : 0,
+            liveShiftV,
+            protrusionPhase: effectiveProtrusionPhase,
+            protrusionSharpness: renderOptions.protrusionSharpness ?? 2,
+            protrusionGeometryMix: renderOptions.protrusionGeometryMix ?? 0,
+            protrusionPeriod: renderOptions.protrusionPeriod ?? 1,
+            ...orbitTrapUniforms(effectiveOrbitTrap),
+            protrusionStrength: renderOptions.protrusionStrength ?? 1,
+            iterationPaletteCurve: iterationPaletteCurveCode(renderOptions.iterationPaletteCurve),
+            aaLookupOffsetY: renderOptions.aaAdaptive === false ? this.aaOffsetY : 0,
+            rawOriginX: this.rawOriginX,
+            rawOriginY: this.rawOriginY,
+            orbitMetricsEnabled: this.orbitGradientAllocated ? 1 : 0,
+            presetTransition: this.presetTransition?.progress ?? 0,
+            paletteScreenShiftX: renderOptions.paletteScreenShiftX ?? 0,
+            paletteScreenShiftY: renderOptions.paletteScreenShiftY ?? 0,
+            // Stereo replay overrides; interactive and classic exports stay mono.
+            stereoEyeSlope: 0,
+            stereoHeightPass: 0,
+        }
+        this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
 
         if (!this.needsMoreFrames()) {
             return
@@ -4282,12 +4056,12 @@ export class Engine {
             )
             this.device.queue.writeBuffer(
                 this.uniformBufferColor!,
-                COLOR_UNIFORM_LIVE_SHIFT_U_SLOT * 4,
+                colorUniformByteOffset('liveShiftU'),
                 new Float32Array([liveShiftU]),
             )
             this.device.queue.writeBuffer(
                 this.uniformBufferColor!,
-                COLOR_UNIFORM_LIVE_SHIFT_V_SLOT * 4,
+                colorUniformByteOffset('liveShiftV'),
                 new Float32Array([liveShiftV]),
             )
         }
@@ -4356,7 +4130,7 @@ export class Engine {
             // origin slots current between full uniform rewrites.
             this.device.queue.writeBuffer(
                 this.uniformBufferColor!,
-                COLOR_UNIFORM_RAW_ORIGIN_SLOT * 4,
+                colorUniformByteOffset('rawOriginX'),
                 new Float32Array([this.rawOriginX, this.rawOriginY]).buffer,
             )
         }
@@ -4782,7 +4556,7 @@ export class Engine {
         if (aaCompositeThisFrame && this.aaSampleIndex > 0
             && (this.aaOffsetX !== 0 || this.aaOffsetY !== 0)
             && this.aaAnalyticParams(aspect).enabled) {
-            this.device.queue.writeBuffer(this.uniformBufferColor!, 63 * 4, new Float32Array([1]).buffer)
+            this.device.queue.writeBuffer(this.uniformBufferColor!, colorUniformByteOffset('aaAnalytic'), new Float32Array([1]).buffer)
         }
 
         if (aaCompositeThisFrame) {
@@ -5028,114 +4802,21 @@ export class Engine {
         // Deliberately NOT the pipelineColor (fs_main_direct) path the PNG
         // snapshot below uses: that one already emits sRGB, and reducing encoded
         // values darkens every edge in the film.
-        if (this.exportCaptureRequest) {
-            const request = this.exportCaptureRequest
-            this.exportCaptureRequest = undefined
-            try {
-                const { outputWidth, outputHeight, supersample } = request
-                this.ensureExportCaptureResources(outputWidth, outputHeight, supersample, !!request.resolveHdr)
-
-                const encoder = this.device.createCommandEncoder({ label: 'Engine ExportCapture' })
-
-                // Sample 0 of the accumulation path: linear RGB, alpha = 1, and
-                // the per-pixel AA gate cannot discard at sample index 0.
-                // With AA on, the frame already lives in the accumulator as a
-                // linear sum with the sample count in alpha — exactly what the
-                // reduce pass expects, since present.wgsl normalises by alpha.
-                // Re-rendering a single sample here would throw the whole
-                // accumulation away.
-                const useAccumulator = this.exportAaSamples > 1
-                    && this.aaAccumulatedSamples > 0
-                    && !!this.accumTextureView
-                if (useAccumulator) {
-                    if (this.exportAccumBindGroupSource !== this.accumTextureView) {
-                        this.exportAccumBindGroup = this.device.createBindGroup({
-                            layout: this.layoutPresent!,
-                            entries: [{ binding: 0, resource: this.accumTextureView! }],
-                            label: 'Engine BindGroup ExportAccum',
-                        })
-                        this.exportAccumBindGroupSource = this.accumTextureView
-                    }
-                } else {
-                    const rpassLinear = encoder.beginRenderPass({
-                        colorAttachments: [{
-                            view: this.exportLinearView!,
-                            clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                            loadOp: 'clear',
-                            storeOp: 'store',
-                        }],
-                        label: 'Engine ExportCapture Linear',
-                    })
-                    rpassLinear.setPipeline(this.expmap ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!)
-                    rpassLinear.setBindGroup(0, colorBindGroup)
-                    rpassLinear.draw(6, 1, 0, 0)
-                    rpassLinear.end()
-                }
-                const reduceSource = useAccumulator
-                    ? this.exportAccumBindGroup!
-                    : this.exportPresentBindGroup!
-
-                const rpassReduce = encoder.beginRenderPass({
-                    colorAttachments: [{
-                        view: this.exportOutputView!,
-                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                        loadOp: 'clear',
-                        storeOp: 'store',
-                    }],
-                    label: 'Engine ExportCapture Reduce',
-                })
-                rpassReduce.setPipeline(this.exportPresentPipelines.get(supersample)!)
-                rpassReduce.setBindGroup(0, reduceSource)
-                rpassReduce.draw(6, 1, 0, 0)
-                rpassReduce.end()
-
-                // Mirror the frame being exported onto the canvas. The
-                // interactive loop is parked for the session, so without this
-                // nothing repaints and the user watches a black screen for the
-                // whole render.
-                try {
-                    const rpassMirror = encoder.beginRenderPass({
-                        colorAttachments: [{
-                            view: this.ctx.getCurrentTexture().createView(),
-                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                            loadOp: 'clear',
-                            storeOp: 'store',
-                        }],
-                        label: 'Engine ExportCapture Mirror',
-                    })
-                    rpassMirror.setPipeline(this.exportMirrorPipeline!)
-                    rpassMirror.setBindGroup(0, reduceSource)
-                    rpassMirror.draw(6, 1, 0, 0)
-                    rpassMirror.end()
-                } catch {
-                    // A missing swapchain texture must never fail the export.
-                }
-
-                if (request.resolveHdr) {
-                    this.device.queue.submit([encoder.finish()])
-                    request.resolveHdr(await readHdrGpuOutput(this.device, this.exportOutputTexture!, outputWidth, outputHeight, request.hdrOptions!))
-                } else {
-                    const bytesPerRow = Engine.alignRowBytes(outputWidth * 4)
-                    encoder.copyTextureToBuffer(
-                        { texture: this.exportOutputTexture! },
-                        { buffer: this.exportReadbackBuffer!, offset: 0, bytesPerRow },
-                        { width: outputWidth, height: outputHeight, depthOrArrayLayers: 1 },
-                    )
-                    this.device.queue.submit([encoder.finish()])
-                    await this.exportReadbackBuffer!.mapAsync(GPUMapMode.READ)
-                    const pixels = new Uint8Array(this.exportReadbackBuffer!.getMappedRange().slice(0))
-                    this.exportReadbackBuffer!.unmap()
-                    request.resolve(new VideoFrame(pixels, {
-                        format: this.format === 'bgra8unorm' ? 'BGRA' : 'RGBA',
-                        codedWidth: outputWidth, codedHeight: outputHeight,
-                        timestamp: request.timestampMicros, duration: request.durationMicros,
-                        layout: [{ offset: 0, stride: bytesPerRow }],
-                        colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true },
-                    }))
-                }
-            } catch (error) {
-                request.reject(error)
-            }
+        if (this.capture.isPending) {
+            await this.capture.fulfil({
+                device: this.device,
+                format: this.format,
+                canvasFormat: this.canvasFormat,
+                hdrRendering: this.hdrRendering,
+                presentModule: this.modulePresent!,
+                presentLayout: this.layoutPresent!,
+                swapchainView: () => this.ctx.getCurrentTexture().createView(),
+                colorBindGroup,
+                linearPipeline: this.expmap ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!,
+                accumulator: this.exportAaSamples > 1 && this.aaAccumulatedSamples > 0 && this.accumTextureView
+                    ? this.accumTextureView
+                    : null,
+            })
         }
 
         // Passe snapshot PNG écran (optionnelle, si demandée)
@@ -5241,11 +4922,7 @@ export class Engine {
         this.rotationPresentUniformBuffer?.destroy?.()
         this.counter.destroy()
         this.uniformBufferMerge?.destroy?.()
-        this.exportCaptureRequest?.reject(new Error('Engine destroyed while a capture was pending.'))
-        this.exportCaptureRequest = undefined
-        this.exportLinearTexture?.destroy?.()
-        this.exportOutputTexture?.destroy?.()
-        this.exportReadbackBuffer?.destroy?.()
+        this.capture.destroy('Engine destroyed while a capture was pending.')
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
@@ -5261,7 +4938,7 @@ export class Engine {
     needsMoreFrames(): boolean {
         let reason = ''
         if (this.needRender) reason = 'needRender'
-        else if (this.exportCaptureRequest) reason = 'exportCapture'
+        else if (this.capture.isPending) reason = 'exportCapture'
         else if (this.snapshotCallback) reason = 'snapshot'
         else if (isZoomActive(this.zoomState)) reason = 'zoomActive'
         else if (this.requests.clearPending) reason = 'clearHistory'

@@ -94,7 +94,7 @@ describe('typed display consumers', () => {
     expect(color).toContain('texture_mapping_value')
     expect(color).toContain('let centered = z / escapeRadius')
     expect(color).toContain('@group(0) @binding(14) var rawTex')
-    expect(engine).toContain('ordinary color values always come from the typed display set')
+    expect(engine).toContain('ordinary colour values always come from the typed display set')
   })
 
   it('reads AA height, picking fields, and palette preview from the typed set', () => {

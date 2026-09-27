@@ -15,7 +15,8 @@ import {
   DISPLAY_VALUE_LAYERS,
   packDisplayMetadata,
 } from '../displayGeometry';
-import {normalizeOrbitTrapFromLegacy, orbitTrapColorUniformValues, type OrbitTrapConfig} from '../OrbitTrap';
+import {normalizeOrbitTrapFromLegacy, type OrbitTrapConfig} from '../OrbitTrap';
+import {COLOR_UNIFORM_BYTES, orbitTrapUniforms, packColorUniforms, type ColorUniforms} from '../colorUniforms';
 import {iterationPaletteCurveCode, type IterationPaletteCurve} from '../IterationPaletteCurve';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
@@ -47,7 +48,6 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 }
 
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 104;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 /**
@@ -107,6 +107,112 @@ let device: GPUDevice | null = null;
 let pipeline: GPURenderPipeline | null = null;
 let bindGroup: GPUBindGroup | null = null;
 let uniformBuffer: GPUBuffer | null = null;
+/** Width / height of the preview surface (set once its size is known). */
+let previewAspect = 1;
+
+/**
+ * Colour-pass uniforms of the preview: a static, unrotated, unzoomed view of
+ * synthetic iterations, with the material settings of the edited palette.
+ * All curves share F(0)=0 and F(1)=1, so ITER_COUNT * 2 displays exactly the
+ * first warped palette cycle of the synthetic iteration range.
+ */
+function previewUniforms(): ColorUniforms {
+  const lightAngle = PREVIEW_LIGHT_ANGLE;
+  const lightLen = Math.hypot(Math.cos(lightAngle), Math.sin(lightAngle), 1.85);
+  const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
+  const orbitTrap = normalizeOrbitTrapFromLegacy(props);
+  return {
+    palettePeriod: ITER_COUNT * 2,
+    paletteOffset: 0,
+    skyboxTransitionLevels: 0,
+    time: 0,
+    aspect: previewAspect,
+    angle: 0,
+    animate: 0,
+    mu: PREVIEW_MU,
+    zoomFactor: 1,
+    frozenAligned: 0,
+    liveZoomFactor: 1,
+    frozenShiftU: 0,
+    frozenShiftV: 0,
+    tessellationLevel: props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL,
+    displacementAmount: props.displacementAmount ?? 0,
+    animationSpeed: 1,
+    epsilon: 1e-10, // interior detection is irrelevant for synthetic iterations
+    ambientOcclusionStrength: props.ambientOcclusionStrength ?? 0,
+    microBumpStrength: props.microBumpStrength ?? 0,
+    aaLookupOffsetX: 0, // the preview never accumulates AA
+    reliefDepth: props.reliefDepth ?? 0,
+    lightAngle,
+    localShadowStrength: props.localShadowStrength ?? 0,
+    varnishStrength: props.varnishStrength ?? 0,
+    logMu: Math.log(PREVIEW_MU),
+    sceneSin: 0,
+    sceneCos: 1,
+    lightDirX: Math.cos(lightAngle) / lightLen,
+    lightDirY: Math.sin(lightAngle) / lightLen,
+    lightDirZ: 1.85 / lightLen,
+    paletteMirror: 0,
+    debugShading: 0,
+    heightPaletteShift: 0,
+    orbitTrapStrength: orbitTrap.strength,
+    phaseColoringStrength: props.phaseColoringStrength ?? 0,
+    textureMappingXVariable: textureMappingVariableId(textureMapping.xVariable),
+    textureMappingYVariable: textureMappingVariableId(textureMapping.yVariable),
+    textureMappingXScale: textureMapping.xScale,
+    textureMappingYScale: textureMapping.yScale,
+    textureMappingMirror: textureMapping.mirrored ? 1 : 0,
+    centerX: -0.7,
+    centerY: 0,
+    scale: 1.2,
+    gradeContrast: props.gradeContrast ?? 1.18,
+    textureDriftX: 0,
+    textureDriftY: 0,
+    skyDriftX: 0,
+    skyDriftY: 0,
+    paletteOffsetAnimation: 0,
+    heightPaletteShiftAnimation: 0,
+    lightAngleAnimation: 0,
+    textureDriftAnimation: 0,
+    skyReflectionDriftAnimation: 0,
+    phaseColoringAnimation: 0,
+    varnishAnimation: 0,
+    microBumpAnimation: 0,
+    displacementAnimation: 0,
+    tessellationAnimation: 0,
+    aaSampleIndex: 0,
+    antialiasLevel: 0,
+    aaJitterHatX: 0,
+    aaJitterHatY: 0,
+    aaJitterLogMag: 0,
+    aaAnalytic: 0,
+    gradeSaturation: props.gradeSaturation ?? 1.12,
+    liveShiftU: 0,
+    lnScale: 0,
+    liveShiftV: 0,
+    protrusionPhase: props.protrusionPhase ?? 0,
+    protrusionSharpness: props.protrusionSharpness ?? 2,
+    protrusionGeometryMix: props.protrusionGeometryMix ?? 0,
+    protrusionPeriod: props.protrusionPeriod ?? 1,
+    ...orbitTrapUniforms(orbitTrap),
+    protrusionStrength: props.protrusionStrength ?? 1,
+    iterationPaletteCurve: iterationPaletteCurveCode(props.iterationPaletteCurve),
+    aaLookupOffsetY: 0,
+    rawOriginX: 0,
+    rawOriginY: 0,
+    orbitMetricsEnabled: 1, // the synthetic orbit metrics are always present
+    presetTransition: 0,
+    paletteScreenShiftX: 0, // the preview strip is not screen-modulated
+    paletteScreenShiftY: 0,
+    stereoEyeSlope: 0,
+    stereoHeightPass: 0,
+  };
+}
+
+function writeUniforms() {
+  if (!device || !uniformBuffer) return;
+  device.queue.writeBuffer(uniformBuffer, 0, packColorUniforms(previewUniforms()));
+}
 let paletteTexture: GPUTexture | null = null;
 let pathDummy: GPUBuffer | undefined;
 let paletteTextureView: GPUTextureView | null = null;
@@ -379,7 +485,6 @@ async function init() {
   // (re)built by applySize() — called at the end of init AND on every ResizeObserver
   // change, so they always match the REAL displayed size (the panel opens with an
   // animation, so onMounted would otherwise measure a wrong intermediate size).
-  const mu = PREVIEW_MU;
 
   // ── Tile & skybox textures (loaded from assets) ──
   const tileUrl = props.tileTextureUrl || getDefaultTileTextureUrl();
@@ -435,98 +540,11 @@ async function init() {
   // ── Uniform buffer (padded to 16-byte alignment) ──
   pathDummy = device.createBuffer({ size: 208, usage: GPUBufferUsage.STORAGE });
   uniformBuffer = device.createBuffer({
-    size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
+    size: COLOR_UNIFORM_BYTES,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
-  // All curves share F(0)=0 and F(1)=1, so ITER_COUNT * 2 displays exactly
-  // the first warped palette cycle for the synthetic iteration range.
-  const previewLightAngle = PREVIEW_LIGHT_ANGLE;
-  const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
-  const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
-  const orbitTrap = normalizeOrbitTrapFromLegacy(props);
-  const uniforms = new Float32Array([
-    ITER_COUNT * 2, // palettePeriod
-    0,            // paletteOffset
-    0,            // skyboxTransitionLevels (no transition in preview)
-    0,            // time
-    1,            // aspect (real value written by applySize once the size is known)
-    0,            // angle
-    0,            // animate
-    mu,           // mu
-    1,            // zoomFactor (no zoom)
-    0,            // frozenAligned (no frozen texture)
-    1,            // liveZoomFactor (no zoom)
-    0,            // frozenShiftU
-    0,            // frozenShiftV
-    props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL, // tessellationLevel
-    props.displacementAmount ?? 0, // displacementAmount
-    1.0,          // animationSpeed
-    1e-10,        // epsilon (interior detection, not relevant for preview)
-    props.ambientOcclusionStrength ?? 0, // ambientOcclusionStrength
-    props.microBumpStrength ?? 0, // microBumpStrength
-    0, // aaLookupOffsetX (preview never accumulates AA)
-    props.reliefDepth ?? 0, // reliefDepth
-    previewLightAngle, // lightAngle
-    props.localShadowStrength ?? 0, // localShadowStrength
-    props.varnishStrength ?? 0, // varnishStrength
-    Math.log(mu),     // logMu
-    0,                // sceneSin
-    1,                // sceneCos
-    Math.cos(previewLightAngle) / previewLightLen, // lightDirX
-    Math.sin(previewLightAngle) / previewLightLen, // lightDirY
-    1.85 / previewLightLen, // lightDirZ
-    0, // paletteMirror
-    0, // debugShading
-    0, // heightPaletteShift
-    orbitTrap.strength, // legacy-compatible orbitTrapStrength
-    props.phaseColoringStrength ?? 0, // phaseColoringStrength
-    textureMappingVariableId(textureMapping.xVariable), // textureMappingXVariable
-    textureMappingVariableId(textureMapping.yVariable), // textureMappingYVariable
-    textureMapping.xScale, // textureMappingXScale
-    textureMapping.yScale, // textureMappingYScale
-    textureMapping.mirrored ? 1 : 0, // textureMappingMirror
-    -0.7, // centerX
-    0, // centerY
-    1.2, // scale
-    props.gradeContrast ?? 1.18, // gradeContrast
-    0, // textureDriftX
-    0, // textureDriftY
-    0, // skyDriftX
-    0, // skyDriftY
-    0, // paletteOffsetAnimation
-    0, // heightPaletteShiftAnimation
-    0, // lightAngleAnimation
-    0, // textureDriftAnimation
-    0, // skyReflectionDriftAnimation
-    0, // phaseColoringAnimation
-    0, // varnishAnimation
-    0, // microBumpAnimation
-    0, // displacementAnimation
-    0, // tessellationAnimation
-    0, // aaSampleIndex
-    0, // antialiasLevel
-    0, // aaJitterHatX
-    0, // aaJitterHatY
-    0, // aaJitterLogMag
-    0, // aaAnalytic
-    props.gradeSaturation ?? 1.12, // gradeSaturation
-    0, // reachDebug
-    0, // lnScale
-    0, // reachReady
-    props.protrusionPhase ?? 0, // protrusionPhase
-    props.protrusionSharpness ?? 2, // protrusionSharpness
-    props.protrusionGeometryMix ?? 0, // protrusionGeometryMix
-    props.protrusionPeriod ?? 1, // protrusionPeriod
-    ...orbitTrapColorUniformValues(orbitTrap),
-    props.protrusionStrength ?? 1, // protrusionStrength
-    iterationPaletteCurveCode(props.iterationPaletteCurve), // iterationPaletteCurve
-    0, // aaLookupOffsetY
-    0, 0, // raw toroidal origin
-    1, 0, // synthetic orbit metrics always present; padding
-    0, 0, // paletteScreenShiftX/Y (preview strip is not screen-modulated)
-  ]);
-  device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
+  writeUniforms();
 
   // ── Bind group layout ──
   bindGroupLayout = device.createBindGroupLayout({
@@ -673,8 +691,8 @@ function applySize() {
   );
   syntheticOrbitGradientView = syntheticOrbitGradientTexture.createView();
 
-  // Update aspect (uniform index 4) and rebuild.
-  device.queue.writeBuffer(uniformBuffer, 4 * 4, new Float32Array([w / h]).buffer as ArrayBuffer);
+  previewAspect = w / h;
+  writeUniforms();
   rebuildBindGroup();
   render();
 }
@@ -695,57 +713,7 @@ watch(
   [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping, () => props.iterationPaletteCurve],
   () => {
     if (!device || !uniformBuffer) return;
-    const previewLightAngle = PREVIEW_LIGHT_ANGLE;
-    const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
-    const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
-    const orbitTrap = normalizeOrbitTrapFromLegacy(props);
-    const patch = new Float32Array([
-      props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL,
-      props.displacementAmount ?? 0,
-      1.0,
-      1e-10,
-      props.microBumpStrength ?? 0,
-      0, // aaLookupOffsetX (preview never accumulates AA)
-      props.reliefDepth ?? 1,
-      previewLightAngle,
-      props.ambientOcclusionStrength ?? 0,
-      props.localShadowStrength ?? 0,
-      props.varnishStrength ?? 0,
-      Math.log(PREVIEW_MU),
-      0,
-      1,
-      Math.cos(previewLightAngle) / previewLightLen,
-      Math.sin(previewLightAngle) / previewLightLen,
-      1.85 / previewLightLen,
-      0,
-      0,
-      0,
-      orbitTrap.strength,
-      props.phaseColoringStrength ?? 0,
-      textureMappingVariableId(textureMapping.xVariable),
-      textureMappingVariableId(textureMapping.yVariable),
-      textureMapping.xScale,
-      textureMapping.yScale,
-      textureMapping.mirrored ? 1 : 0,
-      -0.7,
-      0,
-      1.2,
-      props.gradeContrast ?? 1.18,
-    ]);
-    device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
-    device.queue.writeBuffer(uniformBuffer, 64 * 4, new Float32Array([props.gradeSaturation ?? 1.12]).buffer as ArrayBuffer);
-    device.queue.writeBuffer(uniformBuffer, 68 * 4, new Float32Array([
-      props.protrusionPhase ?? 0,
-      props.protrusionSharpness ?? 2,
-      props.protrusionGeometryMix ?? 0,
-      props.protrusionPeriod ?? 1,
-    ]).buffer as ArrayBuffer);
-    device.queue.writeBuffer(uniformBuffer, 72 * 4, new Float32Array([
-      ...orbitTrapColorUniformValues(orbitTrap),
-      props.protrusionStrength ?? 1,
-      iterationPaletteCurveCode(props.iterationPaletteCurve),
-      0,
-    ]).buffer as ArrayBuffer);
+    writeUniforms();
     render();
   },
 );
