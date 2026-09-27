@@ -70,7 +70,7 @@ describe('settled rotation color resolve', () => {
   })
 
   it('does not refill the counter ring after a fresh settled zero', () => {
-    expect(engine).toContain('const shouldDispatchCounter = !hasFreshZeroCounter && (')
+    expect(engine).toContain('const shouldDispatchCounter = !hasFreshZeroCounter && this.counter.isSampleDue(frameSerial)')
     expect(engine).toContain('const hasFreshZeroCounter = !plan.clear')
     expect(engine).toContain('&& !hasTranslationShift')
     expect(engine).toContain('&& !this.aaReseedPending')

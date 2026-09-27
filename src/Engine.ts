@@ -37,6 +37,7 @@ import {
     smallZoomStopNeedsClear,
 } from './zoomState'
 import {advanceTile, createExportSession, currentTile, resolveSurface, restartKeyframe, validateExportSettings, type ExpmapLayout, type ExportSession, type ExportSessionSettings, type TiledLayout} from './exportSession'
+import {ORBIT_STEP_CAPACITY, ReferenceChannel, type BlaTablePayload, type TableBuildStage} from './referenceChannel'
 import {FrameRequests, frameClears, planFrame, type FramePlan} from './framePlan'
 import {ViewGrids, ZERO, neutralSizeFor, cameraShiftTexels, iterationDispatchBox, padRect, tileLocalRect, toUv, type GridMapping, type MergeUniforms} from './viewGrids'
 import {
@@ -51,26 +52,11 @@ import {iterationPaletteCurveCode, type IterationPaletteCurve} from './Iteration
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
 import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
-import {
-    partitionGpuPassTimestamps,
-    PASS_SLOT_INDEX,
-    PASS_SLOTS,
-    selectRawUtilityPassKey,
-    shouldEncodeTimestampBoundary,
-    TS_COUNT,
-} from './gpuPassTimings'
-import {
-    batchSizeForWorkRate,
-    isRepresentativeIterationPopulation,
-    iterationWorkCounterShift,
-    measureIterationWorkRate,
-    predictIterationBatchSize,
-    predictZoomRefreshBatchSize,
-    requestedIterationBudgetMs,
-    updateIterationWorkRateEma,
-    updateZoomRefreshCostModel,
-    type ZoomRefreshCostModel,
-} from './iterationBatchController'
+import {PASS_SLOT_INDEX, PASS_SLOTS, selectRawUtilityPassKey} from './gpuPassTimings'
+import {iterationWorkCounterShift} from './iterationBatchController'
+import {IterationBudget, type IterationBatchTimingContext} from './iterationBudget'
+import {PixelCounter, COUNTER_BYTES, type CounterReadback} from './pixelCounter'
+import {GpuPassTimer, type PassTimingSample} from './gpuPassTimer'
 import {advanceFramePacer} from './framePacing'
 import {
     formatGpuBytes,
@@ -112,16 +98,8 @@ const RAW_ORBIT_GRADIENT_LAYERS = 18
 const RAW_TRAP_LAYERS = 16
 const RAW_ORBIT_GRADIENT_TRAP_LAYERS = 21
 
-// Adaptive iteration batch sizing — only the fused iteration pass is controlled.
-// Leave part of the frame budget to reprojection, resolve and color, which do not
-// scale with iterationBatchSize.
-const MIN_BATCH_SIZE = 1
+/** Byte offset of the batch-size scalar in the iteration uniform block (see IterationBudget). */
 const MANDELBROT_BATCH_UNIFORM_OFFSET = 6 * Float32Array.BYTES_PER_ELEMENT
-// Per-dispatch budget, in loop TURNS (work units): one BLA block-apply or one
-// exact step each count as 1, so the cap bounds GPU work per frame uniformly across
-// modes. (Was a covered-iteration cap with a 10× BLA fudge — that throttled long
-// blocks in smooth regions; turn-budgeting lets them run, capped only by frame time.)
-const MAX_BATCH_SIZE = 100_000
 // Validity radii scale linearly with this epsilon (α = ε·|Z| per step, so the
 // neglected δz² term is ε/2 of the linear one). The affine BLA has no other
 // error control, so ε must stay near f32 precision: measured on the CPU mirror
@@ -135,14 +113,6 @@ const BLA_LINEARIZATION_EPSILON = 1e-6
 // radius_beta — and the WGSL BlaStep of mandelbrot_brush.wgsl.
 const BLA_STEP_FLOATS = 11
 const BLA_LEVEL_U32S = 5 // mirrors the Rust #[repr(C)] BlaLevel
-// Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
-// mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
-// is computed to 2× the display maxIter (interactive zoom-in headroom) but never
-// beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
-// default maxStorageBufferBindingSize (128 MiB); the device now also raises that
-// limit to the adapter's maximum, so this cap is comfortably inside it.
-const ORBIT_STEP_CAPACITY = 10_000_000
-
 interface ColorPipelines {
     direct: GPURenderPipeline
     rotation: GPURenderPipeline
@@ -172,167 +142,7 @@ const COLOR_UNIFORM_LIVE_SHIFT_U_SLOT = 65
 const COLOR_UNIFORM_LIVE_SHIFT_V_SLOT = 67
 const TAU = Math.PI * 2
 
-// Minimum number of unfinished pixels below which we consider the image
-// fully converged — see fieldConvergence.ts, which owns the constant alongside
-// the gate that applies it.
-// EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
-const GPU_TIME_EMA_ALPHA = 0.25
-
-// The fused compute pass already counts unfinished pixels every frame; copy its
-// tiny result every frame through the three-slot asynchronous readback ring.
-const COUNTER_SAMPLE_INTERVAL_FRAMES = 1
-const COUNTER_READBACK_BUFFER_COUNT = 3
-const ITERATION_SAMPLE_PAIR_RETENTION = 64
-const COUNTER_WORDS = 4
-const COUNTER_BYTES = COUNTER_WORDS * Uint32Array.BYTES_PER_ELEMENT
-const COUNTER_READBACK_BYTES = COUNTER_BYTES
-// Deferred-clear fallback (see pendingTableClear): generous enough for the
-// slowest BLA builds plus an in-flight orbit
-// extension; past it the re-render proceeds exact rather than never.
-const TABLE_CLEAR_FALLBACK_MS = 10_000
 const ORBIT_METRIC_EPSILON = 0.001
-
-type CounterReadbackSlot = {
-    buffer: GPUBuffer
-    pending: boolean
-    sequence: number
-    generation: number
-}
-
-type IterationBatchTimingContext = {
-    frame: number
-    batchSize: number
-    generation: number
-    activePixelCount: number
-    visiblePixelCount: number
-    zoomRefresh: boolean
-    zoomRefreshRegimeKey: string
-    actualWeightedWork?: number
-    remainingPixelCount?: number
-    effectiveRemainingPixelCount?: number
-    periodicThrottledPixelCount?: number
-}
-
-type TableBuildStage = 'idle' | 'coefficients' | 'transfer' | 'ready' | 'error'
-
-type ReferenceWorkerRequest =
-    | {
-        type: 'reset'
-        jobId: number
-        cx: string
-        cy: string
-        scale: string
-        angle: number
-        approximationMode: ApproximationMode
-        blaEpsilon: number
-        maxBlaSkip: number
-        maxIterations: number
-        precisionBudget: string
-        // Current table-parameter generation (see Engine.tableGeneration): a fresh
-        // worker starts at 0, so the reset must hand it the engine's counter or
-        // every blaReady it posts would be dropped as stale.
-        tableGeneration: number
-        // Canvas aspect (width/height): frames minibrot searches.
-        viewportAspect?: number
-    }
-    | {
-        type: 'updateView'
-        jobId: number
-        cx: string
-        cy: string
-        scale: string
-        angle: number
-        maxIterations: number
-        viewportAspect?: number
-    }
-    | {
-        type: 'setApproximationMode'
-        jobId: number
-        approximationMode: ApproximationMode
-        tableGeneration: number
-    }
-    | {
-        type: 'setBlaEpsilon'
-        jobId: number
-        blaEpsilon: number
-        tableGeneration: number
-    }
-    | {
-        type: 'setMaxBlaSkip'
-        jobId: number
-        maxBlaSkip: number
-        tableGeneration: number
-    }
-    | { type: 'dispose' }
-
-type BlaTablePayload = {
-    steps: Float32Array<ArrayBuffer>
-    levels: Uint32Array<ArrayBuffer>
-    levelCount: number
-    maxIterations: number
-    tableGeneration: number
-}
-
-type ReferenceWorkerResponse =
-    | {
-        type: 'orbitChunk'
-        jobId: number
-        // Monotonic reference-orbit id minted by the worker at every orbit restart
-        // (offset 0): fresh navigator, Rust-side recenter, or budget rebuild. Chunks
-        // are routed by this id — never by comparing reference coordinates.
-        refId: number
-        offset: number
-        count: number
-        maxIterations: number
-        referenceCx: string
-        referenceCy: string
-        orbit: Float32Array<ArrayBuffer>
-        computeMs: number
-    }
-    | {
-        type: 'tableProgress'
-        jobId: number
-        refId: number
-        tableGeneration: number
-        progress: number
-        stage: Exclude<TableBuildStage, 'idle' | 'ready' | 'error'>
-    }
-    | ({
-        type: 'blaReady'
-        jobId: number
-        refId: number
-        // tableGeneration echoes the table-parameter generation the table was
-        // built under. A mismatch with Engine.tableGeneration means the build
-        // predates the latest ε/skip/mode change (in-flight when the setter was
-        // posted) — dropped; the worker's FIFO guarantees a fresh build follows.
-        buildMs: number
-    } & BlaTablePayload)
-    | {
-        type: 'error'
-        jobId: number
-        message: string
-    }
-    | {
-        type: 'ready'
-    }
-
-/**
- * One reference orbit as seen by the Engine. A slot is born on the first chunk
- * of a refId (always offset 0), grows strictly contiguously, and dies either
- * promoted (staging → active) or superseded by a newer refId. These invariants
- * hold by construction — chunks that would create a hole are dropped.
- */
-type ReferenceSlot = {
-    refId: number
-    cx: string
-    cy: string
-    /** Total contiguous orbit steps received so far (2 floats per step: zx, zy). */
-    orbitLen: number
-    /** Accumulated orbit chunks, contiguous and in order (staging only; emptied on promote). */
-    chunks: Float32Array<ArrayBuffer>[]
-    /** Affine BLA table for this reference (arrives after the orbit completes). */
-    bla: BlaTablePayload | null
-}
 
 export type MinibrotResult = {
     /**
@@ -827,35 +637,61 @@ export class Engine {
     private frozenDisplayVersion = -1
     /** frameSerial of the last frame that may have mutated rawTexture (A). */
     private lastRawMutationFrame = 0
-    /** frameSerial at which the last applied counter readback was sampled. */
-    private counterSampleFrame = -1
-
-    // GPU pixel counter (replaces blanket extraFrames = 1000)
-    private counterBuffer?: GPUBuffer
-    private counterReadbackSlots: CounterReadbackSlot[] = []
-    private counterReadbackWriteIndex = 0
-    private counterReadbackSequence = 0
-    private latestAppliedCounterReadbackSequence = 0
-    private counterReadbackGeneration = 0
     private renderFrameSerial = 0
-    private lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
+    /** Unfinished-pixel counter read back from every dispatch (see pixelCounter.ts). */
+    private readonly counter = new PixelCounter()
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
-    unfinishedPixelCount = -1
-    /** Scheduling-weighted unfinished population (full=1, medium=1/4,
-     * strong periodic attraction=1/8). Used only by batch prediction. */
-    effectiveUnfinishedPixelCount = -1
-    /** Unfinished pixels whose latest periodic score reduced their local batch. */
-    periodicThrottledPixelCount = -1
-    /** Monotonic table-arrival counter used by navigation benchmarks. */
-    tableBuildCompletionSerial = 0
-    /** Live worker-side BLA table build milestone (start/transfer/completion). */
-    tableBuildActive = false
-    /** Worker compute time of the latest orbit chunk's reference (dev bench). */
-    orbitComputeTiming = { refId: 0, ms: 0 }
-    /** Worker build time of the latest accepted BLA table (dev bench). */
-    blaBuildTiming = { refId: 0, ms: 0 }
-    tableBuildProgress = 0
-    tableBuildStage: TableBuildStage = 'idle'
+    get unfinishedPixelCount(): number { return this.counter.unfinished }
+    get effectiveUnfinishedPixelCount(): number { return this.counter.effectiveUnfinished }
+    get periodicThrottledPixelCount(): number { return this.counter.periodicThrottled }
+    /** frameSerial at which the last applied counter readback was sampled. */
+    private get counterSampleFrame(): number { return this.counter.sampleFrame }
+    /** Reference-orbit worker protocol: jobs, slots, tables (see referenceChannel.ts). */
+    private readonly reference = new ReferenceChannel({
+        maxIterations: () => this.currentMaxIterations,
+        writeOrbit: (byteOffset, data) => {
+            if (this.mandelbrotReferenceBuffer) {
+                this.device.queue.writeBuffer(this.mandelbrotReferenceBuffer, byteOffset, data, 0, data.length)
+            }
+        },
+        writeBlaTable: table => this.writeBlaTable(table),
+        reanchor: (cx, cy) => {
+            // dx/dy are relative to the reference: record how far it moves so the
+            // frozen texture can follow the camera across the re-anchor (the view
+            // centre is untouched, so the offset change is exactly the jump).
+            const before = this.mandelbrotNavigator.view_floatexp() as Float64Array
+            this.mandelbrotNavigator.reference_origin(cx, cy)
+            const after = this.mandelbrotNavigator.view_floatexp() as Float64Array
+            this.grids.recordReferenceJump({
+                x: before[2] * 2 ** before[3] - after[2] * 2 ** after[3],
+                y: before[4] * 2 ** before[5] - after[4] * 2 ** after[5],
+            })
+        },
+        requestRender: () => { this.needRender = true },
+        requestClear: reason => this.requests.requestClear(reason),
+        invalidateCounter: () => this.invalidateCounterReadback(),
+    })
+    // Reference state read by the HUD, the performance panel and dev tooling.
+    get tableBuildCompletionSerial(): number { return this.reference.tableBuildCompletionSerial }
+    get tableBuildActive(): boolean { return this.reference.tableBuild.active }
+    get tableBuildProgress(): number { return this.reference.tableBuild.progress }
+    get tableBuildStage(): TableBuildStage { return this.reference.tableBuild.stage }
+    get orbitComputeTiming() { return this.reference.orbitComputeTiming }
+    get blaBuildTiming() { return this.reference.blaBuildTiming }
+    get orbitIncomplete(): boolean { return this.reference.progress.incomplete }
+    get isReferenceValidating(): boolean { return this.reference.validating }
+    get currentGuardedMaxIter(): number { return this.reference.progress.guardedMaxIter }
+    get currentReferenceAvailableIter(): number { return this.reference.progress.availableIter }
+    get currentReferenceRemainingIter(): number { return this.reference.progress.remainingIter }
+    get currentBlaLevelCount(): number { return this.reference.blaLevelCount }
+    get referenceBlaReadyMaxIterations(): number { return this.reference.blaReadyMaxIterations }
+    get referenceResetSerial(): number { return this.reference.resetSerial }
+    get referenceResetFlashUntil(): number { return this.reference.resetFlashUntil }
+    get referenceWorkerCx(): string { return this.reference.workerCx }
+    get referenceWorkerCy(): string { return this.reference.workerCy }
+    /** Reference slots, read by the dev bench. */
+    get activeRef() { return this.reference.active }
+    get stagingRef() { return this.reference.staging }
 
     // Self-managing render loop
     private _rafId: number | null = null
@@ -867,9 +703,9 @@ export class Engine {
     /** True when the engine is actively doing GPU work (not idle). */
     isRendering = false
     /** Last measured GPU frame time in milliseconds. */
-    gpuFrameTimeMs = 0
+    get gpuFrameTimeMs(): number { return this.budget.gpuFrameTimeMs }
     /** Exponentially smoothed GPU frame time (for render-loop pacing). */
-    smoothedGpuTimeMs = 0
+    get smoothedGpuTimeMs(): number { return this.budget.smoothedGpuTimeMs }
     /** True while the no-timestamp fallback waits for queue completion. */
     private pendingGpuTiming = false
     // FPS from the interval between actually-rendered frames (EMA). Counts every
@@ -900,16 +736,20 @@ export class Engine {
     // Polled by PerformancePanel.vue, same pattern as RenderStats.
     timestampCapable = false                    // adapter exposes 'timestamp-query'
     readonly passMeta = PASS_SLOTS              // labels + help for the panel
-    passTimingsMs: Record<string, number> = {}  // EMA per pass (ms), over frames it ran
-    passActive: Record<string, boolean> = {}    // did each pass run in the last measured frame
-    passGpuSumMs = 0                            // Σ timed passes that ran (breakdown; may overlap)
-    passGpuSpanMs = 0                          // authoritative GPU frame time = max(end) − min(begin)
-    /** Latest raw timestamp-query duration for the iteration pass. The serial
-     *  lets an external benchmark record each asynchronous sample once. */
-    lastIterationPassMs = -1
-    iterationPassTimingSerial = 0
-    /** EMA of the active timed passes other than compute, used to reserve frame budget. */
-    private otherPassesGpuMs = 0
+    /** Timestamp-query timer of the frame's passes (see gpuPassTimer.ts). */
+    private passTimer = new GpuPassTimer<IterationBatchTimingContext>()
+    private get timestampsEnabled(): boolean { return this.passTimer.enabled }
+    get passTimingsMs(): Record<string, number> { return this.passTimer.passTimingsMs }
+    get passActive(): Record<string, boolean> { return this.passTimer.passActive }
+    get passGpuSumMs(): number { return this.passTimer.passGpuSumMs }
+    get passGpuSpanMs(): number { return this.passTimer.passGpuSpanMs }
+    get lastIterationPassMs(): number { return this.passTimer.lastIterationPassMs }
+    get iterationPassTimingSerial(): number { return this.passTimer.iterationPassTimingSerial }
+    /** Work budget of the iteration dispatch, learned from the two feedbacks above. */
+    private readonly budget = new IterationBudget({
+        targetFps: () => this.targetFps,
+        timestampsEnabled: () => this.timestampsEnabled,
+    })
     frameSerial = 0                            // monotonic, ++ per actually-rendered frame (one submit)
     cpuFramePreparationMs = 0                  // navigator + Vue sync + update(), before render()
     cpuNavigationMs = 0                        // input/step + precise parameter extraction
@@ -917,49 +757,6 @@ export class Engine {
     cpuUpdateMs = 0                            // Engine.update() before command encoding
     cpuRenderMs = 0                             // render() JS wall time (CPU side of the frame)
     frameIntervalMs = 0                         // wall time between successive render() calls
-    private timestampsEnabled = false
-    private timestampQuerySet?: GPUQuerySet
-    /** One-thread no-op dispatch: prevents browsers from eliminating timestamp-only marker passes. */
-    private timestampMarkerPipeline?: GPUComputePipeline
-    private tsResolveBuffer?: GPUBuffer
-    private tsReadBuffer?: GPUBuffer
-    private tsReadbackFree = true
-    private tsSlotsUsedThisFrame = 0
-    private tsPendingSlots = 0
-    /** Controller context paired exactly with the frame currently in timestamp readback. */
-    private tsPendingBatchContext: IterationBatchTimingContext = {
-        frame: -1,
-        batchSize: MIN_BATCH_SIZE,
-        generation: 0,
-        activePixelCount: -1,
-        visiblePixelCount: 1,
-        zoomRefresh: false,
-        zoomRefreshRegimeKey: '',
-    }
-    /** Invalidates delayed timing samples when a clear changes the remaining population. */
-    private batchControllerGeneration = 0
-    /** Prevents repeated first-wave seeding while one clear waits to be consumed. */
-    private batchSeededForPendingClear = false
-    /** Invalidates pre-pan samples once while retaining live pan samples afterward. */
-    private batchTranslationActive = false
-    /** EMA of weighted iteration applications per GPU millisecond. */
-    private iterationWorkRate = 0
-    /** First-dense-frame models, isolated from sparse continuation and pan. */
-    private zoomRefreshCostModels = new Map<string, ZoomRefreshCostModel>()
-    /** Timestamp and counter maps are joined by render-frame serial because
-     *  their asynchronous WebGPU mappings may complete in either order. */
-    private pendingIterationTimings = new Map<number, {
-        elapsedMs: number
-        fixedPassesMs: number
-        context: IterationBatchTimingContext
-    }>()
-    private pendingIterationCounters = new Map<number, {
-        generation: number
-        actualWeightedWork: number
-        remainingPixelCount: number
-        effectiveRemainingPixelCount: number
-        periodicThrottledPixelCount: number
-    }>()
     private lastRenderStartMs = 0
 
     // config
@@ -972,20 +769,10 @@ export class Engine {
     previousRenderOptions?: RenderOptions
     private previousOrbitMetricsEnabled?: boolean
     needRender = true
-    /** Whether the reference orbit is still being computed incrementally. */
-    orbitIncomplete = false
     /** guardedMaxIter from the previous frame (for detecting orbit growth). */
     prevGuardedMaxIter = 0
-    /** Current guardedMaxIter — shared between prepareFrame and render. */
-    currentGuardedMaxIter = 0
     /** Target maxIterations for the current frame. */
     currentMaxIterations = 0
-    currentReferenceAvailableIter = 0
-    currentReferenceRemainingIter = 0
-    isReferenceValidating = false
-    referenceResetSerial = 0
-    referenceResetFlashUntil = 0
-    currentBlaLevelCount = 0
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private maxBlaSkip = 65536
@@ -1009,48 +796,9 @@ export class Engine {
     private completionStartMs = 0
     private completionAccumulatedGpuMs = 0
     private completionTimerActive = false
-    private referenceWorker?: Worker
-    private referenceJobId = 0
-    private referenceAvailableOrbitLen = 0
-    private referenceBlaReadyMaxIterations = 0
-    // ── Deferred invalidation clear (table "repose" race fix) ────────
-    // A table-parameter change (ε, maxSkip, gates, mode) used to clear history
-    // immediately: the whole re-render then converged in exact perturbation
-    // BEFORE the rebuilt table landed, so blocks/gates only ever served boots.
-    // Instead, the setter bumps `tableGeneration` (echoed by the worker in
-    // blaReady, so an in-flight table built under the old params is dropped)
-    // and arms `pendingTableClear`: the clear executes when the matching table
-    // is on GPU — the re-render starts with blocks active from dispatch #1.
-    // Until then the current image (identical content — tables are certified
-    // pure accelerations) stays on screen. `pendingTableClearDeadline` is the
-    // anti-deadlock fallback: worker failure or a throttled rebuild must not
-    // freeze the view forever — past it, clear anyway and render exact.
-    private tableGeneration = 0
-    private pendingTableClear = false
-    private pendingTableClearDeadline = 0
-    private referenceWorkerFailed = false
-    private referenceWorkerReady = false
-    private pendingWorkerMessages: ReferenceWorkerRequest[] = []
-    private referenceViewKey = ''
-    referenceWorkerCx = ''
-    referenceWorkerCy = ''
     floatExpActive = false
     debugShadingActive = false
-    private referenceOrbitWasReset = false
 
-    // ── Reference slots (deferred switch) ───────────────────────────
-    /**
-     * The reference the shader currently uses: its orbit lives in the GPU buffer
-     * and streams progressively (chunks with a matching refId are uploaded as
-     * they arrive). Null when nothing renderable exists (cold start, teleport).
-     */
-    private activeRef: ReferenceSlot | null = null
-    /**
-     * A newer reference being accumulated CPU-side (worker recentered or rebuilt
-     * at a new precision budget). Promoted to active at the update() boundary
-     * once its orbit is long enough — superseded if an even newer refId arrives.
-     */
-    private stagingRef: ReferenceSlot | null = null
     /** Skip the render immediately after promoting a reference; update() used old dx/dy for that call. */
     private skipRenderOnce = false
 
@@ -1162,7 +910,6 @@ export class Engine {
     private frozenAligned = false
 
     // Progressive iteration state – adaptive batch sizing
-    private iterationBatchSize = MIN_BATCH_SIZE
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -1247,159 +994,10 @@ export class Engine {
         this.gpuErrorHandler?.(message)
     }
 
-    private postReferenceWorker(message: ReferenceWorkerRequest): boolean {
-        if (!this.referenceWorker || this.referenceWorkerFailed) {
-            return false
-        }
-        if (message.type === 'dispose') {
-            this.referenceWorker.postMessage(message)
-            return true
-        }
-        if (!this.referenceWorkerReady) {
-            this.pendingWorkerMessages.push(message)
-            return true
-        }
-        this.referenceWorker.postMessage(message)
-        return true
-    }
-
-    private markReferenceReset(maxIterations = this.currentMaxIterations) {
-        this.referenceResetSerial++
-        this.referenceResetFlashUntil = performance.now() + 900
-        this.referenceAvailableOrbitLen = 0
-        this.currentReferenceAvailableIter = 0
-        this.currentReferenceRemainingIter = maxIterations
-        this.currentGuardedMaxIter = 0
-        this.orbitIncomplete = true
-    }
-
-    /**
-     * True once the staging reference can replace the active one. With no active
-     * reference (cold start, teleport) anything is better than nothing, so the
-     * first chunk promotes immediately and the rest streams progressively.
-     * Otherwise wait for the full visible orbit, so the old reference keeps
-     * rendering until the new one is ready — the non-abrupt switch.
-     */
-    private stagingReady(): boolean {
-        const staging = this.stagingRef
-        if (!staging) return false
-        if (!this.activeRef) return true
-        const targetIter = Math.min(this.currentMaxIterations, ORBIT_STEP_CAPACITY - 1)
-        return staging.orbitLen - 1 >= targetIter
-    }
-
-    /**
-     * Promote the staging reference: upload its orbit/BLA to GPU, re-anchor the
-     * front navigator, and flag orbitWasReset so the following update() clears
-     * history (with the freeze-snapshot fallback keeping the last image visible).
-     * Must run at the update() boundary, never in a worker callback, otherwise
-     * render() can see new GPU reference data with old uniforms.
-     */
-    private promoteStagingReference() {
-        const staging = this.stagingRef
-        if (!staging) return
-
-        // Upload the accumulated orbit — chunks are contiguous by construction.
-        if (this.mandelbrotReferenceBuffer) {
-            let floatOffset = 0
-            for (const chunk of staging.chunks) {
-                if (chunk.length > 0) {
-                    this.device.queue.writeBuffer(
-                        this.mandelbrotReferenceBuffer,
-                        floatOffset * Float32Array.BYTES_PER_ELEMENT,
-                        chunk, 0, chunk.length,
-                    )
-                }
-                floatOffset += chunk.length
-            }
-        }
-        staging.chunks = []
-
-        // BLA table: the counters are ALWAYS overwritten — a table from the
-        // previous reference must never survive the switch. Without a table the
-        // shader falls back to exact perturbation (correct, just slower) until
-        // the worker's blaReady for this refId lands.
-        if (staging.bla) {
-            this.writeBlaTable(staging.bla)
-            this.currentBlaLevelCount = staging.bla.levelCount
-            this.referenceBlaReadyMaxIterations = staging.bla.maxIterations
-        } else {
-            this.currentBlaLevelCount = 0
-            this.referenceBlaReadyMaxIterations = 0
-        }
-        // Switch the main-thread reference state
-        this.activeRef = staging
-        this.stagingRef = null
-        this.referenceWorkerCx = staging.cx
-        this.referenceWorkerCy = staging.cy
-        // dx/dy are relative to the reference: record how far it moves so the
-        // frozen texture can follow the camera across the re-anchor (the view
-        // centre is untouched, so the offset change is exactly the jump).
-        const offsetBefore = this.mandelbrotNavigator.view_floatexp() as Float64Array
-        this.mandelbrotNavigator.reference_origin(staging.cx, staging.cy)
-        const offsetAfter = this.mandelbrotNavigator.view_floatexp() as Float64Array
-        this.grids.recordReferenceJump({
-            x: offsetBefore[2] * 2 ** offsetBefore[3] - offsetAfter[2] * 2 ** offsetAfter[3],
-            y: offsetBefore[4] * 2 ** offsetBefore[5] - offsetAfter[4] * 2 ** offsetAfter[5],
-        })
-
-        // Set orbit length directly — NOT via markReferenceReset (which would zero it).
-        // This lets the next frame use the uploaded orbit immediately.
-        this.referenceAvailableOrbitLen = staging.orbitLen
-        const availableIter = Math.max(0, staging.orbitLen - 1)
-        this.currentReferenceAvailableIter = availableIter
-        this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
-        this.currentGuardedMaxIter = Math.min(this.currentMaxIterations, availableIter)
-        this.isReferenceValidating = false
-        this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < this.currentMaxIterations
-
-        // Flag the visual system for a reset (consumed by the next full update())
-        this.referenceResetSerial++
-        this.referenceResetFlashUntil = performance.now() + 900
-        this.referenceOrbitWasReset = true
-        // Promotion clears history wholesale — a pending deferred table clear
-        // is superseded (staging's table was generation-checked at receipt).
-        this.pendingTableClear = false
-        this.invalidateCounterReadback()
-        this.needRender = true
-
-        // This update() call received dx/dy from before reference_origin().
-        // Do not render with mixed old uniforms and new reference buffers.
-        this.skipRenderOnce = true
-    }
-
-    private initializeReferenceWorker() {
-        this.referenceWorker?.terminate()
-        this.referenceWorker = new Worker(new URL('./referenceWorker.ts', import.meta.url), { type: 'module' })
-        this.referenceWorker.onmessage = (event: MessageEvent<ReferenceWorkerResponse>) => {
-            this.handleReferenceWorkerMessage(event.data)
-        }
-        this.referenceWorker.onerror = (event) => {
-            console.error('Reference worker error:', event.message)
-            this.referenceWorkerFailed = true
-            this.orbitIncomplete = false
-            this.currentBlaLevelCount = 0
-        }
-        this.referenceWorkerFailed = false
-        this.referenceWorkerReady = false
-        this.pendingWorkerMessages = []
-        this.referenceAvailableOrbitLen = 0
-        this.referenceBlaReadyMaxIterations = 0
-        this.tableBuildActive = false
-        this.tableBuildProgress = 0
-        this.tableBuildStage = 'idle'
-        this.pendingTableClear = false
-        this.activeRef = null
-        this.stagingRef = null
-        this.referenceJobId++
-    }
-
     /**
      * Force a fresh reference orbit at the next update(), re-anchored at the new
-     * view centre. Use for discontinuous teleports (preset load, manual coordinate
-     * entry): the current orbit is geometrically useless there (dx/dy against the
-     * new centre is huge), so both slots are dropped and the next update() runs
-     * resetReferenceJob. Re-anchoring the shared front navigator now keeps
+     * view centre. Use for discontinuous teleports (preset load, manual
+     * coordinate entry). Re-anchoring the shared front navigator now keeps
      * dx/dy ≈ 0 immediately.
      */
     resetReference(cx: string, cy: string) {
@@ -1407,248 +1005,8 @@ export class Engine {
         if (this.mandelbrotNavigator) {
             this.mandelbrotNavigator.reference_origin(cx, cy)
         }
-        this.activeRef = null
-        this.stagingRef = null
-        this.referenceViewKey = ''
-        this.tableBuildActive = false
-        this.tableBuildProgress = 0
-        this.tableBuildStage = 'idle'
+        this.reference.dropForTeleport()
         this.needRender = true
-    }
-
-    /**
-     * Start a fresh worker job (new navigator, new orbit). Two flavours:
-     * - teleport / cold start (activeRef === null): nothing renderable — blank the
-     *   counters so the shader idles on the frozen fallback until the first chunk
-     *   of the new job promotes and streams progressively.
-     * - in-place rebuild (activeRef kept — e.g. precision budget change): the
-     *   current orbit stays valid and keeps rendering; the rebuilt reference
-     *   arrives as staging and promotes seamlessly when complete.
-     */
-    private resetReferenceJob(mandelbrot: Mandelbrot, scaleString: string, maxIterations: number) {
-        console.log('[REF] resetReferenceJob -> worker reset', mandelbrot.cx.slice(0, 14), 'scale', scaleString.slice(0, 10), 'maxIter', maxIterations, 'inPlace', !!this.activeRef)
-        this.stagingRef = null
-        this.tableBuildActive = false
-        this.tableBuildProgress = 0
-        this.tableBuildStage = 'idle'
-        if (!this.activeRef) {
-            this.markReferenceReset(maxIterations)
-            this.referenceBlaReadyMaxIterations = 0
-            this.currentBlaLevelCount = 0
-            this.referenceOrbitWasReset = true
-            this.referenceWorkerCx = ''
-            this.referenceWorkerCy = ''
-        }
-        this.isReferenceValidating = true
-        this.referenceViewKey = ''
-        this.referenceJobId++
-        this.postReferenceWorker({
-            type: 'reset',
-            jobId: this.referenceJobId,
-            cx: mandelbrot.cx,
-            cy: mandelbrot.cy,
-            scale: scaleString,
-            angle: mandelbrot.angle,
-            approximationMode: this.approximationMode,
-            blaEpsilon: this.blaEpsilon,
-            maxBlaSkip: this.maxBlaSkip,
-            maxIterations,
-            precisionBudget: this.precisionBudget,
-            tableGeneration: this.tableGeneration,
-            viewportAspect: this.width / Math.max(1, this.height),
-        })
-    }
-
-    private syncReferenceWorkerView(mandelbrot: Mandelbrot, scaleString: string, maxIterations: number) {
-        // Aspect is part of the key: a resize alone moves the exact c_max bound,
-        // and the worker must get a chance to re-solve/re-post the radii.
-        const aspectKey = (this.width / Math.max(1, this.height)).toFixed(6)
-        const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}\n${aspectKey}`
-        this.minibrotView = { cx: mandelbrot.cx, cy: mandelbrot.cy, scale: scaleString, angle: mandelbrot.angle }
-        if (nextKey === this.referenceViewKey) {
-            return
-        }
-        // Note: a view change never discards the staging reference — the worker
-        // keeps extending the same orbit (same refId), or recenters and the new
-        // refId supersedes staging naturally in the chunk router.
-        this.referenceViewKey = nextKey
-        this.isReferenceValidating = true
-        this.orbitIncomplete = true
-        this.needRender = true
-        this.postReferenceWorker({
-            type: 'updateView',
-            jobId: this.referenceJobId,
-            cx: mandelbrot.cx,
-            cy: mandelbrot.cy,
-            scale: scaleString,
-            angle: mandelbrot.angle,
-            maxIterations,
-            viewportAspect: this.width / Math.max(1, this.height),
-        })
-    }
-
-    private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
-        if (message.type === 'ready') {
-            this.referenceWorkerReady = true
-            const queue = this.pendingWorkerMessages
-            this.pendingWorkerMessages = []
-            for (const msg of queue) {
-                this.referenceWorker?.postMessage(msg)
-            }
-            return
-        }
-
-        if (message.jobId !== this.referenceJobId) {
-            return
-        }
-
-        if (message.type === 'tableProgress') {
-            if (message.tableGeneration !== this.tableGeneration) {
-                return
-            }
-            const belongsToKnownReference = message.refId === this.activeRef?.refId
-                || message.refId === this.stagingRef?.refId
-            if (!belongsToKnownReference) {
-                return
-            }
-            this.tableBuildActive = true
-            this.tableBuildProgress = Math.min(1, Math.max(0, message.progress))
-            this.tableBuildStage = message.stage
-            return
-        }
-
-        if (message.type === 'error') {
-            console.error('Reference worker error:', message.message)
-            this.referenceWorkerFailed = true
-            this.orbitIncomplete = false
-            this.currentBlaLevelCount = 0
-            this.tableBuildActive = false
-            this.tableBuildStage = 'error'
-            return
-        }
-
-        if (message.type === 'orbitChunk') {
-            this.orbitComputeTiming = { refId: message.refId, ms: message.computeMs }
-            const active = this.activeRef
-            const staging = this.stagingRef
-
-            if (active && message.refId === active.refId) {
-                // ── Progressive streaming of the shader's current reference ──
-                if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
-                    this.device.queue.writeBuffer(
-                        this.mandelbrotReferenceBuffer,
-                        message.offset * 2 * Float32Array.BYTES_PER_ELEMENT,
-                        message.orbit,
-                        0,
-                        message.orbit.length,
-                    )
-                }
-                active.orbitLen = message.count
-                this.referenceAvailableOrbitLen = message.count
-                const availableIter = Math.max(0, message.count - 1)
-                this.currentReferenceAvailableIter = availableIter
-                this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
-                this.isReferenceValidating = false
-                this.currentGuardedMaxIter = Math.min(this.currentMaxIterations, availableIter)
-                const wasOrbitIncomplete = this.orbitIncomplete
-                this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < this.currentMaxIterations
-                // Only re-render while the VISIBLE portion (≤ maxIter) is still being built, plus the
-                // frame it completes. Headroom chunks beyond maxIter (the 2× lookahead for zoom-in)
-                // don't change what the shader draws — guardedMaxIter is capped — so forcing a render
-                // for each of them re-runs the full pass for nothing (a massive framerate drop).
-                if (this.orbitIncomplete || wasOrbitIncomplete) {
-                    this.needRender = true
-                }
-                return
-            }
-
-            if (staging && message.refId === staging.refId) {
-                // ── Accumulate the staging reference — chunks must stay contiguous ──
-                if (message.offset !== staging.orbitLen) {
-                    return // protocol guarantees contiguity; drop defensively
-                }
-                staging.chunks.push(message.orbit)
-                staging.orbitLen = message.count
-                this.isReferenceValidating = false
-                // No needRender: the display (old reference) is unchanged while
-                // staging accumulates; promotion runs in update() every rAF anyway.
-                return
-            }
-
-            if (
-                message.refId > Math.max(staging?.refId ?? 0, active?.refId ?? 0)
-                && message.offset === 0
-            ) {
-                // ── First chunk of a newer reference → (re)start staging ──
-                // Supersedes any previous staging: the worker recentered again
-                // (or a fresh job started), so older accumulations are moot.
-                console.log('[REF] staging new reference refId=', message.refId, 'ref=', message.referenceCx.slice(0, 14))
-                this.stagingRef = {
-                    refId: message.refId,
-                    cx: message.referenceCx,
-                    cy: message.referenceCy,
-                    orbitLen: message.count,
-                    chunks: [message.orbit],
-                    bla: null,
-                }
-                this.isReferenceValidating = false
-                return
-            }
-
-            // Stale refId (or a non-zero offset for an unknown reference — a hole
-            // we must not accept): ignore.
-            return
-        }
-
-        // ── BLA tables — routed by refId like orbit chunks ──
-        // Stale-generation tables (built under pre-change ε/skip/mode, in flight
-        // when the setter was posted) are dropped in both branches: the worker
-        // processes messages FIFO, so a build under the new params always follows.
-        if (message.tableGeneration !== this.tableGeneration) {
-            return
-        }
-        this.blaBuildTiming = { refId: message.refId, ms: message.buildMs }
-        if (this.activeRef && message.refId === this.activeRef.refId) {
-            this.writeBlaTable(message)
-            this.currentBlaLevelCount = message.levelCount
-            this.referenceBlaReadyMaxIterations = message.maxIterations
-            this.tableBuildCompletionSerial++
-            this.tableBuildActive = false
-            this.tableBuildProgress = 1
-            this.tableBuildStage = 'ready'
-            this.isReferenceValidating = false
-            if (this.pendingTableClear) {
-                // Deferred invalidation clear: the table for the new parameters
-                // is now on GPU, so restart the whole render with blocks active
-                // from the first dispatch. The completion snapshot (resolved →
-                // frozen) taken when the previous render finished serves as the
-                // visual fallback during reconvergence, exactly as it does for
-                // an immediate clear.
-                this.pendingTableClear = false
-                this.requests.requestClear('tableReady')
-                this.needRender = true
-                this.invalidateCounterReadback()
-            } else {
-                // BLA is a pure acceleration of the same perturbation result, so do not
-                // clear history when it arrives: already-computed pixels stay valid and
-                // continuations simply start using BLA. Clearing here caused a visible
-                // render cut (black screen) each time the BLA table was delivered.
-                this.needRender = true
-                this.invalidateCounterReadback()
-            }
-        } else if (this.stagingRef && message.refId === this.stagingRef.refId) {
-            this.stagingRef.bla = {
-                steps: message.steps,
-                levels: message.levels,
-                levelCount: message.levelCount,
-                maxIterations: message.maxIterations,
-                tableGeneration: message.tableGeneration,
-            }
-            this.tableBuildActive = false
-            this.tableBuildProgress = 1
-            this.tableBuildStage = 'ready'
-        }
-        // else: table for a superseded reference — drop.
     }
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
@@ -1659,7 +1017,7 @@ export class Engine {
         // the worker navigator (set via the reset message), which builds the reference orbit.
         this.approximationMode = readNavigatorApproximationMode(this.mandelbrotNavigator)
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
-        this.initializeReferenceWorker()
+        this.reference.start()
         if (!navigator.gpu) throw new Error(t('engine.webgpu.unsupported'))
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error(t('engine.webgpu.adapterNotFound'))
@@ -1791,8 +1149,7 @@ export class Engine {
             + `maxBufferSize=${this.device.limits.maxBufferSize} `
             + `maxStorageBufferBindingSize=${this.device.limits.maxStorageBufferBindingSize} `
             + `maxTextureDimension2D=${this.device.limits.maxTextureDimension2D}`)
-        this.timestampsEnabled = this.timestampCapable
-        console.info(`[Engine] timestamp-query: available=${this.timestampCapable} → per-pass timing ${this.timestampsEnabled ? 'ON' : 'OFF'}`)
+        console.info(`[Engine] timestamp-query: available=${this.timestampCapable} → per-pass timing ${this.timestampCapable ? 'ON' : 'OFF'}`)
         this.device.label = 'Engine Device'
         const device = this.device
         const lostDuringSetup = device.lost.then((info) => {
@@ -1818,22 +1175,8 @@ export class Engine {
         this.device.pushErrorScope('out-of-memory')
         this.device.pushErrorScope('validation')
         this.device.pushErrorScope('internal')
-        if (this.timestampsEnabled) {
-            this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: TS_COUNT, label: 'Engine PerfTimestamps' })
-            this.tsResolveBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC, label: 'Engine TS Resolve' })
-            this.tsReadBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'Engine TS Readback' })
-            this.timestampMarkerPipeline = this.device.createComputePipeline({
-                label: 'Engine Timestamp Marker Pipeline',
-                layout: 'auto',
-                compute: {
-                    module: this.device.createShaderModule({
-                        label: 'Engine Timestamp Marker Shader',
-                        code: '@compute @workgroup_size(1) fn main() {}',
-                    }),
-                    entryPoint: 'main',
-                },
-            })
-        }
+        this.passTimer = new GpuPassTimer()
+        if (this.timestampCapable) this.passTimer.allocate(this.device)
         this.presentationPipelines = undefined
         this.colorPipelines = undefined
         this.hdrColorPipelines = undefined
@@ -1967,23 +1310,10 @@ export class Engine {
         })
         this.mandelbrotBlaBufferCapacity = 1
         this.mandelbrotBlaLevelBufferCapacity = 1
-        // Remaining pixels + actual weighted work consumed by this dispatch (16 B).
-        this.counterBuffer = this.device.createBuffer({
-            size: COUNTER_BYTES,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-            label: 'Engine Counter Storage',
-        })
-        // Readback slots hold the 16 B dispatch counters.
-        this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
-            buffer: this.device.createBuffer({
-                size: COUNTER_READBACK_BYTES,
-                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-                label: `Engine Counter Readback ${index}`,
-            }),
-            pending: false,
-            sequence: 0,
-            generation: 0,
-        }))
+
+        // Remaining pixels + actual weighted work consumed by each dispatch (16 B),
+        // read back through a ring of mappable slots.
+        this.counter.allocate(this.device)
         this.uniformBufferMerge = this.device.createBuffer({
             size: 4 * 8, // zf, lzf, frozenShiftU, frozenShiftV, aspect, angle, liveShiftU, liveShiftV
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -2336,107 +1666,17 @@ export class Engine {
         this.bindGroupRotationPresent = undefined
     }
 
-    // Timestamp-write descriptor for an ordinary timed pass. Explicit copy or
-    // compound spans use robust end-of-pass boundaries below instead.
-    private tsWrites(slot: number): GPUComputePassTimestampWrites | undefined {
-        if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
-        this.tsSlotsUsedThisFrame |= (1 << slot)
-        return { querySet: this.timestampQuerySet, beginningOfPassWriteIndex: slot * 2, endOfPassWriteIndex: slot * 2 + 1 }
-    }
-
-    /**
-     * Encode one robust timestamp boundary around commands (notably texture
-     * copies) which cannot carry pass timestampWrites themselves. Its one-thread
-     * no-op dispatch prevents browser elimination; only the END marker is observed.
-     */
-    private tsSpanBoundary(commandEncoder: GPUCommandEncoder, slot: number, edge: 'start' | 'end') {
-        if (!shouldEncodeTimestampBoundary(this.timestampsEnabled, !!this.timestampQuerySet)
-            || !this.timestampMarkerPipeline) return
-        this.tsSlotsUsedThisFrame |= (1 << slot)
-        const marker = commandEncoder.beginComputePass({
-            label: `Engine timing boundary ${PASS_SLOTS[slot].key}:${edge}`,
-            timestampWrites: {
-                querySet: this.timestampQuerySet!,
-                endOfPassWriteIndex: slot * 2 + (edge === 'start' ? 0 : 1),
-            },
-        })
-        marker.setPipeline(this.timestampMarkerPipeline)
-        marker.dispatchWorkgroups(1)
-        marker.end()
-    }
-
-    /** Write only the robust END marker of an explicit span on a real pass. */
-    private tsExplicitSpanEnd(slot: number): GPUComputePassTimestampWrites | undefined {
-        if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
-        this.tsSlotsUsedThisFrame |= (1 << slot)
-        return {querySet: this.timestampQuerySet, endOfPassWriteIndex: slot * 2 + 1}
-    }
-
-    // Deferred, off-critical-path readback of the resolved timestamps → per-pass
-    // EMA (ms). Skips frames while a previous map is in flight (tsReadbackFree).
-    private readbackTimestamps() {
-        const buf = this.tsReadBuffer
-        if (!buf) return
-        this.tsReadbackFree = false
-        const pending = this.tsPendingSlots
-        const sampledBatchContext = this.tsPendingBatchContext
-        void buf.mapAsync(GPUMapMode.READ).then(() => {
-            try {
-                const data = new BigInt64Array(buf.getMappedRange().slice(0))
-                const timings: Record<string, number> = { ...this.passTimingsMs }
-                let iterationPassMs: number | undefined
-
-                // Per-pass end−begin is UNRELIABLE on tiled/mobile GPUs: the begin
-                // timestamps cluster at frame start (fast command parse; deferred
-                // fragment execution), so end−begin reads as cumulative-from-start
-                // rather than a real pass duration. Passes run SEQUENTIALLY on the
-                // GPU timeline, so the robust partition is the gap between
-                // consecutive END markers. Explicit copy/compound spans carry
-                // their own pair of robust END boundaries and their post-marker
-                // becomes the predecessor of the following ordinary pass.
-                const partition = partitionGpuPassTimestamps(data, pending)
-                let sum = 0
-                let otherPassesMs = 0
-                for (const rp of partition.samples) {
-                    const ms = rp.durationMs
-                    if (rp.key === 'compute') iterationPassMs = ms
-                    else otherPassesMs += ms
-                    const prev = timings[rp.key]
-                    timings[rp.key] = prev === undefined ? ms : prev * 0.8 + ms * 0.2
-                    sum += timings[rp.key]
-                }
-                this.otherPassesGpuMs = this.otherPassesGpuMs > 0
-                    ? this.otherPassesGpuMs * 0.8 + otherPassesMs * 0.2
-                    : otherPassesMs
-                this.passTimingsMs = timings
-                this.passActive = partition.active
-                this.passGpuSumMs = sum
-                if (partition.samples.length) {
-                    const spanMs = partition.spanMs
-                    this.passGpuSpanMs = this.passGpuSpanMs > 0
-                        ? this.passGpuSpanMs * 0.8 + spanMs * 0.2
-                        : spanMs
-                    // On timestamp-capable adapters this is the authoritative
-                    // duration of the submitted GPU frame. In particular it
-                    // excludes browser/queue notification latency which can
-                    // make onSubmittedWorkDone() arrive much later on zooms.
-                    this.applyGpuFrameTiming(spanMs, sampledBatchContext)
-                }
-                if (iterationPassMs !== undefined) {
-                    this.lastIterationPassMs = iterationPassMs
-                    this.iterationPassTimingSerial++
-                    this.recordIterationPassTiming(
-                        iterationPassMs,
-                        sampledBatchContext,
-                        otherPassesMs,
-                    )
-                }
-            } catch { /* mapping raced with device loss */ }
-            finally {
-                try { buf.unmap() } catch { /* already unmapped */ }
-                this.tsReadbackFree = true
-            }
-        }).catch(() => { this.tsReadbackFree = true })
+    /** Timestamp readback of one frame: feeds the panel EMAs and the batch controller. */
+    private onPassTimingSample(sample: PassTimingSample<IterationBatchTimingContext>) {
+        this.budget.recordFixedPasses(sample.otherPassesMs)
+        // On timestamp-capable adapters the span is the authoritative duration
+        // of the submitted GPU frame. In particular it excludes browser/queue
+        // notification latency, which can make onSubmittedWorkDone() arrive
+        // much later on zooms.
+        if (sample.spanMs !== undefined) this.onGpuFrameTiming(sample.spanMs, sample.context)
+        if (sample.iterationPassMs !== undefined) {
+            this.budget.recordPassTiming(sample.iterationPassMs, sample.context, sample.otherPassesMs)
+        }
     }
 
     // Lazily build + cache a specialized in-place kernel for the given override
@@ -2577,7 +1817,7 @@ export class Engine {
     private rebuildInplaceBindGroup() {
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
-            || !this.uniformBufferBrush || !this.counterBuffer) {
+            || !this.uniformBufferBrush || !this.counter.buffer) {
             return
         }
 
@@ -2591,7 +1831,7 @@ export class Engine {
                 { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
                 { binding: 4, resource: this.rawArrayView },
                 { binding: 5, resource: { buffer: this.uniformBufferBrush } },
-                { binding: 6, resource: { buffer: this.counterBuffer } },
+                { binding: 6, resource: { buffer: this.counter.buffer } },
             ],
             label: 'Engine BindGroup InplaceCompute',
         })
@@ -2657,18 +1897,11 @@ export class Engine {
     }
 
     private invalidateCounterReadback() {
-        this.unfinishedPixelCount = -1
-        this.effectiveUnfinishedPixelCount = -1
-        this.periodicThrottledPixelCount = -1
-        this.counterReadbackGeneration++
-        this.lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
-        this.counterSampleFrame = -1
+        this.counter.invalidate()
     }
 
     private hasPendingCounterReadbackForCurrentGeneration(): boolean {
-        return this.counterReadbackSlots.some(slot =>
-            slot.pending && slot.generation === this.counterReadbackGeneration
-        )
+        return this.counter.hasPendingForCurrentGeneration()
     }
 
     /**
@@ -2720,11 +1953,7 @@ export class Engine {
      * do not (they render progressively across the hand-over).
      */
     exportReferencePending(): boolean {
-        if (this.referenceWorkerFailed) return false
-        const visibleTarget = Math.min(this.currentMaxIterations, ORBIT_STEP_CAPACITY - 1)
-        return this.stagingRef !== null
-            || this.isReferenceValidating
-            || this.currentReferenceAvailableIter < visibleTarget
+        return this.reference.exportPending(this.currentMaxIterations)
     }
 
     /**
@@ -3346,79 +2575,13 @@ export class Engine {
         this.needRender = true
     }
 
-    private acquireCounterReadbackSlot(): CounterReadbackSlot | undefined {
-        const slotCount = this.counterReadbackSlots.length
-        for (let i = 0; i < slotCount; i++) {
-            const index = (this.counterReadbackWriteIndex + i) % slotCount
-            const slot = this.counterReadbackSlots[index]
-            if (!slot.pending) {
-                this.counterReadbackWriteIndex = (index + 1) % slotCount
-                return slot
-            }
-        }
-        return undefined
-    }
-
-    private scheduleCounterReadback(
-        slot: CounterReadbackSlot,
-        sequence: number,
-        generation: number,
-        frame: number,
-        batchGeneration: number,
-        workCounterShift: number,
-    ) {
-        slot.pending = true
-        slot.sequence = sequence
-        slot.generation = generation
-
-        void (async () => {
-            let mapped = false
-            try {
-                await slot.buffer.mapAsync(GPUMapMode.READ)
-                mapped = true
-                const data = new Uint32Array(slot.buffer.getMappedRange())
-                const unfinished = data[0]
-                const actualWeightedWork = data[1] * 2 ** workCounterShift
-                const effectiveUnfinished = data[2] / 8
-                const periodicThrottled = data[3]
-                this.recordIterationCounterSample(
-                    frame,
-                    batchGeneration,
-                    actualWeightedWork,
-                    unfinished,
-                    effectiveUnfinished,
-                    periodicThrottled,
-                )
-                this.applyCounterReadback(sequence, generation, frame, unfinished, effectiveUnfinished, periodicThrottled)
-            } catch {
-                // Buffer destruction or device loss can reject an outstanding readback.
-            } finally {
-                if (mapped) {
-                    slot.buffer.unmap()
-                }
-                slot.pending = false
-            }
-        })()
-    }
-
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, effectiveUnfinished: number, periodicThrottled: number) {
-        if (generation !== this.counterReadbackGeneration) {
-            return
-        }
-        if (sequence <= this.latestAppliedCounterReadbackSequence) {
-            return
-        }
-        this.latestAppliedCounterReadbackSequence = sequence
-
-        const prevUnfinished = this.unfinishedPixelCount
-        this.unfinishedPixelCount = unfinished
-        this.effectiveUnfinishedPixelCount = effectiveUnfinished
-        this.periodicThrottledPixelCount = periodicThrottled
-        this.counterSampleFrame = frame
-
-        // When progressive computation just finished, snapshot resolved→frozen
-        // so the unified color path has a valid frozen fallback for future clears.
-        if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
+    /**
+     * A counter readback updated the unfinished count. When progressive
+     * computation just finished, snapshot resolved → frozen so the unified
+     * colour path has a valid frozen fallback for future clears.
+     */
+    private onCounterApplied(unfinished: number, previousUnfinished: number) {
+        if (previousUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
             && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.requests.clearPending
             && !isZoomActive(this.zoomState)
@@ -3439,253 +2602,19 @@ export class Engine {
         void this.device.queue.onSubmittedWorkDone()
             .then(() => {
                 this.pendingGpuTiming = false
-                this.applyGpuFrameTiming(performance.now() - submitStartMs, batchContext)
+                this.onGpuFrameTiming(performance.now() - submitStartMs, batchContext)
             })
             .catch(() => {
                 this.pendingGpuTiming = false
             })
     }
 
-    private trimPendingIterationSamples() {
-        while (this.pendingIterationTimings.size > ITERATION_SAMPLE_PAIR_RETENTION) {
-            for (const frame of this.pendingIterationTimings.keys()) {
-                this.pendingIterationTimings.delete(frame)
-                break
-            }
-        }
-        while (this.pendingIterationCounters.size > ITERATION_SAMPLE_PAIR_RETENTION) {
-            for (const frame of this.pendingIterationCounters.keys()) {
-                this.pendingIterationCounters.delete(frame)
-                break
-            }
-        }
-    }
-
-    private recordIterationPassTiming(
-        elapsedMs: number,
-        context: IterationBatchTimingContext,
-        fixedPassesMs: number,
-    ) {
-        this.pendingIterationTimings.set(context.frame, {elapsedMs, fixedPassesMs, context})
-        this.tryApplyPairedIterationSample(context.frame)
-        this.trimPendingIterationSamples()
-    }
-
-    private recordIterationCounterSample(
-        frame: number,
-        generation: number,
-        actualWeightedWork: number,
-        remainingPixelCount: number,
-        effectiveRemainingPixelCount: number,
-        periodicThrottledPixelCount: number,
-    ) {
-        this.pendingIterationCounters.set(frame, {
-            generation,
-            actualWeightedWork,
-            remainingPixelCount,
-            effectiveRemainingPixelCount,
-            periodicThrottledPixelCount,
-        })
-        this.tryApplyPairedIterationSample(frame)
-        this.trimPendingIterationSamples()
-    }
-
-    private tryApplyPairedIterationSample(frame: number) {
-        const timing = this.pendingIterationTimings.get(frame)
-        const counter = this.pendingIterationCounters.get(frame)
-        if (!timing || !counter) return
-        this.pendingIterationTimings.delete(frame)
-        this.pendingIterationCounters.delete(frame)
-        if (timing.context.generation !== counter.generation) return
-        this.applyIterationPassTiming(
-            timing.elapsedMs,
-            {
-                ...timing.context,
-                actualWeightedWork: counter.actualWeightedWork,
-                remainingPixelCount: counter.remainingPixelCount,
-                effectiveRemainingPixelCount: counter.effectiveRemainingPixelCount,
-                periodicThrottledPixelCount: counter.periodicThrottledPixelCount,
-            },
-            timing.fixedPassesMs,
-            true,
-        )
-    }
-
-    private applyGpuFrameTiming(
-        elapsed: number,
-        batchContext: IterationBatchTimingContext,
-    ) {
-        this.gpuFrameTimeMs = elapsed
-
+    /** Whole-frame GPU duration (timestamp span, or submit→done without timestamps). */
+    private onGpuFrameTiming(elapsed: number, context: IterationBatchTimingContext) {
         if (this.completionTimerActive && elapsed > 0) {
             this.completionAccumulatedGpuMs += elapsed
         }
-
-        if (this.smoothedGpuTimeMs === 0) {
-            this.smoothedGpuTimeMs = elapsed
-        } else {
-            this.smoothedGpuTimeMs =
-                this.smoothedGpuTimeMs * (1 - GPU_TIME_EMA_ALPHA)
-                + elapsed * GPU_TIME_EMA_ALPHA
-        }
-
-        // Timestamp queries are optional in WebGPU. On unsupported adapters,
-        // retain a conservative full-frame fallback rather than pinning the
-        // renderer forever at MIN_BATCH_SIZE. Timestamp-capable devices never
-        // enter this path: their controller input is the compute pass only.
-        if (!this.timestampsEnabled) {
-            this.applyIterationPassTiming(
-                elapsed,
-                batchContext,
-                this.otherPassesGpuMs,
-                false,
-            )
-        }
-    }
-
-    /**
-     * Adjust the shader work budget from the iteration pass alone. Full-frame
-     * time contains fixed resolve/color/zoom costs and therefore cannot tell us
-     * how iterationBatchSize should change.
-     */
-    private applyIterationPassTiming(
-        elapsed: number,
-        sample: IterationBatchTimingContext,
-        sampledFixedPassesMs = this.otherPassesGpuMs,
-        computePassOnly = true,
-    ) {
-        if (elapsed <= 0) {
-            return
-        }
-        // A clear starts a new population immediately, while timestamp and
-        // counter maps may resolve later. Reject the old texture before it can
-        // contaminate either the global rate or the zoom-refresh model.
-        if (sample.generation !== this.batchControllerGeneration) return
-
-        const frameTargetMs = 1000 / Math.max(1, this.targetFps)
-        const targetIterationMs = requestedIterationBudgetMs(
-            frameTargetMs,
-            sampledFixedPassesMs,
-        )
-        const maxBatchSize = this.getEffectiveMaxBatchSize()
-
-        // Learn only from the real weighted work consumed by this exact timed
-        // dispatch. The post-pass unfinished count enforces the 10% rule on
-        // pixels that still need work; zoom frames that cheaply finish most of
-        // the image can no longer masquerade as enormous throughput.
-        const remainingPixelCount = sample.remainingPixelCount
-            ?? sample.activePixelCount
-        const effectiveRemainingPixelCount = sample.effectiveRemainingPixelCount
-            ?? remainingPixelCount
-        const sampledRate = sample.actualWeightedWork !== undefined
-            ? measureIterationWorkRate(sample.actualWeightedWork, elapsed)
-            : 0
-        if (computePassOnly && sample.zoomRefresh && sampledRate > 0) {
-            const previousModel = this.zoomRefreshCostModels.get(
-                sample.zoomRefreshRegimeKey,
-            )
-            const nextModel = updateZoomRefreshCostModel(
-                previousModel,
-                sampledRate,
-                sampledFixedPassesMs,
-            )
-            if (nextModel) {
-                this.zoomRefreshCostModels.set(
-                    sample.zoomRefreshRegimeKey,
-                    nextModel,
-                )
-            }
-        }
-        if (computePassOnly && isRepresentativeIterationPopulation(
-            remainingPixelCount,
-            sample.visiblePixelCount,
-        ) && sampledRate > 0) {
-            this.iterationWorkRate = updateIterationWorkRateEma(
-                this.iterationWorkRate,
-                sampledRate,
-            )
-        }
-
-        if (!computePassOnly) {
-            // Timestamp queries are optional. Keep the proportional full-frame
-            // fallback, but never feed its mixed fixed-pass time into the EMA.
-            this.iterationBatchSize = predictIterationBatchSize({
-                elapsedMs: elapsed,
-                requestedBudgetMs: targetIterationMs,
-                sampledBatchSize: sample.batchSize,
-                currentBatchSize: this.iterationBatchSize,
-                minBatchSize: MIN_BATCH_SIZE,
-                maxBatchSize,
-            })
-            return
-        }
-
-        // A hot reload or an already-sparse view may provide no representative
-        // population with which to initialize the persistent rate. Still let
-        // the isolated compute timestamp escape batch 1, without storing that
-        // sparse measurement in the EMA.
-        if (!(this.iterationWorkRate > 0)) {
-            this.iterationBatchSize = predictIterationBatchSize({
-                elapsedMs: elapsed,
-                requestedBudgetMs: targetIterationMs,
-                sampledBatchSize: sample.batchSize,
-                currentBatchSize: this.iterationBatchSize,
-                minBatchSize: MIN_BATCH_SIZE,
-                maxBatchSize,
-            })
-            return
-        }
-
-        if (this.iterationWorkRate > 0 && effectiveRemainingPixelCount > 0) {
-            this.iterationBatchSize = batchSizeForWorkRate(
-                this.iterationWorkRate,
-                targetIterationMs,
-                effectiveRemainingPixelCount,
-                MIN_BATCH_SIZE,
-                maxBatchSize,
-            )
-        }
-    }
-
-    private getEffectiveMaxBatchSize(): number {
-        // The shader batch budgets WEIGHTED work units, not raw turns: each
-        // loop turn adds the cost of the move it executed (exact step 1,
-        // affine block application 1 in f32 or 3 in floatexp). maxIteration thus
-        // bounds near-constant GPU time per dispatch whatever the block/exact
-        // mix, which is what keeps navigation smooth when the view crosses
-        // between block-rich and exact-stepping regions. The timing estimator
-        // settles the requested work budget below this cap when work is abundant.
-        return MAX_BATCH_SIZE
-    }
-
-    private learnedBatchSizeFor(activePixelCount: number): number | null {
-        if (!(this.iterationWorkRate > 0) || !(activePixelCount > 0)) return null
-        const targetIterationMs = requestedIterationBudgetMs(
-            1000 / Math.max(1, this.targetFps),
-            this.otherPassesGpuMs,
-        )
-        return batchSizeForWorkRate(
-            this.iterationWorkRate,
-            targetIterationMs,
-            activePixelCount,
-            MIN_BATCH_SIZE,
-            this.getEffectiveMaxBatchSize(),
-        )
-    }
-
-    private learnedZoomRefreshBatchSizeFor(
-        activePixelCount: number,
-        regimeKey: string,
-    ): number | null {
-        return predictZoomRefreshBatchSize({
-            model: this.zoomRefreshCostModels.get(regimeKey),
-            fallbackWorkRate: this.iterationWorkRate,
-            frameTargetMs: 1000 / Math.max(1, this.targetFps),
-            fallbackFixedPassesMs: this.otherPassesGpuMs,
-            activePixelCount,
-            minBatchSize: MIN_BATCH_SIZE,
-            maxBatchSize: this.getEffectiveMaxBatchSize(),
-        })
+        this.budget.recordFrameTiming(elapsed, context)
     }
 
     /** Dispatch box padded by 8 texels each side and clamped to the neutral square. */
@@ -4255,39 +3184,10 @@ export class Engine {
 
         this.approximationMode = mode
         this.rebuildIterationBindGroups()
-        this.currentBlaLevelCount = 0
-        this.tableBuildActive = false
-        this.tableBuildProgress = 0
-        this.tableBuildStage = 'idle'
-        this.tableGeneration++
-        this.postReferenceWorker({
-            type: 'setApproximationMode',
-            jobId: this.referenceJobId,
-            approximationMode: mode,
-            tableGeneration: this.tableGeneration,
-        })
-        this.requestTableClear(mode !== 'perturbation')
+        this.reference.setApproximationMode(mode)
         this.needRender = true
         this.invalidateCounterReadback()
     }
-
-    /**
-     * Clear history for a table-parameter change. `deferred` (any block mode)
-     * arms the deferred clear — executed when the rebuilt table lands (blaReady
-     * with the current generation), so the re-render uses blocks from its first
-     * dispatch instead of converging exact before the table arrives (the table
-     * "repose" race). Perturbation expects no table: clear immediately.
-     */
-    private requestTableClear(deferred: boolean) {
-        if (deferred) {
-            this.pendingTableClear = true
-            this.pendingTableClearDeadline = performance.now() + TABLE_CLEAR_FALLBACK_MS
-        } else {
-            this.pendingTableClear = false
-            this.requests.requestClear('tableClear')
-        }
-    }
-
 
     getApproximationMode(): ApproximationMode {
         return this.approximationMode
@@ -4303,18 +3203,8 @@ export class Engine {
         // per-frame front-navigator audit does not manufacture a second table
         // generation from 0.001 !== f32(0.001) while a build is in flight.
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
-        this.tableGeneration++
-        this.postReferenceWorker({
-            type: 'setBlaEpsilon',
-            jobId: this.referenceJobId,
-            blaEpsilon: this.blaEpsilon,
-            tableGeneration: this.tableGeneration,
-        })
-        // ε sets the validity radius (ε·|A|), so a change must rebuild the
-        // table and re-render in BLA mode.
+        this.reference.setBlaEpsilon(this.blaEpsilon, this.approximationMode !== 'perturbation')
         if (this.approximationMode !== 'perturbation') {
-            this.currentBlaLevelCount = 0
-            this.requestTableClear(true)
             this.needRender = true
             this.invalidateCounterReadback()
         }
@@ -4330,7 +3220,7 @@ export class Engine {
 
     /**
      * Set the navigation precision budget (target scale, e.g. "1e-300"). Forces a full
-     * reference recompute — an assumed design choice. Clearing referenceViewKey makes the
+     * reference recompute — an assumed design choice. restartAtNextView() makes the
      * next update() take the reset branch (resetReferenceJob), which carries the new budget.
      */
     setPrecisionBudget(targetScale: string) {
@@ -4344,7 +3234,7 @@ export class Engine {
         // reference (activeRef) is kept: it stays geometrically valid and keeps rendering
         // while the rebuilt-at-new-budget orbit accumulates as staging, then promotes
         // seamlessly — no blank frame on a budget change.
-        this.referenceViewKey = ''
+        this.reference.restartAtNextView()
         this.needRender = true
     }
 
@@ -4423,16 +3313,8 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_max_bla_skip(pow2)
         this.maxBlaSkip = pow2
-        this.tableGeneration++
-        this.postReferenceWorker({
-            type: 'setMaxBlaSkip',
-            jobId: this.referenceJobId,
-            maxBlaSkip: pow2,
-            tableGeneration: this.tableGeneration,
-        })
+        this.reference.setMaxBlaSkip(pow2, this.approximationMode !== 'perturbation')
         if (this.approximationMode !== 'perturbation') {
-            this.currentBlaLevelCount = 0
-            this.requestTableClear(true)
             this.needRender = true
             this.invalidateCounterReadback()
         }
@@ -4535,45 +3417,21 @@ export class Engine {
 
         this.debugShadingActive = renderOptions.debugShading
 
-        if (this.stagingReady()) {
-            this.promoteStagingReference()
+        if (this.reference.promoteIfReady()) {
+            // This update() computed dx/dy before the re-anchor: do not render
+            // mixed old uniforms with the new reference buffers.
+            this.skipRenderOnce = true
             return
         }
 
-        // Deferred-clear fallback: the rebuilt table never landed (worker
-        // failure, orbit still extending past the deadline) — re-render exact
-        // rather than keeping the stale image up.
-        // The table still accelerates the tail when it eventually arrives.
-        if (this.pendingTableClear
-            && (this.referenceWorkerFailed || performance.now() > this.pendingTableClearDeadline)) {
-            this.pendingTableClear = false
-            this.requests.requestClear('tableDeadline')
-            this.needRender = true
-        }
+        this.reference.checkTableClearDeadline(performance.now())
 
         const navigatorApproximationMode = readNavigatorApproximationMode(this.mandelbrotNavigator)
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
             this.blaEpsilon = navigatorBlaEpsilon
-            this.currentBlaLevelCount = 0
-            this.tableBuildActive = false
-            this.tableBuildProgress = 0
-            this.tableBuildStage = 'idle'
-                this.tableGeneration++
-            this.postReferenceWorker({
-                type: 'setApproximationMode',
-                jobId: this.referenceJobId,
-                approximationMode: navigatorApproximationMode,
-                tableGeneration: this.tableGeneration,
-            })
-            this.postReferenceWorker({
-                type: 'setBlaEpsilon',
-                jobId: this.referenceJobId,
-                blaEpsilon: navigatorBlaEpsilon,
-                tableGeneration: this.tableGeneration,
-            })
-            this.requestTableClear(navigatorApproximationMode !== 'perturbation')
+            this.reference.resyncTableParameters(navigatorApproximationMode, navigatorBlaEpsilon)
             // Invalidate the frozen fallback: it still holds the OLD mode's
             // completed image. A history clear wipes only the live texture,
             // so without this the color pass composites old-mode frozen pixels
@@ -4649,8 +3507,7 @@ export class Engine {
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
-        const orbitWasReset = this.referenceOrbitWasReset && !!this.prevFrameMandelbrot
-        this.referenceOrbitWasReset = false
+        const orbitWasReset = this.reference.consumeOrbitReset() && !!this.prevFrameMandelbrot
 
         const hardResetHistory = !this.prevFrameMandelbrot || orbitWasReset
         const muChanged = !!this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu
@@ -5007,27 +3864,29 @@ export class Engine {
         const workerScaleString = zooming
             ? computeScale.toString()
             : (mandelbrot.scaleStr ?? computeScale.toString())
-        if (!this.referenceViewKey) {
-            console.log('[REF] update: reset branch (key empty) | deep', deep, 'expScale', expScale, 'mode', this.approximationMode)
-            this.resetReferenceJob(mandelbrot, workerScaleString, maxIterations)
-        }
-        this.syncReferenceWorkerView(mandelbrot, workerScaleString, maxIterations)
+        this.minibrotView = { cx: mandelbrot.cx, cy: mandelbrot.cy, scale: workerScaleString, angle: mandelbrot.angle }
+        this.reference.syncView({
+            cx: mandelbrot.cx,
+            cy: mandelbrot.cy,
+            scale: workerScaleString,
+            angle: mandelbrot.angle,
+            maxIterations,
+            viewportAspect: this.width / Math.max(1, this.height),
+        }, {
+            approximationMode: this.approximationMode,
+            blaEpsilon: this.blaEpsilon,
+            maxBlaSkip: this.maxBlaSkip,
+            precisionBudget: this.precisionBudget,
+        })
 
         // Guard the shader: globalMaxIter must never exceed the orbit steps
         // we have actually computed, or the shader would read uninitialised memory.
-        const availableIter = Math.max(0, this.referenceAvailableOrbitLen - 1)
-        const guardedMaxIter = Math.min(maxIterations, availableIter)
-        this.currentGuardedMaxIter = guardedMaxIter
-        this.currentReferenceAvailableIter = availableIter
-        this.currentReferenceRemainingIter = Math.max(0, maxIterations - availableIter)
-
-        // Track whether the orbit is still being built (used by needsMoreFrames).
-        this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
+        const {availableIter, guardedMaxIter} = this.reference.refreshProgress(maxIterations)
         const orbitComplete = availableIter >= maxIterations
         // BLA runs in the deep (floatexp) path too: a/b/radii are stored in fe
         // form and try_apply_bla_deep does its radius test in log space. The
         // uniform flag carries 1 = affine BLA, 0 = exact perturbation.
-        const tableCoversView = this.referenceBlaReadyMaxIterations >= guardedMaxIter
+        const tableCoversView = this.reference.blaReadyMaxIterations >= guardedMaxIter
         const blocksReady = this.approximationMode !== 'perturbation'
             && orbitComplete
             && this.currentBlaLevelCount > 0
@@ -5063,7 +3922,7 @@ export class Engine {
             deep ? scaleParts.mantissa : computeScale, // 3: scale — fe mantissa when deep, else plain
             aspect,
             mandelbrot.angle,
-            this.iterationBatchSize,
+            this.budget.batchSize,
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
             0,  // iterationOffset slot (unused)
@@ -5156,7 +4015,7 @@ export class Engine {
             && !isZoomActive(this.zoomState)
             && !this.requests.clearPending
             && this.requests.snapshot === null
-            && !this.pendingTableClear
+            && !this.reference.tableClearPending
             && !this.isReferenceValidating
             && !this.orbitIncomplete
             && !!this.pipelineRotationColorCache
@@ -5432,8 +4291,7 @@ export class Engine {
                 new Float32Array([liveShiftV]),
             )
         }
-        const enteringTranslation = hasTranslationShift && !this.batchTranslationActive
-        if (enteringTranslation) {
+        if (this.budget.entersTranslation(hasTranslationShift)) {
             // Discard a pre-pan count once. Subsequent pan frames keep this new
             // generation so dense translations can contribute fresh samples.
             this.invalidateCounterReadback()
@@ -5454,36 +4312,23 @@ export class Engine {
 
         // Frame topology is known only here. Zoom clears use their matching
         // first-dense-frame model; other clears and pans use the global rate.
-        if (plan.clear && !this.batchSeededForPendingClear) {
-            this.batchControllerGeneration++
-            this.batchSeededForPendingClear = true
-        }
-        if (enteringTranslation) {
-            this.batchControllerGeneration++
-        }
-        this.batchTranslationActive = hasTranslationShift
-
-        if (plan.clear || hasTranslationShift) {
-            const learnedBatchSize = zoomRefreshFrame
-                ? this.learnedZoomRefreshBatchSizeFor(
-                    activePixelCount,
-                    zoomRefreshRegimeKey,
-                )
-                : this.learnedBatchSizeFor(activePixelCount)
-            if (learnedBatchSize !== null && learnedBatchSize !== this.iterationBatchSize) {
-                this.iterationBatchSize = learnedBatchSize
-                // update() already uploaded the complete uniform block; patch the
-                // single batch scalar now that render() knows this frame topology.
-                this.device.queue.writeBuffer(
-                    this.uniformBufferMandelbrot!,
-                    MANDELBROT_BATCH_UNIFORM_OFFSET,
-                    new Float32Array([learnedBatchSize]),
-                )
-            }
+        this.budget.observeTopology(plan.clear, hasTranslationShift)
+        if ((plan.clear || hasTranslationShift) && this.budget.adoptLearnedSize({
+            zoomRefresh: zoomRefreshFrame,
+            activePixelCount,
+            regimeKey: zoomRefreshRegimeKey,
+        })) {
+            // update() already uploaded the complete uniform block; patch the
+            // single batch scalar now that render() knows this frame topology.
+            this.device.queue.writeBuffer(
+                this.uniformBufferMandelbrot!,
+                MANDELBROT_BATCH_UNIFORM_OFFSET,
+                new Float32Array([this.budget.batchSize]),
+            )
         }
 
         const workCounterShift = iterationWorkCounterShift(
-            this.iterationBatchSize,
+            this.budget.batchSize,
             dispatchPixelCount,
         )
         const brushUniforms = new Float32Array([
@@ -5526,12 +4371,9 @@ export class Engine {
                 this.counterSampleFrame,
                 this.lastRawMutationFrame,
             )
-        const shouldDispatchCounter = !hasFreshZeroCounter && (
-            this.unfinishedPixelCount < 0
-            || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
-        )
-        const counterReadbackSlot = shouldDispatchCounter
-            ? this.acquireCounterReadbackSlot()
+        const shouldDispatchCounter = !hasFreshZeroCounter && this.counter.isSampleDue(frameSerial)
+        const counterReadback = shouldDispatchCounter
+            ? this.counter.reserve(frameSerial, workCounterShift)
             : undefined
         const resolveUniforms = new Float32Array([
             this.previousMandelbrot.mu,
@@ -5547,14 +4389,7 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
-        let scheduledCounterReadback: {
-            slot: CounterReadbackSlot,
-            sequence: number,
-            generation: number,
-            frame: number,
-            batchGeneration: number,
-            workCounterShift: number,
-        } | undefined
+        let scheduledCounterReadback: { readback: CounterReadback, batchGeneration: number } | undefined
         let aaFrontierCopyScheduled = false
 
         // Frame timing: wall interval between render() calls (the true frame
@@ -5563,7 +4398,7 @@ export class Engine {
         const renderStartMs = performance.now()
         this.frameIntervalMs = this.lastRenderStartMs ? renderStartMs - this.lastRenderStartMs : 0
         this.lastRenderStartMs = renderStartMs
-        this.tsSlotsUsedThisFrame = 0
+        this.passTimer.beginFrame()
         // Rendering FPS from the active-frame interval (EMA). Counts every frame
         // that actually renders — not only iteration frames. lastRenderStartMs is
         // reset to 0 in _loop on idle→active resume, so the stale gap is skipped
@@ -5591,7 +4426,7 @@ export class Engine {
             && this.pipelineMerge && this.bindGroupMerge
             && this.resolvedDisplay && this.frozenDisplay && this.mergeDisplay
             && this.frozenDisplayVersion >= 0) {
-            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.merge, 'start')
+            this.passTimer.spanBoundary(commandEncoder, PASS_SLOT_INDEX.merge, 'start')
             // Write merge uniforms captured at zoom stop before state reset.
             const mergeData = new Float32Array([
                 this.mergeUniforms.zf,
@@ -5617,7 +4452,7 @@ export class Engine {
             }))
             const rpassMerge = commandEncoder.beginRenderPass({
                 colorAttachments: mergeAttachments,
-                timestampWrites: this.tsExplicitSpanEnd(PASS_SLOT_INDEX.merge),
+                timestampWrites: this.passTimer.explicitSpanEnd(PASS_SLOT_INDEX.merge),
             })
             rpassMerge.setPipeline(
                 this.orbitGradientAllocated ? this.pipelineMergeOrbit! : this.pipelineMerge!,
@@ -5635,7 +4470,7 @@ export class Engine {
         if (plan.snapshot === 'copy'
             && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
-            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
+            this.passTimer.spanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
             commandEncoder.copyTextureToTexture(
                 { texture: this.resolvedDisplay.valuesTexture },
                 { texture: this.frozenDisplay.valuesTexture },
@@ -5665,7 +4500,7 @@ export class Engine {
                     { width: texSize, height: texSize },
                 )
             }
-            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
+            this.passTimer.spanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.requests.snapshotDone()
             this.frozenAligned = true
@@ -5715,7 +4550,7 @@ export class Engine {
                 // Clear frames rewrite B wholesale, then the texture roles swap
                 // so iteration proceeds on the freshly prepared front texture.
                 const utilPass = commandEncoder.beginComputePass({
-                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[selectRawUtilityPassKey(true)]),
+                    timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX[selectRawUtilityPassKey(true)]),
                 })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
@@ -5735,7 +4570,7 @@ export class Engine {
                 // on A. Nothing else is touched, so the Taylor layers survive
                 // and the alignment flag is left as it was.
                 const panPass = commandEncoder.beginComputePass({
-                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[selectRawUtilityPassKey(false)]),
+                    timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX[selectRawUtilityPassKey(false)]),
                 })
                 panPass.setPipeline(this.pipelinePanClear!)
                 panPass.setBindGroup(0, this.bindGroupPanClear!)
@@ -5778,7 +4613,7 @@ export class Engine {
                     commandEncoder.clearBuffer(this.aaFrontierBuffer, 0, 8)
                 }
                 const reseedPass = commandEncoder.beginComputePass({
-                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX.reseed),
+                    timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.reseed),
                 })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
@@ -5796,9 +4631,9 @@ export class Engine {
             // Fused brush+mandelbrot+count: a single compute dispatch working
             // in place on A.  Finished texels generate zero texture writes,
             // replacing passes 0/1, the B→A copy and the count pass.
-            commandEncoder.clearBuffer(this.counterBuffer!, 0, COUNTER_BYTES)
+            commandEncoder.clearBuffer(this.counter.buffer!, 0, COUNTER_BYTES)
             const computePass = commandEncoder.beginComputePass({
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.compute),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.compute),
             })
             // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
             // path, so run the DCE'd shallow kernel; floatExpActive is set from
@@ -5838,7 +4673,7 @@ export class Engine {
             // packs display provenance; no neighbour finalization pass remains.
             const rpassResolve = commandEncoder.beginRenderPass({
                 colorAttachments: makeDisplayAttachments(this.resolvedDisplay!, 'clear'),
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.resolve),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.resolve),
             })
             rpassResolve.setPipeline(
                 this.orbitGradientAllocated ? this.pipelineResolveOrbit! : this.pipelineResolve!,
@@ -5858,19 +4693,9 @@ export class Engine {
             this.resolvedDisplayVersion = this.rawFieldVersion
         }
 
-        if (counterReadbackSlot) {
-            const sequence = ++this.counterReadbackSequence
-            const generation = this.counterReadbackGeneration
-            commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, COUNTER_BYTES)
-            this.lastCounterDispatchFrame = frameSerial
-            scheduledCounterReadback = {
-                slot: counterReadbackSlot,
-                sequence,
-                generation,
-                frame: frameSerial,
-                batchGeneration: this.batchControllerGeneration,
-                workCounterShift,
-            }
+        if (counterReadback) {
+            this.counter.encodeCopy(commandEncoder, counterReadback)
+            scheduledCounterReadback = { readback: counterReadback, batchGeneration: this.budget.generation }
         }
 
         // ── Terminal color branches: direct, AA, or settled rotation ──────
@@ -5969,7 +4794,7 @@ export class Engine {
                     loadOp: firstSample ? 'clear' : 'load',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.aaAccum),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.aaAccum),
             })
             rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
             // Accumulation reads the coherent typed display set. The raw texture
@@ -5989,7 +4814,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.color),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.color),
             })
             rpassRotationCache.setPipeline(this.pipelineRotationColorCache!)
             rpassRotationCache.setBindGroup(0, colorBindGroup)
@@ -6007,7 +4832,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.color),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.color),
             })
             rpassColor.setPipeline(this.pipelineColor)
             rpassColor.setBindGroup(0, colorBindGroup)
@@ -6025,7 +4850,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.present),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.present),
             })
             rpassPresent.setPipeline(this.pipelinePresent)
             rpassPresent.setBindGroup(0, this.bindGroupPresent)
@@ -6039,7 +4864,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.present),
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.present),
             })
             rpassRotationPresent.setPipeline(this.pipelineRotationPresent)
             rpassRotationPresent.setBindGroup(0, this.bindGroupRotationPresent)
@@ -6100,29 +4925,21 @@ export class Engine {
         // readback has completed — otherwise skip this frame's sample.
         const batchTimingContext: IterationBatchTimingContext = {
             frame: frameSerial,
-            batchSize: this.iterationBatchSize,
-            generation: this.batchControllerGeneration,
+            batchSize: this.budget.batchSize,
+            generation: this.budget.generation,
             activePixelCount,
             visiblePixelCount,
             zoomRefresh: zoomRefreshFrame,
             zoomRefreshRegimeKey,
         }
-        let tsResolvedThisFrame = false
-        if (this.timestampsEnabled && this.timestampQuerySet && this.tsResolveBuffer && this.tsReadBuffer
-            && this.tsReadbackFree && this.tsSlotsUsedThisFrame !== 0) {
-            commandEncoder.resolveQuerySet(this.timestampQuerySet, 0, TS_COUNT, this.tsResolveBuffer, 0)
-            commandEncoder.copyBufferToBuffer(this.tsResolveBuffer, 0, this.tsReadBuffer, 0, TS_COUNT * 8)
-            this.tsPendingSlots = this.tsSlotsUsedThisFrame
-            this.tsPendingBatchContext = batchTimingContext
-            tsResolvedThisFrame = true
-        }
+        const tsResolvedThisFrame = this.passTimer.resolveFrame(commandEncoder, batchTimingContext)
 
         // soumission des commandes
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
         this.cpuRenderMs = performance.now() - renderStartMs
         this.frameSerial++   // one actually-rendered frame → one measurement for the panel
-        if (tsResolvedThisFrame) this.readbackTimestamps()
+        if (tsResolvedThisFrame) this.passTimer.readback(sample => this.onPassTimingSample(sample))
         // Timestamp-capable adapters pace from the query span read above. The
         // submit-to-done wall clock is only a fallback: on Safari/WebKit it can
         // include notification latency far beyond the actual GPU frame.
@@ -6130,13 +4947,17 @@ export class Engine {
             this.scheduleGpuTiming(submitStartMs, batchTimingContext)
         }
         if (scheduledCounterReadback) {
-            this.scheduleCounterReadback(
-                scheduledCounterReadback.slot,
-                scheduledCounterReadback.sequence,
-                scheduledCounterReadback.generation,
-                scheduledCounterReadback.frame,
-                scheduledCounterReadback.batchGeneration,
-                scheduledCounterReadback.workCounterShift,
+            const {readback, batchGeneration} = scheduledCounterReadback
+            this.counter.schedule(
+                readback,
+                sample => this.budget.recordCounterSample(sample.frame, {
+                    generation: batchGeneration,
+                    actualWeightedWork: sample.actualWeightedWork,
+                    remainingPixelCount: sample.unfinished,
+                    effectiveRemainingPixelCount: sample.effectiveUnfinished,
+                    periodicThrottledPixelCount: sample.periodicThrottled,
+                }),
+                (sample, previous) => this.onCounterApplied(sample.unfinished, previous),
             )
         }
         if (aaFrontierCopyScheduled) {
@@ -6149,7 +4970,7 @@ export class Engine {
             // offset (0 outside AA accumulation → the base is unjittered again).
             // Pan gathers COPY pixels, so they deliberately don't touch this.
             this.rawJittered = this.aaOffsetX !== 0 || this.aaOffsetY !== 0
-            this.batchSeededForPendingClear = false
+            this.budget.clearSubmitted()
         }
         this.requests.clearDone()
 
@@ -6402,9 +5223,7 @@ export class Engine {
         this.destroyed = true
         this.stopRenderLoop()
         this.cancelMinibrot()
-        this.postReferenceWorker({ type: 'dispose' })
-        this.referenceWorker?.terminate()
-        this.referenceWorker = undefined
+        this.reference.dispose()
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
@@ -6420,11 +5239,7 @@ export class Engine {
         this.uniformBufferBrush?.destroy?.()
         this.uniformBufferResolve?.destroy?.()
         this.rotationPresentUniformBuffer?.destroy?.()
-        this.counterBuffer?.destroy?.()
-        for (const slot of this.counterReadbackSlots) {
-            slot.buffer.destroy?.()
-        }
-        this.counterReadbackSlots = []
+        this.counter.destroy()
         this.uniformBufferMerge?.destroy?.()
         this.exportCaptureRequest?.reject(new Error('Engine destroyed while a capture was pending.'))
         this.exportCaptureRequest = undefined
@@ -6455,7 +5270,7 @@ export class Engine {
         // checks the fallback deadline and the session reads as "rendering"
         // (specs and the completion timer span the whole param-change
         // re-render, table build included).
-        else if (this.pendingTableClear) reason = 'tablePending'
+        else if (this.reference.tableClearPending) reason = 'tablePending'
         else if (this.requests.snapshot === 'copy') reason = 'freezeSnapshot'
         else if (this.requests.snapshot === 'merge') reason = 'mergeSnapshot'
         else if (this.isReferenceValidating) reason = 'referenceValidating'
@@ -6525,7 +5340,7 @@ export class Engine {
 
     /** Current GPU iteration batch size (auto-adjusted to the requested compute budget). */
     getIterationBatchSize(): number {
-        return this.iterationBatchSize
+        return this.budget.batchSize
     }
 
     /**
