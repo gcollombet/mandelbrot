@@ -124,6 +124,7 @@ struct Uniforms {
   paletteScreenShiftY: f32, // 101: same along the screen height
   stereoEyeSlope: f32, // 102: orthographic eye direction X/Z, zero in mono
   stereoHeightPass: f32, // 103: analytic height only, before material/color processing
+  protrusionTerrace: f32, // 104: iteration lobe height, 0 bounded bumps .. 1 terraces
 };
 @group(0) @binding(0) var<uniform> baseParameters: Uniforms;
 var<private> parameters: Uniforms;
@@ -164,6 +165,9 @@ struct PalettePathData { config: vec4<f32>, geometry: vec4<f32>, extra: vec4<f32
 var<private> pathA: u32 = 0u;
 var<private> pathB: u32 = 0u;
 var<private> pathT: f32 = 0.0;
+// Display texels per view unit (half the screen height), set by colorize_pixel.
+// Fixes where the relief height saturates next to the set (relief_height_cap).
+var<private> reliefTexelsPerUnit: f32 = 256.0;
 fn path_value(node: u32, field: u32) -> f32 { return palettePath.nodes[node].values[field / 4u][field % 4u]; }
 fn path_mix(field: u32) -> f32 { return mix(path_value(pathA, field), path_value(pathB, field), pathT); }
 fn path_choice(field: u32) -> f32 { return select(path_value(pathA, field), path_value(pathB, field), pathT >= 0.5); }
@@ -878,6 +882,171 @@ fn apply_orbit_trap_color(colorIn: vec3<f32>, iterRaw: f32, z: vec2<f32>, trapPa
   return mix(colorIn, accent, clamp(mask * strength, 0.0, 1.0));
 }
 
+// ── Integrable relief height ────────────────────────────────────────
+// The analytic relief is one scalar height field
+//   h = K · M · (F(H) - Hc)
+// whose gradient IS the slope the normal is built from, so the same surface
+// can later be ray marched (stereo, cast shadows). H is the cached distance
+// height (-log distance to the set), M the per-material multiplier (relief
+// depth x shading weight x relief gain x iteration protrusion gain).
+//   F(H) = Hc - softplus(Hc - H),  F'(H) = sigmoid(Hc - H)
+// F replaces the historical per-component clamp of the slope. Measured on the
+// cached geometry, log|grad H| = H - log T - 1.1 (±0.1 for mu 16..1e6 and T
+// 300..600, T the display texels per view unit), so F'·|grad H| tends to
+// e^(Hc - log T - 1.1): Hc is set to reach the old 0.25 per texel cap, but
+// isotropically and integrably. Near the
+// set and inside it h tends to 0 whatever M is: relief and protrusion never
+// move the top plateau.
+const RELIEF_HEIGHT_SCALE: f32 = 24.0 * 0.34;
+const RELIEF_SLOPE_CAP: f32 = 0.25;
+const RELIEF_GRADIENT_LOG_OFFSET: f32 = 1.1;
+// Height of the bounded protrusion bump per unit of lobe gain, in F units.
+// Calibrated so the mean relief slope matches the historical lobe (mean slope
+// x1.67 the base slope at sharpness 4, full protrusion, mu = 1000).
+const PROTRUSION_BUMP_HEIGHT: f32 = 0.08;
+
+fn relief_height_cap() -> f32 {
+  return log(RELIEF_SLOPE_CAP * reliefTexelsPerUnit) + RELIEF_GRADIENT_LOG_OFFSET;
+}
+
+// Returns (F(H) - Hc, F'(H)).
+fn relief_height_profile(distanceHeight: f32) -> vec2<f32> {
+  let d = relief_height_cap() - distanceHeight;
+  // softplus(d) = max(d, 0) + log(1 + e^-|d|), stable for any d.
+  let softplus = max(d, 0.0) + log(1.0 + exp(-abs(d)));
+  return vec2<f32>(-softplus, 1.0 / (1.0 + exp(-d)));
+}
+
+fn relief_material_scale(wShading: f32, reliefGain: f32) -> f32 {
+  // Log-domain gain: 0 -> 0.25x, 1 -> 1x, 2 -> 4x, strictly positive.
+  return clamp(parameters.reliefDepth * wShading, 0.0, 2.0) * exp2(2.0 * (reliefGain - 1.0));
+}
+
+// Iteration protrusion gain g(nu) and dg/dnu. A broad lobe peaks where the
+// smooth escape phase wraps (controlled descendant of the historical
+// crossing-interpolation artefact).
+fn iteration_protrusion_gain(protrusion: f32, nuSmooth: f32) -> vec2<f32> {
+  let phase = fract(nuSmooth - fract(parameters.protrusionPhase));
+  let sharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
+  let strength = clamp(parameters.protrusionStrength, 1.0, 4.0);
+  let wave = max(0.5 + 0.5 * cos(TWO_PI * phase), 0.0);
+  let lobe = pow(wave, sharpness);
+  let lobeSlope = sharpness * pow(max(wave, 1e-6), sharpness - 1.0)
+    * (-3.141592653589793 * sin(TWO_PI * phase));
+  let base = exp2(2.0 * protrusion * lobe);
+  return vec2<f32>(
+    1.0 + strength * (base - 1.0),
+    strength * base * (2.0 * 0.6931471805599453 * protrusion) * lobeSlope,
+  );
+}
+
+// Material scale S and S·g(nu) read at another palette phase: shading weight
+// (row 1.b), relief gain (6.r), protrusion (6.a).
+fn relief_multipliers_at(phase: f32, nuSmooth: f32) -> vec2<f32> {
+  let p = fract(phase);
+  let row1 = sample_palette(p, 1.0);
+  let row6 = sample_palette(p, 6.0);
+  let scale = relief_material_scale(row1.b, clamp(row6.r, 0.0, 2.0));
+  return vec2<f32>(scale, scale * iteration_protrusion_gain(clamp(row6.a, 0.0, 1.0), nuSmooth).x);
+}
+
+// Derivative of the raw palette coordinate with respect to nu and to H, signed
+// by the mirror fold, so grad(phase) = x·grad(nu) + y·grad(H). The screen
+// shift and phase coloring terms are not differentiated (see build_surface).
+fn palette_phase_derivatives(rawPhase: f32, v: f32, paletteRepeat: f32, wSmoothness: f32, distanceHeightStored: f32) -> vec2<f32> {
+  let u = max(2.0 * v / max(paletteRepeat, 0.0001), 0.0);
+  let mode = i32(round(parameters.iterationPaletteCurve));
+  var curveSlope = 1.0;
+  if (mode == 1) {
+    curveSlope = 0.5 / (sqrt(1.0 + u) * 0.4142135623730951);
+  } else if (mode == 2) {
+    curveSlope = 1.0 / ((1.0 + u) * 0.6931471805599453);
+  } else if (mode == 3) {
+    curveSlope = (2.0 * u + 2.0) / 3.0;
+  }
+  let dRawDnu = curveSlope * (2.0 / max(paletteRepeat, 0.0001)) * clamp(wSmoothness, 0.0, 1.0);
+  let dRawDh = select(0.0, clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0,
+    abs(distanceHeightStored) < 16.0);
+  let mirrored = parameters.paletteMirror >= 0.5 && (i32(floor(rawPhase)) % 2) != 0;
+  return select(1.0, -1.0, mirrored) * vec2<f32>(dRawDnu, dRawDh);
+}
+
+// The analytic relief at one pixel: h, grad h (neutral texel frame, before
+// the scene rotation) and the styled multiplier the lighting thresholds use.
+// Single source of truth for the normal (build_surface) and the height checks.
+struct ReliefField {
+  height: f32,
+  gradient: vec2<f32>,
+  styledRelief: f32,
+};
+
+fn relief_field(
+  wShading: f32,
+  reliefGain: f32,
+  protrusion: f32,
+  nuSmooth: f32,
+  distanceHeight: f32,
+  palettePhase: f32,
+  phaseDerivatives: vec2<f32>,
+  cachedGradient: vec2<f32>,
+  nuGradient: vec2<f32>
+) -> ReliefField {
+  var out: ReliefField;
+  let scale = relief_material_scale(wShading, reliefGain);
+  let iterationGain = iteration_protrusion_gain(protrusion, nuSmooth);
+  // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
+  // period. Its gain is a function of H alone, hence already a gradient; its
+  // height (the primitive of that gain) is not tracked yet.
+  let geometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
+  var geometricGain = 1.0;
+  if (geometryMix > 0.001 && scale > 0.001) {
+    let period = clamp(parameters.protrusionPeriod, 0.1, 16.0);
+    let sharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
+    let carrier = cos(TWO_PI * (distanceHeight / period - fract(parameters.protrusionPhase)));
+    let profile = sign(carrier) * pow(abs(carrier), sharpness);
+    geometricGain = max(1.0 + protrusion * profile, 0.0);
+  }
+  out.styledRelief = scale * mix(iterationGain.x, geometricGain, geometryMix);
+  if (scale <= 0.001) {
+    out.gradient = cachedGradient * (RELIEF_HEIGHT_SCALE * out.styledRelief);
+    return out;
+  }
+  let heightProfile = relief_height_profile(distanceHeight);
+  let offset = heightProfile.x;   // F(H) - Hc, <= 0
+  let fade = heightProfile.y;     // F'(H) = sigmoid(Hc - H)
+  // Geometric branch: slope only (see above).
+  out.gradient = cachedGradient * (geometryMix * scale * geometricGain * fade);
+  let iterationWeight = 1.0 - geometryMix;
+  if (iterationWeight > 0.001) {
+    // Gradients of S and S·g: palette phase by a symmetric difference along
+    // the 1D palette (not a screen-space difference), nu through the lobe.
+    let eps = 1.0 / 2048.0;
+    let dPhase = (relief_multipliers_at(palettePhase + eps, nuSmooth)
+      - relief_multipliers_at(palettePhase - eps, nuSmooth)) / (2.0 * eps);
+    let phaseGradient = phaseDerivatives.x * nuGradient + phaseDerivatives.y * cachedGradient;
+    let scaleGradient = dPhase.x * phaseGradient;
+    let lobedGradient = dPhase.y * phaseGradient + scale * iterationGain.y * nuGradient;
+    let lobed = scale * iterationGain.x;
+    // Terraces: h = S·g·(F - Hc). The lobe scales the height itself, so each
+    // band steps by S·Δg·(F - Hc): walls grow away from the set.
+    let terraceHeight = lobed * offset;
+    let terraceGradient = lobed * fade * cachedGradient + offset * lobedGradient;
+    // Bumps: h = S·(F - Hc) + A·S·(g - 1)·F'. A fixed-height bump per band,
+    // faded with F' so it vanishes on the plateau next to the set.
+    let bump = lobed - scale;
+    let bumpHeight = scale * offset + PROTRUSION_BUMP_HEIGHT * bump * fade;
+    let bumpGradient = scale * fade * cachedGradient + offset * scaleGradient
+      + PROTRUSION_BUMP_HEIGHT * (fade * (lobedGradient - scaleGradient)
+        - bump * fade * (1.0 - fade) * cachedGradient);
+    let terrace = clamp(parameters.protrusionTerrace, 0.0, 1.0);
+    out.height = iterationWeight * mix(bumpHeight, terraceHeight, terrace);
+    out.gradient = out.gradient + iterationWeight * mix(bumpGradient, terraceGradient, terrace);
+  }
+  out.height = RELIEF_HEIGHT_SCALE * out.height;
+  out.gradient = RELIEF_HEIGHT_SCALE * out.gradient;
+  return out;
+}
+
 // ── Surface: the single geometric truth the lighting stage sees ─────────
 // Stage 1 (build_surface) knows the fractal: analytic relief, protrusion,
 // stripes, direction coherence, texture bump and the scene rotation. It folds
@@ -922,27 +1091,13 @@ fn build_surface(
   stripeAverage: f32,
   cachedStripeGradient: vec2<f32>,
   cachedCoherenceGradient: vec2<f32>,
-  tessCoord: vec2<f32>
+  tessCoord: vec2<f32>,
+  nuGradient: vec2<f32>,
+  phaseDerivatives: vec2<f32>
 ) -> Surface {
   let effShading = fx.wShading;
   let effTess = fx.wTessellation;
   let disp = parameters.displacementAmount;
-  let reliefDepth = parameters.reliefDepth * effShading;
-  let relief = clamp(reliefDepth, 0.0, 2.0);
-  // Log-domain control: 0 -> 0.25x, 1 -> 1x, 2 -> 4x. The multiplier is
-  // strictly positive, so it can never reverse the cached analytic slope.
-  let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
-  let effectiveAnalyticRelief = relief * reliefGain;
-  // Controlled descendant of the historical crossing-interpolation artefact:
-  // a broad lobe peaks where the smooth escape phase wraps, while a positive
-  // log-domain gain preserves the canonical analytic gradient direction.
-  let protrusionPhase = fract(parameters.protrusionPhase);
-  let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
-  let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
-  let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
-  let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
-  let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);
-  let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);
   let stripeReliefStrength = fx.wStripeRelief * effShading;
   let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
   let bumpStrength = parameters.microBumpStrength * effTess;
@@ -950,12 +1105,14 @@ fn build_surface(
   let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
   let needsDepthGradient = bumpStrength > 0.001 &&
     (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
-  let needsFractalGradient = effectiveAnalyticRelief > 0.001;
-  var distanceHeight = 0.0;
   // Cached geometry stores the analytic derivative per source texel and the
-  // branch-local analytic Laplacian. Historical relief gains are applied
-  // here, after source-to-display normalization, without neighbor reads.
-  var grad = cachedGradient * 24.0;
+  // branch-local analytic Laplacian, already normalized to display scale.
+  let relief = relief_field(
+    effShading, fx.reliefGain, fx.protrusion, v_smooth,
+    distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored),
+    palettePhase, phaseDerivatives, cachedGradient, nuGradient
+  );
+  let styledAnalyticRelief = relief.styledRelief;
   // Both orbit slopes are cached per source texel and already normalized to
   // display scale, exactly like cachedGradient. The historical display gains
   // are what the neighbour differences used to carry (x8 central / x16
@@ -963,22 +1120,6 @@ fn build_surface(
   let stripeGrad = cachedStripeGradient * 8.0;
   let directionCoherenceGrad = cachedCoherenceGradient * 16.0;
   let depthGrad = cachedGradient * 16.0;
-  if (needsFractalGradient) {
-    distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
-    grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
-  }
-  // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
-  // period. The multiplier remains a scalar function of canonical height H.
-  let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
-  var protrusionGain = iterationProtrusionGain;
-  if (protrusionGeometryMix > 0.001 && needsFractalGradient) {
-    let protrusionPeriod = clamp(parameters.protrusionPeriod, 0.1, 16.0);
-    let geometricCarrier = cos(TWO_PI * (distanceHeight / protrusionPeriod - protrusionPhase));
-    let geometricProfile = sign(geometricCarrier) * pow(abs(geometricCarrier), protrusionSharpness);
-    let geometricProtrusionGain = max(1.0 + fx.protrusion * geometricProfile, 0.0);
-    protrusionGain = mix(iterationProtrusionGain, geometricProtrusionGain, protrusionGeometryMix);
-  }
-  let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
   var textureGradient = vec2<f32>(0.0);
   var textureMappingDx = vec2<f32>(1.0, 0.0);
   var textureMappingDy = vec2<f32>(0.0, 1.0);
@@ -1017,7 +1158,7 @@ fn build_surface(
   // the relief its shape, so changing it would change every existing preset.
   // Coherence and texture luminance are already scalar fields.
   let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
-  let heightGradient = grad * (0.34 * styledAnalyticRelief);
+  let heightGradient = relief.gradient;
   let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
   let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
   let surfaceGradientLocal = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;
@@ -1042,7 +1183,8 @@ fn build_surface(
   s.escapeArg = atan2(z.y, z.x);
   s.logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   s.bandRate = sqrt(max(cachedCurvature, 0.0));
-  let bandGradient = rotate_inverse_sincos(cachedGradient, sceneSin, sceneCos);
+  // True band normal: grad(nu), no longer the grad(H) approximation.
+  let bandGradient = rotate_inverse_sincos(nuGradient, sceneSin, sceneCos);
   s.bandDir = select(fieldDir, bandGradient / max(length(bandGradient), 1e-8), dot(bandGradient, bandGradient) > 1e-16);
   return s;
 }
@@ -1339,12 +1481,13 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   return linear_to_sRGB(tonemap_highlights(display_grade(pbrColor)));
 }
 
-fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
+fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>, nuGradient: vec2<f32>) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let iterationCoordinate = iteration_palette_coordinate(v, paletteRepeat);
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
   let phaseColoringShift = (1.0 - abs(fract(geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
-  let palettePhase = palettePhaseFromRaw(iterationCoordinate + animatedPaletteOffset() + screenPaletteShift(uv_screen) + heightPhaseShift + phaseColoringShift);
+  let rawPalettePhase = iterationCoordinate + animatedPaletteOffset() + screenPaletteShift(uv_screen) + heightPhaseShift + phaseColoringShift;
+  let palettePhase = palettePhaseFromRaw(rawPalettePhase);
 
   // ── Sample all effect channels from the palette texture ──
   var fx = sampleEffects(palettePhase);
@@ -1411,7 +1554,8 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       iterRaw, v_smooth, z, distanceHeightStored,
       cachedGradient, cachedCurvature, geometryAngle,
       stripeAverage, cachedStripeGradient, cachedCoherenceGradient,
-      tessCoord
+      tessCoord, nuGradient,
+      palette_phase_derivatives(rawPalettePhase, v, paletteRepeat, fx.wSmoothness, distanceHeightStored)
     );
     color = mix(color, shade_surface(surface, fx, uv_screen), effShading);
   }
@@ -1440,18 +1584,32 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
 
 
 
-const QUANTIZED_FIELD_MAX: f32 = 16383.0;
+// Display metadata: provenance (4) | stripe (10) | coherence (10) | grad(nu) angle (8).
+const QUANTIZED_FIELD_MAX: f32 = 1023.0;
+const NU_GRADIENT_LN2: f32 = 0.6931471805599453;
 
 fn decode_support_step(metadata: u32) -> f32 {
   return exp2(f32(metadata & 0xfu));
 }
 
 fn decode_stripe_phase(metadata: u32) -> f32 {
-  return f32((metadata >> 4u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
+  return f32((metadata >> 4u) & 0x3ffu) / QUANTIZED_FIELD_MAX;
 }
 
 fn decode_direction_coherence(metadata: u32) -> f32 {
-  return f32((metadata >> 18u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
+  return f32((metadata >> 14u) & 0x3ffu) / QUANTIZED_FIELD_MAX;
+}
+
+// Unit direction of grad(nu) in the neutral texel frame of the cached gradient.
+fn decode_nu_direction(metadata: u32) -> vec2<f32> {
+  let angle = f32(metadata >> 24u) * (6.283185307179586 / 256.0);
+  return vec2<f32>(cos(angle), sin(angle));
+}
+
+// grad(nu) per display texel: the direction is stored, the magnitude is
+// sqrt(Laplacian of H)/ln2 (see Surface).
+fn nu_gradient(metadata: u32, curvature: f32) -> vec2<f32> {
+  return decode_nu_direction(metadata) * (sqrt(max(curvature, 0.0)) / NU_GRADIENT_LN2);
 }
 
 struct PixelExtras {
@@ -1463,6 +1621,7 @@ struct PixelExtras {
   directionCoherence: f32,
   stripeGradient: vec2<f32>,
   coherenceGradient: vec2<f32>,
+  nuGradient: vec2<f32>,       // analytic grad(nu) per display texel
 };
 
 struct PixelSample {
@@ -1507,8 +1666,9 @@ fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d
   extras.gradient = geometry.xy;
   extras.curvature = geometry.z;
   extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
+  let metadata = textureLoad(sourceMetadata, coord, 0).r;
+  extras.nuGradient = nu_gradient(metadata, geometry.z);
   if (ENABLE_SURFACE_EFFECTS && parameters.orbitMetricsEnabled > 0.5) {
-    let metadata = textureLoad(sourceMetadata, coord, 0).r;
     extras.stripePhase = decode_stripe_phase(metadata);
     extras.directionCoherence = decode_direction_coherence(metadata);
     let orbitGradient = normalize_orbit_gradient(textureLoad(sourceOrbitGradient, coord, 0), zoomFactor);
@@ -1553,6 +1713,7 @@ fn colorize_pixel(
   uv_neutral: vec2<f32>,
   analyticTag: bool
 ) -> vec4<f32> {
+  reliefTexelsPerUnit = f32(sourceTexSize.y) / (2.0 * sqrt(parameters.aspect * parameters.aspect + 1.0));
   // Stable bounded analytic relief, independent of palette and frame extrema.
   // H is logarithmic inverse distance relative to view scale. Interior uses
   // its limiting plateau instead of the historical -1e6 sentinel.
@@ -1692,7 +1853,7 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = extras.stripePhase;
   let directionCoherence = extras.directionCoherence;
-  var color = palette(iter_v, v, v_smooth, z, trapPayload, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, extras.stripeGradient, extras.coherenceGradient, uv_neutral.x, uv_neutral.y, uv_screen);
+  var color = palette(iter_v, v, v_smooth, z, trapPayload, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, extras.stripeGradient, extras.coherenceGradient, uv_neutral.x, uv_neutral.y, uv_screen, extras.nuGradient);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1756,6 +1917,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
   var zDirSum = vec2<f32>(0.0);
   var stripeDirSum = vec2<f32>(0.0);
   var coherenceSum = 0.0;
+  var nuGradientSum = vec2<f32>(0.0);
 
   for (var i = 0u; i < 4u; i = i + 1u) {
     let ccoord = clamp(base + offsets[i], vec2<i32>(0), texSize - vec2<i32>(1));
@@ -1788,7 +1950,9 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
     wEscaped = wEscaped + w;
     nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
     if (needs_cached_geometry()) {
-      geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
+      let cornerGeometry = normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
+      geometrySum = geometrySum + w * cornerGeometry;
+      nuGradientSum = nuGradientSum + w * nu_gradient(metadata, cornerGeometry.z);
     }
 
     let zLen = max(sqrt(z_sq), 1e-12);
@@ -1837,6 +2001,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
   out.extras.height = geometry.w;
   out.extras.gradient = geometry.xy;
   out.extras.curvature = geometry.z;
+  out.extras.nuGradient = nuGradientSum * invW;
   out.extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
   out.extras.stripePhase = select(
     0.0,
@@ -1848,6 +2013,56 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
   out.extras.stripeGradient = orbitGradient.xy;
   out.extras.coherenceGradient = orbitGradient.zw;
   return out;
+}
+
+// Relief field of a displayed pixel, rebuilt from its raw values exactly as
+// colorize_pixel -> palette -> build_surface do (non-AA, non-interpolated).
+fn relief_at_pixel(iterVal: f32, z: vec2<f32>, extras: PixelExtras, uvScreen: vec2<f32>) -> ReliefField {
+  var none: ReliefField;
+  let nu = escape_nu(iterVal, z.x, z.y);
+  if (nu < 0.0) { return none; }
+  let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+  let prelimPhase = palettePhaseFromRaw(iteration_palette_coordinate(nu, paletteRepeat) + animatedPaletteOffset() + screenPaletteShift(uvScreen));
+  let v = mix(iterVal, nu, sample_palette(prelimPhase, 2.0).g);
+  let heightPhaseShift = clamp(extras.height, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
+  let phaseColoringShift = (1.0 - abs(fract(extras.geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
+  let rawPhase = iteration_palette_coordinate(v, paletteRepeat) + animatedPaletteOffset() + screenPaletteShift(uvScreen) + heightPhaseShift + phaseColoringShift;
+  let phase = palettePhaseFromRaw(rawPhase);
+  let row1 = sample_palette(phase, 1.0);
+  let row2 = sample_palette(phase, 2.0);
+  let row6 = sample_palette(phase, 6.0);
+  return relief_field(
+    row1.b, clamp(row6.r, 0.0, 2.0), clamp(row6.a, 0.0, 1.0), nu,
+    distance_height_from_values(iterVal, z.x, z.y, extras.height),
+    phase, palette_phase_derivatives(rawPhase, v, paletteRepeat, row2.g, extras.height),
+    extras.gradient, extras.nuGradient
+  );
+}
+
+// Dev check (debugShading = 2, live grid only): is the relief slope the
+// gradient of the relief height? R = |central difference of h - grad h| /
+// max(|grad h|, 0.05), G = |grad h| / 4, B = 1 where all five taps escaped.
+fn relief_residual_debug(sourceMetadata: texture_2d<u32>, sourceGeometry: texture_2d<f32>, sourceOrbitGradient: texture_2d<f32>, coord: vec2<i32>, texSize: vec2<i32>, uvScreen: vec2<f32>, zoomFactor: f32) -> vec4<f32> {
+  reliefTexelsPerUnit = f32(texSize.y) / (2.0 * sqrt(parameters.aspect * parameters.aspect + 1.0));
+  let offsets = array<vec2<i32>, 5>(vec2<i32>(0, 0), vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
+  var fields: array<ReliefField, 5>;
+  var valid = true;
+  for (var i = 0; i < 5; i = i + 1) {
+    let c = clamp(coord + offsets[i], vec2<i32>(0), texSize - vec2<i32>(1));
+    let sample = load_pixel_sample(tex, sourceMetadata, c);
+    let z = vec2<f32>(sample.zx, sample.zy);
+    if (!(sample.iter > 0.0) || dot(z, z) < parameters.mu) {
+      valid = false;
+      continue;
+    }
+    let extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, c, zoomFactor);
+    fields[i] = relief_at_pixel(sample.iter, z, extras, uvScreen);
+  }
+  if (!valid) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let difference = 0.5 * vec2<f32>(fields[1].height - fields[2].height, fields[3].height - fields[4].height);
+  let analytic = fields[0].gradient;
+  let residual = length(difference - analytic) / max(length(analytic), 0.05);
+  return vec4<f32>(clamp(residual, 0.0, 1.0), clamp(length(analytic) / 4.0, 0.0, 1.0), 1.0, 1.0);
 }
 
 // Colorize from a source texture, replacing the nearest sample with a
@@ -1866,6 +2081,9 @@ fn colorize_sampled(
   zoomFactor: f32,
   analyticTag: bool
 ) -> vec4<f32> {
+  if (parameters.debugShading >= 1.5) {
+    return relief_residual_debug(sourceMetadata, sourceGeometry, sourceOrbitGradient, coord, texSize, uv_screen, zoomFactor);
+  }
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;

@@ -67,6 +67,7 @@ export interface MandelbrotParams {
     protrusionStrength?: number;
     protrusionGeometryMix?: number;
     protrusionPeriod?: number;
+    protrusionTerrace?: number;
     ambientOcclusionStrength?: number;
     localShadowStrength?: number;
     varnishStrength?: number;

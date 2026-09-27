@@ -116,6 +116,7 @@ export const COLOR_UNIFORM_FIELDS = [
     'paletteScreenShiftY',
     'stereoEyeSlope',             // orthographic eye direction X/Z, 0 in mono
     'stereoHeightPass',           // analytic height only, before material/colour
+    'protrusionTerrace',          // integrable lobe form: 0 bounded bumps, 1 terraces
 ] as const
 
 export type ColorUniformField = typeof COLOR_UNIFORM_FIELDS[number]

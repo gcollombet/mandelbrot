@@ -24,7 +24,10 @@ describe('packed geometry display ABI', () => {
   })
 
   it('packs provenance, stripe phase, and coherence without a display reference index', () => {
-    expect(resolve).toContain('provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 18u)')
+    expect(resolve).toContain('provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 14u)')
+    expect(resolve).toContain('| (quantize_direction(nuDirection) << 24u)')
+    expect(resolve).toContain('fn load_terminal_nu_direction(coord: vec2<i32>) -> vec2<f32>')
+    expect(color).toContain('fn decode_nu_direction(metadata: u32) -> vec2<f32>')
     expect(brush).toContain('0x30000000u | stripe | (coherence << 14u)')
     expect(color).toContain('fn decode_support_step(metadata: u32) -> f32')
     expect(color).toContain('fn decode_stripe_phase(metadata: u32) -> f32')
@@ -41,7 +44,8 @@ describe('packed geometry display ABI', () => {
 
   it('copies or interpolates analytic geometry without a spatial finalization pass', () => {
     expect(resolve).toContain('fn load_terminal_geometry(')
-    expect(resolve).toContain('geometrySum = geometrySum + weight * load_terminal_geometry(candidate);')
+    expect(resolve).toContain('let candidateGeometry = load_terminal_geometry(candidate);')
+    expect(resolve).toContain('geometrySum = geometrySum + weight * candidateGeometry;')
     expect(resolve).not.toContain('analytic_height_gradient')
     expect(engine).not.toContain('geometry_finalize.wgsl')
     expect(engine).not.toContain('pipelineGeometry')
@@ -58,7 +62,7 @@ describe('packed geometry display ABI', () => {
 
 describe('typed display consumers', () => {
   it('uses cached gradient/curvature for base shading without distance-neighbour reads', () => {
-    expect(color).toContain('var grad = cachedGradient * 24.0;')
+    expect(color).toContain('out.gradient = cachedGradient * (RELIEF_HEIGHT_SCALE * out.styledRelief);')
     expect(color).toContain('s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;')
     expect(color).toContain('atan2(geometry.y, geometry.x)')
     expect(color).not.toContain('fn orbit_metric_gradients_at_coord(')

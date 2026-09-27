@@ -8,7 +8,8 @@ const DISPLAY_STORAGE_MAX: f32 = 65504.0;
 // finished dyadic support starting at step 2. The compact display ABI is:
 //   values[0..2] = iteration, z.x, z.y
 //   geometry      = analytic gradient.xy, Laplacian, distance height
-//   metadata      = provenance exponent | stripe phase | coherence
+//   metadata      = provenance exponent (4) | stripe phase (10) | coherence (10)
+//                   | direction of grad(nu) (8); |grad(nu)| = sqrt(Laplacian)/ln2
 //   orbitGradient = grad(stripe EMA).xy, grad(direction coherence).xy
 //
 // orbitGradient exists only while orbit metrics are tracked; the pipeline
@@ -60,7 +61,9 @@ struct FragOut {
 
 const TWO_PI: f32 = 6.283185307179586;
 const LN_2: f32 = 0.6931471805599453;
-const QUANTIZED_MAX: u32 = 16383u;
+const QUANTIZED_MAX: u32 = 16383u;       // raw terminal word (layer 6)
+const DISPLAY_FIELD_MAX: u32 = 1023u;    // display metadata fields
+const NU_ANGLE_STEPS: f32 = 256.0;
 
 fn finite_scalar(value: f32) -> bool {
   return value == value && abs(value) < 3.402823e38;
@@ -100,7 +103,7 @@ fn store_trap_payload(coord: vec2<i32>, payload: vec4<f32>) {
 
 fn quantize_unit(value: f32) -> u32 {
   let finite = select(0.0, value, finite_scalar(value));
-  return u32(round(clamp(finite, 0.0, 1.0) * f32(QUANTIZED_MAX)));
+  return u32(round(clamp(finite, 0.0, 1.0) * f32(DISPLAY_FIELD_MAX)));
 }
 
 fn provenance_exponent(step: u32) -> u32 {
@@ -114,10 +117,17 @@ fn provenance_exponent(step: u32) -> u32 {
   return exponent;
 }
 
-fn pack_metadata(step: u32, stripePhase: f32, coherence: f32) -> u32 {
+fn quantize_direction(direction: vec2<f32>) -> u32 {
+  if (!(dot(direction, direction) > 1e-24)) { return 0u; }
+  let turn = fract(atan2(direction.y, direction.x) / TWO_PI + 1.0);
+  return u32(round(turn * NU_ANGLE_STEPS)) & 255u;
+}
+
+fn pack_metadata(step: u32, stripePhase: f32, coherence: f32, nuDirection: vec2<f32>) -> u32 {
   let stripe = quantize_unit(fract(stripePhase + 1.0));
   let coherenceBits = quantize_unit(coherence);
-  return provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 18u);
+  return provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 14u)
+    | (quantize_direction(nuDirection) << 24u);
 }
 
 fn smooth_frac(zSquared: f32, logMu: f32) -> f32 {
@@ -169,6 +179,20 @@ fn load_terminal_geometry(coord: vec2<i32>) -> vec4<f32> {
   );
 }
 
+// Direction of grad(nu), nu = n + 1 - log2(log|z|²/log mu): grad(nu) is
+// -grad(log|z|)/(ln2·log|z|) and grad(log|z|) is z'/z per texel, in the same
+// (Re, +Im) texture convention as the analytic gradient of the brush. Only the
+// direction is needed; positive scale factors drop out. Escaped raw texels
+// keep z in layers 2/3 and the normalized z' in layers 9/10.
+fn load_terminal_nu_direction(coord: vec2<i32>) -> vec2<f32> {
+  let z = vec2<f32>(load_layer(coord, 2), load_layer(coord, 3));
+  let der = vec2<f32>(load_layer(coord, 9), load_layer(coord, 10));
+  let ratio = vec2<f32>(der.x * z.x + der.y * z.y, der.y * z.x - der.x * z.y);
+  let len = length(ratio);
+  if (!(len > 1e-30) || !finite_scalar(len)) { return vec2<f32>(0.0); }
+  return -ratio / len;
+}
+
 // Per-texel gradients of the two orbit metrics. Unlike the stripe phase and
 // the coherence they differentiate, these are plain vectors: every support
 // rule below can average them the way it averages the cached geometry.
@@ -217,7 +241,8 @@ fn load_finished(coord: vec2<i32>, outputCoord: vec2<i32>, step: u32, sample: Ra
   let terminalMetrics = bitcast<u32>(load_layer(coord, 6));
   let stripe = select(0.0, decode_terminal_stripe(terminalMetrics), escaped);
   let coherence = select(0.0, decode_terminal_coherence(terminalMetrics), escaped);
-  out.metadata = pack_metadata(step, stripe, coherence);
+  let nuDirection = select(vec2<f32>(0.0), load_terminal_nu_direction(coord), escaped);
+  out.metadata = pack_metadata(step, stripe, coherence, nuDirection);
   store_trap_payload(outputCoord, load_trap_payload(coord));
   return out;
 }
@@ -330,6 +355,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         var zDirectionSum = vec2<f32>(0.0);
         var stripeDirectionSum = vec2<f32>(0.0);
         var coherenceSum = 0.0;
+        // grad(nu) is averaged as a vector: direction x |grad(nu)| ~ sqrt(Laplacian).
+        var nuGradientSum = vec2<f32>(0.0);
         // Preserve candidate order, including zero-weight contributors, so
         // baseIter, tie-breaking, and floating-point accumulation stay intact.
         for (var i = 0u; i < 4u; i = i + 1u) {
@@ -339,7 +366,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           let iter = samples[i].iter;
           let z = samples[i].z;
           nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
-          geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
+          let candidateGeometry = load_terminal_geometry(candidate);
+          geometrySum = geometrySum + weight * candidateGeometry;
+          nuGradientSum = nuGradientSum
+            + weight * sqrt(candidateGeometry.z) * load_terminal_nu_direction(candidate);
           orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);
           zDirectionSum = zDirectionSum + weight * z / max(length(z), 1e-12);
           let terminalMetrics = bitcast<u32>(load_layer(candidate, 6));
@@ -369,7 +399,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           vec4<f32>(-DISPLAY_STORAGE_MAX, -DISPLAY_STORAGE_MAX, 0.0, -DISPLAY_STORAGE_MAX),
           vec4<f32>(DISPLAY_STORAGE_MAX),
         );
-        out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight);
+        out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight, nuGradientSum);
         out.orbitGradient = clamp(
           orbitGradientSum * inverseWeight,
           vec4<f32>(-DISPLAY_STORAGE_MAX),

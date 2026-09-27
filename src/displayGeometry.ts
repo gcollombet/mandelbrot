@@ -1,11 +1,17 @@
 export const DISPLAY_VALUE_LAYERS = 3
 export const DISPLAY_BYTES_PER_TEXEL = 24
 
+// Display metadata word: provenance (4) | stripe (10) | coherence (10) |
+// direction of grad(nu) (8). The magnitude of grad(nu) is sqrt(Laplacian)/ln2,
+// already carried by the geometry, so only its angle is stored.
 export const PROVENANCE_BITS = 4
-export const QUANTIZED_FIELD_BITS = 14
+export const QUANTIZED_FIELD_BITS = 10
 export const QUANTIZED_FIELD_MAX = (1 << QUANTIZED_FIELD_BITS) - 1
 export const STRIPE_SHIFT = PROVENANCE_BITS
 export const COHERENCE_SHIFT = PROVENANCE_BITS + QUANTIZED_FIELD_BITS
+export const NU_ANGLE_BITS = 8
+export const NU_ANGLE_SHIFT = COHERENCE_SHIFT + QUANTIZED_FIELD_BITS
+export const NU_ANGLE_STEPS = 1 << NU_ANGLE_BITS
 
 export const GEOMETRY_GRADIENT_CLAMP = 64
 export const GEOMETRY_CURVATURE_CLAMP = 64
@@ -16,6 +22,8 @@ export interface DecodedDisplayMetadata {
     supportStep: number
     stripePhase: number
     coherence: number
+    /** Direction of grad(nu) in radians, [0, 2π). */
+    nuAngle: number
 }
 
 export interface DisplayGeometry {
@@ -43,15 +51,18 @@ function quantizeUnit(value: number): number {
     return Math.round(clamp(finite, 0, 1) * QUANTIZED_FIELD_MAX)
 }
 
-export function packDisplayMetadata(step: number, stripePhase: number, coherence: number): number {
+export function packDisplayMetadata(step: number, stripePhase: number, coherence: number, nuAngle = 0): number {
     const exponent = provenanceExponentForStep(step)
     const wrappedStripe = ((Number.isFinite(stripePhase) ? stripePhase : 0) % 1 + 1) % 1
     const stripe = quantizeUnit(wrappedStripe)
     const coherent = quantizeUnit(coherence)
+    const turn = (Number.isFinite(nuAngle) ? nuAngle : 0) / (2 * Math.PI)
+    const angle = Math.round((turn % 1 + 1) % 1 * NU_ANGLE_STEPS) % NU_ANGLE_STEPS
     return (
         exponent
         | (stripe << STRIPE_SHIFT)
         | (coherent << COHERENCE_SHIFT)
+        | (angle << NU_ANGLE_SHIFT)
     ) >>> 0
 }
 
@@ -63,6 +74,7 @@ export function unpackDisplayMetadata(word: number): DecodedDisplayMetadata {
         supportStep: supportStepForExponent(provenanceExponent),
         stripePhase: ((packed >>> STRIPE_SHIFT) & QUANTIZED_FIELD_MAX) / QUANTIZED_FIELD_MAX,
         coherence: ((packed >>> COHERENCE_SHIFT) & QUANTIZED_FIELD_MAX) / QUANTIZED_FIELD_MAX,
+        nuAngle: ((packed >>> NU_ANGLE_SHIFT) & (NU_ANGLE_STEPS - 1)) * (2 * Math.PI / NU_ANGLE_STEPS),
     }
 }
 

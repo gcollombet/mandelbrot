@@ -206,6 +206,7 @@
       "protrusionStrength": "Protrusion amplification",
       "protrusionGeometry": "Geometric protrusions",
       "geometricPeriod": "Geometric period",
+      "protrusionTerrace": "Lobe: bumps ↔ terraces",
       "lightDirection": "Light direction",
       "microBump": "Fine bump",
       "localShadows": "Local shadows",

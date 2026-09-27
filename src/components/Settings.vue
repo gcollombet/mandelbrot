@@ -260,6 +260,7 @@ const model =  defineModel<MandelbrotParams>({
      protrusionStrength: 1,
      protrusionGeometryMix: 0,
      protrusionPeriod: 1,
+     protrusionTerrace: 0,
      ambientOcclusionStrength: 0,
      localShadowStrength: 0,
      varnishStrength: 0,
@@ -1383,6 +1384,7 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     protrusionStrength: model.value.protrusionStrength,
     protrusionGeometryMix: model.value.protrusionGeometryMix,
     protrusionPeriod: model.value.protrusionPeriod,
+    protrusionTerrace: model.value.protrusionTerrace,
     lightAngle: model.value.lightAngle,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     localShadowStrength: model.value.localShadowStrength,
@@ -1489,6 +1491,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.protrusionStrength = source.protrusionStrength ?? 1;
   model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;
   model.value.protrusionPeriod = source.protrusionPeriod ?? 1;
+  model.value.protrusionTerrace = source.protrusionTerrace ?? 0;
   if (source.lightAngle != null) model.value.lightAngle = source.lightAngle;
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
@@ -3327,6 +3330,7 @@ async function startVideoExport(payload: {
           :protrusionStrength="model.protrusionStrength"
           :protrusionGeometryMix="model.protrusionGeometryMix"
           :protrusionPeriod="model.protrusionPeriod"
+          :protrusionTerrace="model.protrusionTerrace"
           :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
@@ -3504,6 +3508,8 @@ async function startVideoExport(payload: {
             :model-value="model.protrusionGeometryMix ?? 0" @update:model-value="(v: number) => model.protrusionGeometryMix = v" />
           <DenseField :label="t('settings.palettes.surface.geometricPeriod')" :min="0.1" :max="16" :step="0.05" :default="1" f="p2"
             :model-value="model.protrusionPeriod ?? 1" @update:model-value="(v: number) => model.protrusionPeriod = v" />
+          <DenseField :label="t('settings.palettes.surface.protrusionTerrace')" :min="0" :max="1" :step="0.01" :default="0" f="p2"
+            :model-value="model.protrusionTerrace ?? 0" @update:model-value="(v: number) => model.protrusionTerrace = v" />
           <DenseField :label="t('settings.palettes.surface.lightDirection')" :min="0" :max="6.283" :step="0.01" :default="3.927" :f="radFmt"
             :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
           <DenseField :label="t('settings.palettes.surface.microBump')" :min="0" :max="2" :step="0.01" :default="0" f="p2"

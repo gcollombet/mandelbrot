@@ -77,6 +77,7 @@ export interface PaletteRecord extends ScopedCacheFields {
   protrusionStrength?: number;
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
+  protrusionTerrace?: number;
   lightAngle?: number;
   ambientOcclusionStrength?: number;
   localShadowStrength?: number;

@@ -57,6 +57,7 @@ const props = defineProps<{
   protrusionStrength?: number,
   protrusionGeometryMix?: number,
   protrusionPeriod?: number,
+  protrusionTerrace?: number,
   lightAngle?: number,
   ambientOcclusionStrength?: number,
   localShadowStrength?: number,
@@ -480,6 +481,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :protrusionStrength="props.protrusionStrength"
       :protrusionGeometryMix="props.protrusionGeometryMix"
       :protrusionPeriod="props.protrusionPeriod"
+      :protrusionTerrace="props.protrusionTerrace"
       :lightAngle="props.lightAngle"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :localShadowStrength="props.localShadowStrength"

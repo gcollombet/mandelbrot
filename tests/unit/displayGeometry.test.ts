@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   DISPLAY_BYTES_PER_TEXEL,
+  NU_ANGLE_STEPS,
   QUANTIZED_FIELD_MAX,
   analyticDistanceHeightGradient,
   analyticDistanceHeightLaplacian,
@@ -36,6 +37,17 @@ describe('packed display metadata', () => {
     expect(Math.abs(circularPhaseDelta(decoded.stripePhase, 0.99997))).toBeLessThanOrEqual(1 / QUANTIZED_FIELD_MAX)
     expect(Math.abs(decoded.coherence - 0.4321)).toBeLessThanOrEqual(1 / QUANTIZED_FIELD_MAX)
     expect(Math.abs(circularPhaseDelta(0.01, 0.99))).toBeCloseTo(0.02)
+  })
+
+  it('stores the grad(nu) direction on 8 bits without touching the other fields', () => {
+    for (const angle of [0, 1, Math.PI, -2.5, 2 * Math.PI - 1e-4]) {
+      const decoded = unpackDisplayMetadata(packDisplayMetadata(4, 0.25, 0.75, angle))
+      const turn = circularPhaseDelta(decoded.nuAngle / (2 * Math.PI), angle / (2 * Math.PI))
+      expect(Math.abs(turn)).toBeLessThanOrEqual(0.5 / NU_ANGLE_STEPS + 1e-9)
+      expect(decoded.supportStep).toBe(4)
+      expect(Math.abs(decoded.stripePhase - 0.25)).toBeLessThanOrEqual(1 / QUANTIZED_FIELD_MAX)
+      expect(Math.abs(decoded.coherence - 0.75)).toBeLessThanOrEqual(1 / QUANTIZED_FIELD_MAX)
+    }
   })
 })
 

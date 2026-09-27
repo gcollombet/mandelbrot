@@ -76,6 +76,7 @@ const props = defineProps<{
   protrusionStrength?: number;
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
+  protrusionTerrace?: number;
   ambientOcclusionStrength?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
@@ -194,6 +195,7 @@ function previewUniforms(): ColorUniforms {
     protrusionSharpness: props.protrusionSharpness ?? 2,
     protrusionGeometryMix: props.protrusionGeometryMix ?? 0,
     protrusionPeriod: props.protrusionPeriod ?? 1,
+    protrusionTerrace: props.protrusionTerrace ?? 0,
     ...orbitTrapUniforms(orbitTrap),
     protrusionStrength: props.protrusionStrength ?? 1,
     iterationPaletteCurve: iterationPaletteCurveCode(props.iterationPaletteCurve),
@@ -354,7 +356,7 @@ function buildSyntheticData(w: number, h: number, mu: number): {
       const coherencePhase = iterFloat * 0.065 + vFrac * Math.PI;
       const coherenceRaw = Math.sin(coherencePhase);
       const coherence = Math.abs(coherenceRaw);
-      metadata[idx] = packDisplayMetadata(1, stripePhase, coherence);
+      metadata[idx] = packDisplayMetadata(1, stripePhase, coherence, dIterDx >= 0 ? 0 : Math.PI);
       // stripePhase = 0.5 + 0.5*S with S = sin(0.2*iterFloat) — the shader
       // wants grad S, not grad p. y grows down here, and the geometry block
       // below stores (up - down), so both keep the same upward-y sign.
@@ -710,7 +712,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping, () => props.iterationPaletteCurve],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.protrusionTerrace, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping, () => props.iterationPaletteCurve],
   () => {
     if (!device || !uniformBuffer) return;
     writeUniforms();

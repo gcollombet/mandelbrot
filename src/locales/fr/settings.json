@@ -206,6 +206,7 @@
       "protrusionStrength": "Amplification protubérances",
       "protrusionGeometry": "Protubérances géométriques",
       "geometricPeriod": "Période géométrique",
+      "protrusionTerrace": "Lobe : bosses ↔ terrasses",
       "lightDirection": "Direction lumière",
       "microBump": "Bump fin",
       "localShadows": "Ombres locales",

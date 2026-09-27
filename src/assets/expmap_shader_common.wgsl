@@ -27,6 +27,7 @@ fn shade_display_sample(index:u32, screen:vec2<f32>, r:f32, ratio:f32, neutral:v
   extras.geometryAngle=select(0.0,atan2(extras.gradient.y,extras.gradient.x),dot(extras.gradient,extras.gradient)>1e-12);
   extras.stripePhase=decode_stripe_phase(metadataWord);
   extras.directionCoherence=decode_direction_coherence(metadataWord);
+  extras.nuGradient=nu_gradient(metadataWord,extras.curvature);
   extras.stripeGradient=clamp(og.xy*ratio,vec2<f32>(-64.0),vec2<f32>(64.0));
   extras.coherenceGradient=clamp(og.zw*ratio,vec2<f32>(-64.0),vec2<f32>(64.0));
   let c=colorize_pixel(vec2<i32>(0),vec2<i32>(sp.output.xy),iter,z.x,z.y,trap,extras,screen/sp.output.xy,neutral,false);
