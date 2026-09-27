@@ -3,6 +3,8 @@
   "cards": {
     "fpsTitle": "Frames per second actually rendered (derived from the real interval between rendered frames).",
     "fps": "FPS",
+    "readyTitle": "The last render is complete. The measurements below are from that render.",
+    "status": "Status",
     "frameTitle": "Real time between two frames = the true per-frame budget. This is what the user feels.",
     "frame": "Frame",
     "gpuSpanTitle": "REAL GPU time of the frame = last marker − first marker on the GPU timeline. This is the authoritative total, including GPU work located between the measured categories.",
@@ -12,6 +14,7 @@
   },
   "state": {
     "idle": "Idle — last measurements",
+    "ready": "Measurements from the last render",
     "rendering": "Rendering"
   },
   "breakdown": {

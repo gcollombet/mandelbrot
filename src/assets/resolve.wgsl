@@ -181,19 +181,36 @@ fn load_terminal_orbit_gradient(coord: vec2<i32>) -> vec4<f32> {
   );
 }
 
-fn is_finished(coord: vec2<i32>) -> bool {
-  let iter = load_layer(coord, 0);
-  if (iter == 0.0) { return true; }
-  if (iter < 0.0) { return false; }
-  let z = vec2<f32>(load_layer(coord, 2), load_layer(coord, 3));
-  return dot(z, z) >= uni.mu;
+struct RawSample {
+  iter: f32,
+  z: vec2<f32>,
+  finished: bool,
+};
+
+fn load_sample(coord: vec2<i32>) -> RawSample {
+  var sample: RawSample;
+  sample.iter = load_layer(coord, 0);
+  if (sample.iter == 0.0) {
+    sample.finished = true;
+    return sample;
+  }
+  if (sample.iter < 0.0) { return sample; }
+  sample.z = vec2<f32>(load_layer(coord, 2), load_layer(coord, 3));
+  sample.finished = dot(sample.z, sample.z) >= uni.mu;
+  return sample;
 }
 
-fn load_finished(coord: vec2<i32>, outputCoord: vec2<i32>, step: u32) -> FragOut {
+fn load_finished(coord: vec2<i32>, outputCoord: vec2<i32>, step: u32, sample: RawSample) -> FragOut {
   var out: FragOut;
-  out.iter = load_layer(coord, 0);
-  out.zx = load_layer(coord, 2);
-  out.zy = load_layer(coord, 3);
+  out.iter = sample.iter;
+  out.zx = sample.z.x;
+  out.zy = sample.z.y;
+  // Interior candidates need only their iteration for classification. Read
+  // their original z only if selected, preserving the terminal display values.
+  if (sample.iter == 0.0) {
+    out.zx = load_layer(coord, 2);
+    out.zy = load_layer(coord, 3);
+  }
   let escaped = out.iter > 0.0;
   out.geometry = select(vec4<f32>(0.0), load_terminal_geometry(coord), escaped);
   out.orbitGradient = select(vec4<f32>(0.0), load_terminal_orbit_gradient(coord), escaped);
@@ -232,11 +249,11 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     return no_data(coord);
   }
 
-  if (is_finished(coord)) {
-    return load_finished(coord, coord, 1u);
+  let sample = load_sample(coord);
+  if (sample.finished) {
+    return load_finished(coord, coord, 1u, sample);
   }
 
-  let logMu = log(max(uni.mu, 1.0001));
   var step = 2u;
   for (var level = 0u; level < 15u; level = level + 1u) {
     if (step >= dims.x || step >= dims.y) { return no_data(coord); }
@@ -259,42 +276,39 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     var insideWeight = 0.0;
     var insideCount = 0u;
     var baseIter = -1.0;
-    var nuSum = 0.0;
-    var geometrySum = vec4<f32>(0.0);
-    var orbitGradientSum = vec4<f32>(0.0);
-    var zDirectionSum = vec2<f32>(0.0);
-    var stripeDirectionSum = vec2<f32>(0.0);
-    var coherenceSum = 0.0;
     var bestInsideWeight = -1.0;
-    var bestInsideCoord = vec2<i32>(0);
+    var bestInsideIndex = 0u;
     var bestEscapedWeight = -1.0;
     var bestEscapedCoord = vec2<i32>(0);
-    var firstFinishedCoord = vec2<i32>(0);
+    var firstFinishedIndex = 0u;
     var hasFinished = false;
+    var samples: array<RawSample, 4>;
 
+    // Classify support first. Rejected levels and interior winners do not
+    // need geometry, orbit metrics, or the nonlinear interpolation math.
     for (var i = 0u; i < 4u; i = i + 1u) {
       let candidate = candidates[i];
-      if (candidate.x < 0 || candidate.y < 0 || candidate.x >= i32(dims.x) || candidate.y >= i32(dims.y)
-          || !is_finished(candidate)) {
+      if (candidate.x < 0 || candidate.y < 0 || candidate.x >= i32(dims.x) || candidate.y >= i32(dims.y)) {
         continue;
       }
+      samples[i] = load_sample(candidate);
+      if (!samples[i].finished) { continue; }
       let weight = weights[i];
-      let iter = load_layer(candidate, 0);
+      let iter = samples[i].iter;
       if (!hasFinished) {
         hasFinished = true;
-        firstFinishedCoord = candidate;
+        firstFinishedIndex = i;
       }
       if (iter == 0.0) {
         insideCount = insideCount + 1u;
         insideWeight = insideWeight + weight;
         if (weight > bestInsideWeight) {
           bestInsideWeight = weight;
-          bestInsideCoord = candidate;
+          bestInsideIndex = i;
         }
         continue;
       }
 
-      let z = vec2<f32>(load_layer(candidate, 2), load_layer(candidate, 3));
       if (baseIter < 0.0) { baseIter = iter; }
       escapedCount = escapedCount + 1u;
       escapedWeight = escapedWeight + weight;
@@ -302,18 +316,36 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         bestEscapedWeight = weight;
         bestEscapedCoord = candidate;
       }
-      nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
-      geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
-      orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);
-      zDirectionSum = zDirectionSum + weight * z / max(length(z), 1e-12);
-      let terminalMetrics = bitcast<u32>(load_layer(candidate, 6));
-      stripeDirectionSum = stripeDirectionSum + weight * phase_to_dir(decode_terminal_stripe(terminalMetrics));
-      coherenceSum = coherenceSum + weight * decode_terminal_coherence(terminalMetrics);
     }
 
     if (escapedCount + insideCount >= 3u) {
-      if (insideWeight > escapedWeight) { return load_finished(bestInsideCoord, coord, step); }
+      if (insideWeight > escapedWeight) {
+        return load_finished(candidates[bestInsideIndex], coord, step, samples[bestInsideIndex]);
+      }
       if (escapedWeight > 1e-6) {
+        let logMu = log(max(uni.mu, 1.0001));
+        var nuSum = 0.0;
+        var geometrySum = vec4<f32>(0.0);
+        var orbitGradientSum = vec4<f32>(0.0);
+        var zDirectionSum = vec2<f32>(0.0);
+        var stripeDirectionSum = vec2<f32>(0.0);
+        var coherenceSum = 0.0;
+        // Preserve candidate order, including zero-weight contributors, so
+        // baseIter, tie-breaking, and floating-point accumulation stay intact.
+        for (var i = 0u; i < 4u; i = i + 1u) {
+          if (!samples[i].finished || samples[i].iter == 0.0) { continue; }
+          let candidate = candidates[i];
+          let weight = weights[i];
+          let iter = samples[i].iter;
+          let z = samples[i].z;
+          nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
+          geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
+          orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);
+          zDirectionSum = zDirectionSum + weight * z / max(length(z), 1e-12);
+          let terminalMetrics = bitcast<u32>(load_layer(candidate, 6));
+          stripeDirectionSum = stripeDirectionSum + weight * phase_to_dir(decode_terminal_stripe(terminalMetrics));
+          coherenceSum = coherenceSum + weight * decode_terminal_coherence(terminalMetrics);
+        }
         let inverseWeight = 1.0 / escapedWeight;
         let relativeNu = nuSum * inverseWeight;
         let relativeFloor = floor(relativeNu);
@@ -346,7 +378,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         store_trap_payload(coord, load_trap_payload(bestEscapedCoord));
         return out;
       }
-      if (hasFinished) { return load_finished(firstFinishedCoord, coord, step); }
+      if (hasFinished) {
+        return load_finished(candidates[firstFinishedIndex], coord, step, samples[firstFinishedIndex]);
+      }
     }
     step = step * 2u;
   }

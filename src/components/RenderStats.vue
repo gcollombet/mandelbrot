@@ -16,6 +16,7 @@ const emit = defineEmits<{
 // --- Polled stats (reactive mirrors of Engine plain properties) ---
 const fps = ref(0);
 const isRendering = ref(false);
+const hasCompletedRender = ref(false);
 const maxIterations = ref(0);
 const pendingRefActive = ref(false);
 const referenceResetActive = ref(false);
@@ -87,6 +88,7 @@ function poll() {
   if (!e) return;
   fps.value = e.fps ?? 0;
   isRendering.value = e.isRendering ?? false;
+  hasCompletedRender.value = (e.lastCompletionWallMs ?? 0) > 0;
   maxIterations.value = e.currentMaxIterations ?? 0;
   pendingRefActive.value = e.pendingRefActive ?? false;
   referenceResetActive.value = (e.referenceResetFlashUntil ?? 0) > performance.now();
@@ -115,7 +117,7 @@ onUnmounted(() => {
         class="status-dot"
         :class="isBuildingRef ? 'status-dot--reference' : (isRendering ? 'status-dot--active' : 'status-dot--idle')"
       ></span>
-      <span class="stats-fps">{{ fps }} fps</span>
+      <span class="stats-fps">{{ hasCompletedRender && !isRendering && !isBuildingRef && fps === 0 ? t('renderStats.ready') : `${fps} fps` }}</span>
 
       <!-- Brief indicators for zoom magnitude and max iterations -->
       <span class="header-badge" :title="t('renderStats.zoomMagnitude')">

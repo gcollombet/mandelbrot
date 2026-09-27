@@ -69,7 +69,10 @@ The crate lives at `reference_calculus/` and uses `dashu-float` for arbitrary pr
   `cargo test --release --manifest-path reference_calculus/Cargo.toml --lib box_dimension_census -- --ignored --nocapture`.
   Current ones: `reach_census`, `nu_branch_census` (`reach.rs`), `box_dimension_census`,
   `skip_ceiling_census` (`boxdim.rs`), `minibrot_detection_census` (`lib.rs`, minibrot
-  search success vs the pre-ladder single shot). Findings live in the root `*.md` notes.
+  search success vs the pre-ladder single shot). Timing benches (same flags): `minibrot_deep_timing`
+  (`WALK=2 DEPTH=50 FRAME=1 BUDGET=…`, 1e-97 framed scene; `SCENE_OUT=` dumps it) and
+  `reference_orbit_precision_check` (`SCENE=<file> BUDGET=… ITER=…`, stored orbit vs a
+  uniform high-precision truth). Findings live in the root `*.md` notes.
 - No JS/TS unit test runner configured (no Vitest/Jest).
 
 ### Testing the engine's output (mandatory method for agents)

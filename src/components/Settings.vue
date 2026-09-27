@@ -1039,8 +1039,14 @@ const visiblePresets = computed(() => {
   const q = presetQuery.value.trim().toLocaleLowerCase();
   const list = (showOnlyFavoritePresets.value ? favoritePresets.value : presets.value)
     .filter(p => !q || `${p.name ?? ''} ${formatPresetDate(p.date)}`.toLocaleLowerCase().includes(q));
-  return [...list].sort((a, b) => presetSort.value === 'name'
-    ? (a.name ?? '').localeCompare(b.name ?? '') : String(b.date).localeCompare(String(a.date)));
+  return [...list].sort((a, b) => {
+    if (presetSort.value === 'name') return (a.name ?? '').localeCompare(b.name ?? '');
+    if (presetSort.value === 'depth') {
+      return (b.scaleExponent ?? 0) - (a.scaleExponent ?? 0)
+        || String(b.date).localeCompare(String(a.date));
+    }
+    return String(b.date).localeCompare(String(a.date));
+  });
 });
 const visiblePalettePresets = computed(() => showOnlyFavoritePalettePresets.value ? favoritePresets.value : presets.value);
 const visiblePalettes = computed(() => showOnlyFavoritePalettes.value ? favoritePalettes.value : palettes.value);
@@ -3127,7 +3133,7 @@ async function startVideoExport(payload: {
 
       <div class="lib-bar">
         <input class="txt-in gallery-search" v-model="presetQuery" type="search" :aria-label="t('settings.presets.searchAria')" :placeholder="t('settings.presets.searchPlaceholder')" />
-        <select class="txt-in" v-model="presetSort" :aria-label="t('settings.presets.sortAria')"><option value="recent">{{ t('settings.presets.sortRecent') }}</option><option value="name">{{ t('settings.presets.sortName') }}</option></select>
+        <select class="txt-in" v-model="presetSort" :aria-label="t('settings.presets.sortAria')"><option value="recent">{{ t('settings.presets.sortRecent') }}</option><option value="name">{{ t('settings.presets.sortName') }}</option><option value="depth">{{ t('settings.presets.sortDepth') }}</option></select>
         <button
           class="fav-filter"
           :class="{ on: showOnlyFavoritePresets }"

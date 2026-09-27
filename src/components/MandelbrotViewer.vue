@@ -2919,7 +2919,8 @@ async function startTravelToPreset(preset: PresetRecord) {
     bottom: 0;
     left: 0;
     width: 100%;
-    max-height: 52dvh;
+    height: 70dvh;
+    max-height: 70dvh;
     padding-bottom: env(safe-area-inset-bottom);
     background: #11141c;
   }
@@ -3731,8 +3732,8 @@ async function startTravelToPreset(preset: PresetRecord) {
 
 <style scoped>
 @media (max-width: 720px) and (orientation: portrait) {
-  .dense-popup { top: auto !important; bottom: 0; left: 0 !important; right: 0 !important; width: 100% !important; max-width: 100%; max-height: 52dvh !important; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); }
-  .dense-popup.sheet-expanded { max-height: calc(100dvh - 64px) !important; }
+  .dense-popup { top: auto !important; bottom: 0; left: 0 !important; right: 0 !important; width: 100% !important; max-width: 100%; height: 70dvh !important; max-height: 70dvh !important; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); }
+  .dense-popup.sheet-expanded { height: calc(100dvh - 64px) !important; max-height: calc(100dvh - 64px) !important; }
   .dense-popup .body { overscroll-behavior: contain; }
 }
 @media (max-height: 520px) and (orientation: landscape) {

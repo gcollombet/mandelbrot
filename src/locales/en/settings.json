@@ -78,6 +78,7 @@
     "sortAria": "Sort presets",
     "sortRecent": "Recent",
     "sortName": "Name",
+    "sortDepth": "Depth ↓",
     "presetUnit": "preset | presets",
     "emptyFavorites": "No favorites — use a scene's ⋯ menu.",
     "emptyScenes": "No saved scenes.",

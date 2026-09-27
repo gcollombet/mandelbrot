@@ -33,6 +33,7 @@ interface PassRow { key: string; label: string; labelKey: string; helpKey: strin
 const stats = reactive({
   timestampCapable: false,
   fps: 0,
+  isRendering: false,
   frameIntervalMs: 0,
   cpuFramePreparationMs: 0,
   cpuNavigationMs: 0,
@@ -79,6 +80,7 @@ const stats = reactive({
 });
 
 const shaderModeLabel = computed(() => (stats.shaderApproxFlag === 1 ? 'BLA' : 'exact'));
+const ready = computed(() => stats.completionWallMs > 0 && !stats.isRendering && stats.fps === 0);
 
 const currentRefPercent = computed(() => {
   const count = stats.orbitCount || 0;
@@ -217,6 +219,7 @@ let lastLiveMs = 0;
 function readLive(e: any) {
   stats.timestampCapable = !!e.timestampCapable;
   stats.fps = e.fps ?? 0;
+  stats.isRendering = e.isRendering ?? false;
   stats.frameIntervalMs = e.frameIntervalMs ?? 0;
   stats.cpuFramePreparationMs = e.cpuFramePreparationMs ?? 0;
   stats.cpuNavigationMs = e.cpuNavigationMs ?? 0;
@@ -467,9 +470,9 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
     <!-- Global metric cards: FPS emphasized, the other three compact plain values -->
     <div class="perf-cards">
-      <div class="perf-card hero" :title="t('performancePanel.cards.fpsTitle')">
-        <div class="pc-val pc-val--hero">{{ stats.fps }}</div>
-        <div class="pc-lbl">{{ t('performancePanel.cards.fps') }}</div>
+      <div class="perf-card hero" :title="ready ? t('performancePanel.cards.readyTitle') : t('performancePanel.cards.fpsTitle')">
+        <div class="pc-val pc-val--hero">{{ ready ? t('renderStats.ready') : stats.fps }}</div>
+        <div class="pc-lbl">{{ ready ? t('performancePanel.cards.status') : t('performancePanel.cards.fps') }}</div>
       </div>
       <div class="perf-card compact" :title="t('performancePanel.cards.frameTitle')">
         <div class="pc-val">{{ fmt(stats.frameIntervalMs) }}<span class="pc-u">ms</span></div>
@@ -485,7 +488,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       </div>
     </div>
 
-    <p class="perf-state">{{ stats.fps === 0 ? t('performancePanel.state.idle') : t('performancePanel.state.rendering') }}</p>
+    <p class="perf-state">{{ ready ? t('performancePanel.state.ready') : stats.isRendering ? t('performancePanel.state.rendering') : t('performancePanel.state.idle') }}</p>
     <details class="perf-details"><summary>{{ t('performancePanel.breakdown.summary') }}</summary>
     <!-- Per-pass breakdown (needs timestamp-query) -->
     <template v-if="stats.timestampCapable">

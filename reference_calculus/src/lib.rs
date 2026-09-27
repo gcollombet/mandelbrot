@@ -41,13 +41,29 @@ fn precision_bits_for_scale(scale: &DBig) -> usize {
     depth + 64
 }
 
+// DBig is base 10: its precision counts significant DECIMAL digits. Every budget
+// above (view depth, fixed budget, descending profile, floor, margin) is
+// accounted in bits, and they used to be handed to DBig as-is — so each "bit"
+// bought a decimal digit and every arbitrary-precision operation carried
+// log2(10) ≈ 3.3× the digits it was sized for. Convert at the DBig boundary.
+fn digits_for_bits(bits: usize) -> usize {
+    (bits as f64 * LOG10_2).ceil() as usize
+}
+
 // Reference-orbit descending precision profile (fix-reference-precision-budget, design D2):
 // the working precision at orbit step n is clamp(P − ⌊G_n − margin⌋, FLOOR, P), where
 // G_n = log2|dZ_n/dC| is the bits the orbit has amplified. Bits are shed only once earned, so
 // the costly DBig precision is confined to the first ~P iterations; the rest run at the floor.
 // FLOOR is well above the f32 storage mantissa (~24 bits), MARGIN absorbs the linear η_k drift.
+// MARGIN was 24 while these bits were handed to DBig as decimal digits (see digits_for_bits),
+// which made the real margin ≥ 80 bits. Measured once converted (framed minibrot at 1e-97, the
+// copy centre is a parabolic cusp, budget 1e-105): 24 bits → the stored orbit leaves the
+// truth at iteration 13 928, 48 → 19 592, 64 → exact to 1e5, 80/96 → exact to 3e5 — while
+// shifting c itself by 1e-125 moves nothing, so the loss is the profile's, not the budget's.
+// z-perturbations there are not worth their c-equivalent 2^-G, hence a margin above the old
+// implicit one; the cost difference between 64 and 96 is noise.
 const PRECISION_FLOOR_BITS: usize = 64;
-const PRECISION_MARGIN_BITS: usize = 24;
+const PRECISION_MARGIN_BITS: usize = 96;
 // Floor budget for a navigator with no explicit budget set (the shared FRONT navigator). 64 =
 // pure current-view precision (ensure_precision = max(view, budget)), matching the original
 // view-driven behaviour so per-frame coordinate serialization stays cheap. The WORKER navigator
@@ -282,7 +298,7 @@ fn dbig_neg_log10(v: &DBig) -> f64 {
     -(m.abs().log10() + e as f64 * LOG10_2)
 }
 
-// Raise a value's precision to `prec` bits when it carries fewer (or unlimited),
+// Raise a value's precision to `prec` decimal digits when it carries fewer (or unlimited),
 // but NEVER round a finite value down. Reducing precision on zoom-out would
 // discard the reference center's hard-won deep digits, so zooming back in (or
 // recentering at a shallower scale) would land on a corrupted center ("garbage").
@@ -351,8 +367,8 @@ fn ln_f64(value: f64) -> f64 {
     value.ln()
 }
 
-const LOG2_10: f64 = 3.321928094887362;
-const LOG10_2: f64 = 0.30102999566398120;
+const LOG2_10: f64 = std::f64::consts::LOG2_10;
+const LOG10_2: f64 = std::f64::consts::LOG10_2;
 
 // Extended-exponent decomposition of a DBig: value ≈ mantissa · 2^exponent, |mantissa| ∈
 // [0.5, 1). Computed in O(1) by reading only the top ~53 bits of the significand and its base-10
@@ -622,9 +638,11 @@ impl MandelbrotNavigator {
         // budget P at any zoom. The shared FRONT navigator keeps a modest default budget, so it
         // tracks the view — its per-frame coordinate strings stay view-length, never the deep
         // budget (which would make per-frame DBig→string serialization cost ∝ budget).
-        let prec = precision_bits_for_scale(&self.scale)
-            .max(self.budget_prec)
-            .max(64);
+        let prec = digits_for_bits(
+            precision_bits_for_scale(&self.scale)
+                .max(self.budget_prec)
+                .max(64),
+        );
         raise_precision_in_place(&mut self.cx, prec);
         raise_precision_in_place(&mut self.cy, prec);
         raise_precision_in_place(&mut self.cx_continuous, prec);
@@ -1264,7 +1282,7 @@ impl MandelbrotNavigator {
             // step) is conservative (G_n ≤ G_{n+1}, so we shed no more than earned). C stays at
             // the full budget P — only the z_n operands are rounded down to p_n.
             let g_bits = der.log2_mag();
-            let p_n = profile_precision(budget, g_bits);
+            let p_n = digits_for_bits(profile_precision(budget, g_bits));
             let magnitude_sq = &zx * &zx + &zy * &zy;
 
             if magnitude_sq > threshold {
@@ -1550,10 +1568,13 @@ impl MandelbrotNavigator {
         ]
     }
 
+    /// The navigator's DBig precision, in decimal digits (see [`digits_for_bits`]).
     fn working_precision(&self) -> usize {
-        precision_bits_for_scale(&self.scale)
-            .max(self.budget_prec)
-            .max(64)
+        digits_for_bits(
+            precision_bits_for_scale(&self.scale)
+                .max(self.budget_prec)
+                .max(64),
+        )
     }
 
     /// Period detection + Newton refinement shared by the two `find_minibrot*`
@@ -1586,15 +1607,26 @@ impl MandelbrotNavigator {
         } else {
             4.0
         };
+        // The search runs at the precision the *view* needs, never at the
+        // navigator's budget: the budget is headroom for the reference orbit of
+        // views deeper than this one, and a 1e-1000 budget on a 1e-100 view made
+        // every orbit below ~30× wider than its result can use (17.9 s → 0.6 s
+        // measured on a 1e-97 period-3535 scene).
+        let view_digits = self.view_digits();
+        let det_prec = view_digits + MINIBROT_DETECT_GUARD_DIGITS;
+        let cx = at_precision(&self.cx, det_prec);
+        let cy = at_precision(&self.cy, det_prec);
+        let scale = at_precision(&self.scale, det_prec);
+
         // Ball radii in view scales. Newton's reach grows with the radius so a
         // wide ball can still reach the atom it detected.
         let ladder = [rf, rf / 4.0, rf * 4.0, rf * 16.0, rf * 64.0];
-        let radii: Vec<DBig> = ladder.iter().map(|&f| &self.scale * dbig_f64(f)).collect();
+        let radii: Vec<DBig> = ladder.iter().map(|&f| &scale * dbig_f64(f)).collect();
         let reach = |f: f64| (250.0 * f).max(1000.0);
 
         // Fast path, the historical single shot: its orbit stops at the first
         // ball hit, where the full candidate scan may have to run to escape.
-        let first = detect_period_ball_at(&self.cx, &self.cy, max_iter as usize, &radii[0]);
+        let first = detect_period_ball_at(&cx, &cy, max_iter as usize, &radii[0]);
         if let Some(period) = first {
             if let Some(found) = self.refine_minibrot(period, reach(ladder[0]), want_size) {
                 return Ok(found);
@@ -1602,7 +1634,7 @@ impl MandelbrotNavigator {
         }
 
         let (ball_periods, atom_period) =
-            minibrot_period_candidates_at(&self.cx, &self.cy, max_iter as usize, &radii);
+            minibrot_period_candidates_at(&cx, &cy, max_iter as usize, &radii);
         let mut candidates: Vec<(usize, f64)> = Vec::new();
         let mut push = |period: Option<usize>, reach_scales: f64| {
             if let Some(p) = period {
@@ -1630,8 +1662,30 @@ impl MandelbrotNavigator {
         Err(reported)
     }
 
+    /// Decimal digits the current view resolves: `-log10(scale)`.
+    fn view_digits(&self) -> usize {
+        let d = dbig_neg_log10(&self.scale);
+        if d.is_finite() {
+            d.ceil().max(0.0) as usize
+        } else {
+            0
+        }
+    }
+
     /// Newton refinement of the view centre to a period-`period` nucleus within
-    /// `reach_scales` view scales, at the tolerance the working precision allows.
+    /// `reach_scales` view scales.
+    ///
+    /// Two stages, each at the precision its tolerance needs rather than at the
+    /// navigator's budget:
+    ///   1. converge to ~1e-20 of the view scale — enough to accept the nucleus
+    ///      and read its size estimate `Λ` from the acceptance pass;
+    ///   2. when the copy is smaller than the view (the usual case at depth,
+    ///      `|Λ| ~ scale²`), polish from there to ~1e-20 of `|Λ|`, a couple of
+    ///      quadratic steps.
+    /// The nucleus then stays exact on screen all the way down into the copy
+    /// ("imprécis dès qu'on zoom"); past `|Λ|` there is nothing left to centre,
+    /// and converging to the whole budget (the previous tolerance) paid its
+    /// digits on every step for an accuracy no view can observe.
     fn refine_minibrot(
         &self,
         period: usize,
@@ -1642,32 +1696,53 @@ impl MandelbrotNavigator {
         // Bound Newton's reach generously but not wildly, so a stray detection
         // cannot teleport the view arbitrarily far.
         let max_distance = &self.scale * dbig_f64(reach_scales);
-        // Converge/validate to (most of) the working precision, NOT to the
-        // current view scale. A nucleus only resolved to ~scale is accurate
-        // enough to *display* at the current zoom, but its absolute error
-        // stays fixed while the view keeps shrinking on every subsequent
-        // zoom step — so a few zooms later the error dwarfs the new scale
-        // and the view drifts off the minibrot ("imprécis dès qu'on zoom").
-        // `prec` (decimal digits, DBig is base 10) is the same precision
-        // `ensure_precision` already raised cx/cy/scale to, so Newton has
-        // that many digits of headroom to converge into; `margin_digits`
-        // reserves some of it for the rounding noise that accumulates over
-        // `period` squarings per Newton step.
-        let prec = self.working_precision();
-        let margin_digits = 24 + (period as f64).log10().ceil().max(0.0) as usize;
-        let tol_digits = prec.saturating_sub(margin_digits).max(16);
-        let tolerance =
-            DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
-        newton_nucleus_with_size(
-            &self.cx,
-            &self.cy,
+        // Rounding noise accumulates over `period` squarings per orbit pass;
+        // `margin` digits above the tolerance keep the exit test reading signal.
+        let margin =
+            MINIBROT_TOLERANCE_GUARD_DIGITS + (period as f64).log10().ceil().max(0.0) as usize;
+        let tol_view = self.view_digits() + MINIBROT_TOLERANCE_GUARD_DIGITS;
+        let (ncx, ncy, size) = newton_nucleus_with_size(
+            &at_precision(&self.cx, tol_view + margin),
+            &at_precision(&self.cy, tol_view + margin),
             period,
             NEWTON_STEPS,
             &max_distance,
-            &tolerance,
-            want_size,
-        )
-        .map(|(ncx, ncy, size)| (period, ncx, ncy, size))
+            &tolerance_digits(tol_view),
+            true,
+        )?;
+
+        // Stage 2: polish to the copy's own size. A degenerate estimate keeps
+        // the view-scale nucleus, which is still exact at the current zoom.
+        let size_digits = size.as_ref().map(|(sx, sy)| {
+            let (ax, ay) = (sx.clone().abs(), sy.clone().abs());
+            dbig_neg_log10(if ax >= ay { &ax } else { &ay })
+        });
+        let (ncx, ncy, size) = match size_digits {
+            Some(d)
+                if d.is_finite()
+                    && d.ceil() as usize + MINIBROT_TOLERANCE_GUARD_DIGITS > tol_view =>
+            {
+                let tol_size = d.ceil() as usize + MINIBROT_TOLERANCE_GUARD_DIGITS;
+                // The stage-1 nucleus is within ~10^-tol_view of the root, so a
+                // reach of a thousand times that is ample and keeps the ladder
+                // floor where the polish starts.
+                let polish_reach = tolerance_digits(tol_view.saturating_sub(3));
+                match newton_nucleus_with_size(
+                    &at_precision(&ncx, tol_size + margin),
+                    &at_precision(&ncy, tol_size + margin),
+                    period,
+                    NEWTON_STEPS,
+                    &polish_reach,
+                    &tolerance_digits(tol_size),
+                    true,
+                ) {
+                    Some(polished) => polished,
+                    None => (ncx, ncy, size),
+                }
+            }
+            _ => (ncx, ncy, size),
+        };
+        Some((period, ncx, ncy, if want_size { size } else { None }))
     }
 
     pub fn scale(&mut self, value: &str) {
@@ -2298,6 +2373,25 @@ pub(crate) fn detect_period_ball_at(
 
 /// `(period, nucleus x, nucleus y, size estimate Λ)` of a minibrot search hit.
 type LocatedMinibrot = (usize, DBig, DBig, Option<(DBig, DBig)>);
+
+/// Digits the minibrot period detection carries beyond the view's own: the
+/// ball test compares |z_n| to radius·|dz_n| with radius ~ scale, so rounding c
+/// at 10^-(view + guard) stays far below the radius over the whole orbit.
+const MINIBROT_DETECT_GUARD_DIGITS: usize = 32;
+/// Digits the minibrot nucleus is resolved below the scale it must hold at
+/// (the view, then the copy's size `|Λ|`), and the rounding margin on top of
+/// the tolerance.
+const MINIBROT_TOLERANCE_GUARD_DIGITS: usize = 20;
+
+/// `v` at exactly `digits` significant decimal digits (rounded down or widened).
+fn at_precision(v: &DBig, digits: usize) -> DBig {
+    v.clone().with_precision(digits.max(1)).value()
+}
+
+/// `1e-digits`.
+fn tolerance_digits(digits: usize) -> DBig {
+    DBig::from_str(&format!("1e-{digits}")).unwrap_or_else(|_| dbig_i(0))
+}
 
 /// Every period candidate one critical orbit at `(cx, cy)` offers, for the
 /// minibrot search's fallbacks.
@@ -3334,7 +3428,7 @@ mod tests {
     fn zoom_velocity_stays_outside_deep_precision_budget() {
         let mut nav = MandelbrotNavigator::new("-0.75", "0", "1e-100", 0.0);
         let scale_precision = nav.scale.precision();
-        assert!(scale_precision > 300, "test requires a deep scale budget");
+        assert!(scale_precision > 100, "test requires a deep scale budget");
         assert!(nav.vscale.precision() < scale_precision);
 
         nav.zoom(1.2);
@@ -3814,7 +3908,7 @@ mod tests {
         let mut nav = MandelbrotNavigator::new(cx, cy, "1e-60", 0.0);
         let n = 3000usize;
         let _ = nav.compute_reference_orbit_ptr(n as u32);
-        let baseline = uniform_orbit(cx, cy, nav.budget_prec, n);
+        let baseline = uniform_orbit(cx, cy, digits_for_bits(nav.budget_prec), n);
         let mut max_err = 0.0f32;
         for i in 0..n.min(nav.result.len()).min(baseline.len()) {
             let dx = (nav.result[i].zx - baseline[i].0).abs();
@@ -3825,6 +3919,70 @@ mod tests {
             max_err < 1e-3,
             "profile diverged from uniform precision: max_err={}",
             max_err
+        );
+    }
+
+    // Reference-orbit accuracy and cost at a deep scene (SCENE file: cx, cy, scale
+    // lines; BUDGET; ITER): the stored f32 orbit against a uniform orbit at
+    // TRUTH_DIGITS decimal digits.
+    #[test]
+    #[ignore]
+    fn reference_orbit_precision_check() {
+        let scene = std::fs::read_to_string(std::env::var("SCENE").unwrap()).unwrap();
+        let mut lines = scene.lines();
+        let (cx, cy, scale) = (
+            lines.next().unwrap().trim().to_string(),
+            lines.next().unwrap().trim().to_string(),
+            lines.next().unwrap().trim().to_string(),
+        );
+        let budget = std::env::var("BUDGET").unwrap_or_else(|_| "1e-30".into());
+        let n: usize = std::env::var("ITER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20000);
+        let truth_digits: usize = std::env::var("TRUTH_DIGITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+        let mut nav = MandelbrotNavigator::new(&cx, &cy, &scale, 0.0);
+        nav.set_precision_budget(&budget);
+        let t = std::time::Instant::now();
+        let _ = nav.compute_reference_orbit_ptr(n as u32);
+        let dt = t.elapsed().as_secs_f64();
+        let t = std::time::Instant::now();
+        let truth = uniform_orbit(&cx, &cy, truth_digits, n);
+        let dt_truth = t.elapsed().as_secs_f64();
+        let mut max_err = 0.0f32;
+        let mut first_bad = None;
+        for i in 0..n.min(nav.result.len()).min(truth.len()) {
+            let e = (nav.result[i].zx - truth[i].0)
+                .abs()
+                .max((nav.result[i].zy - truth[i].1).abs());
+            let mag = truth[i].0.abs().max(truth[i].1.abs()).max(1e-30);
+            let rel = e / mag.max(1e-3);
+            max_err = max_err.max(rel);
+            if first_bad.is_none() && rel > 1e-4 {
+                first_bad = Some(i);
+            }
+        }
+        // SHIFT: the same truth at c + SHIFT, i.e. how far the orbit is from a
+        // shadowing orbit the budget accepts anyway.
+        if let Ok(shift) = std::env::var("SHIFT") {
+            let sx = (DBig::from_str(&cx).unwrap() + DBig::from_str(&shift).unwrap()).to_string();
+            let shifted = uniform_orbit(&sx, &cy, truth_digits, n);
+            let first = (0..n.min(truth.len()).min(shifted.len())).find(|&i| {
+                let e = (shifted[i].0 - truth[i].0)
+                    .abs()
+                    .max((shifted[i].1 - truth[i].1).abs());
+                e / truth[i].0.abs().max(truth[i].1.abs()).max(1e-3) > 1e-4
+            });
+            println!("truth(c+{shift}) vs truth(c): first>1e-4 {:?}", first);
+        }
+        println!(
+            "budget {budget} ({} bits, cx digits {}): orbit {n} in {dt:.2}s (truth {dt_truth:.2}s) max rel err {max_err:.2e} first>1e-4 {:?}",
+            nav.budget_prec,
+            nav.reference_cx.precision(),
+            first_bad
         );
     }
 
@@ -5332,5 +5490,133 @@ mod minibrot_census {
         for (d, t) in tallies {
             println!("1e-{d}: {:?}", t);
         }
+    }
+
+    // Phase timings of the minibrot search at one deep walk (DEPTH, default 100),
+    // with the app's precision budget (BUDGET, default 1e-(DEPTH+5)).
+    #[test]
+    #[ignore]
+    fn minibrot_deep_timing() {
+        let depth: i32 = std::env::var("DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        let budget = std::env::var("BUDGET").unwrap_or_else(|_| format!("1e-{}", depth + 5));
+        let max_iter: usize = std::env::var("MAXITER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(20000);
+        let walk: usize = std::env::var("WALK")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let starts = [
+            ("-0.75", "0.1"),
+            ("-0.1", "0.8"),
+            ("0.28", "0.01"),
+            ("-1.25", "0.02"),
+        ];
+        let (sx, sy) = starts[walk % starts.len()];
+        let mut rng = Lcg(0x5eed + walk as u64);
+        let mut nav = MandelbrotNavigator::new(sx, sy, "1e-2", 0.0);
+        let mut exp = 2i32;
+        while exp < depth {
+            exp += 1;
+            let prec = nav.working_precision();
+            let scale = nav.scale.clone();
+            let mut best: Option<(usize, DBig, DBig)> = None;
+            for _ in 0..12 {
+                let ox = dbig_f64(rng.next() * 2.0 - 1.0);
+                let oy = dbig_f64(rng.next() * 2.0 - 1.0);
+                let px = raise_precision(&nav.cx + &ox * &scale, prec);
+                let py = raise_precision(&nav.cy + &oy * &scale, prec);
+                let n = escape_count(&px, &py, 4000);
+                if n < 4000 && best.as_ref().is_none_or(|b| n > b.0) {
+                    best = Some((n, px, py));
+                }
+            }
+            let Some((_, px, py)) = best else { break };
+            nav.origin(&px.to_string(), &py.to_string());
+            nav.scale(&format!("1e-{}", exp));
+        }
+        // FRAME=1: frame the minibrot found from the walk end, then time the
+        // search from that (much deeper) framed view — a real deep minibrot scene.
+        if std::env::var("FRAME").is_ok() {
+            nav.set_precision_budget(&budget);
+            let t = std::time::Instant::now();
+            let r = nav.find_minibrot_framed(max_iter as u32, 4.0, 0.5);
+            println!(
+                "pre-frame {:?} {:.2}s",
+                r.first(),
+                t.elapsed().as_secs_f64()
+            );
+            if r[0] == "ok" {
+                let sc = DBig::from_str(&r[4]).unwrap();
+                nav.origin(&r[1], &r[2]);
+                nav.scale(&r[4]);
+                exp = dbig_neg_log10(&sc).ceil() as i32;
+            }
+        }
+        if let Ok(out) = std::env::var("SCENE_OUT") {
+            std::fs::write(out, format!("{}\n{}\n{}\n", nav.cx, nav.cy, nav.scale)).unwrap();
+        }
+        let budget = std::env::var("BUDGET").unwrap_or_else(|_| format!("1e-{}", exp + 5));
+        nav.set_precision_budget(&budget);
+        println!(
+            "depth 1e-{exp} budget {budget} working_precision {} (digits) cx.prec {}",
+            nav.working_precision(),
+            nav.cx.precision()
+        );
+        let radius = &nav.scale * dbig_i(4);
+        let t = std::time::Instant::now();
+        let first = detect_period_ball_at(&nav.cx, &nav.cy, max_iter, &radius);
+        println!(
+            "ball detect: {:?} in {:.2}s",
+            first,
+            t.elapsed().as_secs_f64()
+        );
+        let radii: Vec<DBig> = [4.0, 1.0, 16.0, 64.0, 256.0]
+            .iter()
+            .map(|&f| &nav.scale * dbig_f64(f))
+            .collect();
+        let t = std::time::Instant::now();
+        let cands = minibrot_period_candidates_at(&nav.cx, &nav.cy, max_iter, &radii);
+        println!(
+            "candidates: {:?} in {:.2}s",
+            cands,
+            t.elapsed().as_secs_f64()
+        );
+        // Nucleus accuracy vs a full-precision Newton, in units of the copy size.
+        let plain = nav.find_minibrot(max_iter as u32, 4.0);
+        if plain[0] == "ok" {
+            let p: usize = plain[3].parse().unwrap();
+            let prec = nav.working_precision();
+            let tol = DBig::from_str(&format!("1e-{}", prec - 30)).unwrap();
+            if let Some((fx, fy)) =
+                newton_full(&nav.cx, &nav.cy, p, 80, &(&nav.scale * dbig_i(1000)), &tol)
+            {
+                let (nx, ny) = (
+                    DBig::from_str(&plain[1]).unwrap(),
+                    DBig::from_str(&plain[2]).unwrap(),
+                );
+                let (sx, sy) = minibrot_size_estimate(&fx, &fy, p, prec).unwrap();
+                let e = (&nx - &fx).abs() + (&ny - &fy).abs();
+                let l = sx.abs() + sy.abs();
+                println!(
+                    "nucleus error / |Λ| = 10^{:.1}, |Λ| = 10^{:.1}",
+                    -(dbig_neg_log10(&e) - dbig_neg_log10(&l)),
+                    -dbig_neg_log10(&l)
+                );
+            }
+        }
+        let t = std::time::Instant::now();
+        let res = nav.find_minibrot_framed(max_iter as u32, 4.0, 0.5);
+        println!(
+            "find_minibrot_framed: {:?} in {:.2}s",
+            res.iter()
+                .map(|s| s.chars().take(24).collect::<String>())
+                .collect::<Vec<_>>(),
+            t.elapsed().as_secs_f64()
+        );
     }
 }
