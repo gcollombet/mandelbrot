@@ -412,10 +412,12 @@ fn dbig_frexp(v: &DBig) -> (f64, i32) {
 pub struct MandelbrotStep {
     pub zx: f32,
     pub zy: f32,
-    // Padding to keep the 16-byte stride the GPU orbit buffer expects; the shader
-    // reads only zx/zy. These slots previously held the orbit derivative, then a
-    // double-float low word of z_n — both unused by the shaders, so inert padding.
-    pub pad0: f32,
+    // 1.0 when this entry is a reference restart: the previous value passed
+    // |Z|² > 1e6 and the orbit went back to 0 instead of Z² + c. The step into
+    // it is not a Mandelbrot step, so the BLA table must never span it (see
+    // compute_bla_reference_inner). 0.0 otherwise. The shader reads only zx/zy.
+    pub restart: f32,
+    // Padding to keep the 16-byte stride the GPU orbit buffer expects.
     pub pad1: f32,
 }
 
@@ -1271,7 +1273,7 @@ impl MandelbrotNavigator {
             self.result.push(MandelbrotStep {
                 zx: dbig_to_f32(&zx),
                 zy: dbig_to_f32(&zy),
-                pad0: 0.0,
+                restart: 0.0,
                 pad1: 0.0,
             });
         }
@@ -1285,7 +1287,8 @@ impl MandelbrotNavigator {
             let p_n = digits_for_bits(profile_precision(budget, g_bits));
             let magnitude_sq = &zx * &zx + &zy * &zy;
 
-            if magnitude_sq > threshold {
+            let restart = magnitude_sq > threshold;
+            if restart {
                 // Reference rebase: the orbit (and its derivative) restart near zero, so the
                 // next steps become sensitive again — G drops to 0 and precision rises back.
                 zx = DBig::try_from(0).unwrap();
@@ -1311,7 +1314,7 @@ impl MandelbrotNavigator {
             self.result.push(MandelbrotStep {
                 zx: sx,
                 zy: sy,
-                pad0: 0.0,
+                restart: if restart { 1.0 } else { 0.0 },
                 pad1: 0.0,
             });
             // Carry z_{n+1}'s f32 for the next iteration's derivative step.
@@ -1375,9 +1378,19 @@ impl MandelbrotNavigator {
         let mut previous_level: Vec<BlaF64> = Vec::with_capacity(orbit_len - 1);
         for start in 1..orbit_len {
             let z = self.result[start];
-            let zx = z.zx as f64;
-            let zy = z.zy as f64;
-            previous_level.push(bla_seed(zx, zy, epsilon));
+            let mut seed = bla_seed(z.zx as f64, z.zy as f64, epsilon);
+            // The step into a reference restart is Z → 0, not Z² + c: a block
+            // spanning it lands the pixel next to 0 although it escaped on the
+            // way (|Z|² > 1e6 there), so its escape is skipped and the pixel
+            // restarts. A dead seed (α = 0) kills every block that contains it.
+            if self
+                .result
+                .get(start + 1)
+                .is_some_and(|next| next.restart != 0.0)
+            {
+                seed.alpha = 0.0;
+            }
+            previous_level.push(seed);
         }
 
         let mut skip = 1usize;
@@ -5182,6 +5195,134 @@ mod gpu_bla_mirror {
             bad_bla,
             bad_exact,
             w * h
+        );
+    }
+
+    /// Per-pixel DBig truth: escape iteration of c = (cx, cy) + offset for
+    /// |z|² > mu, iterated at `prec` bits from the decimal centre.
+    fn escape_truth_dbig(
+        cx: &DBig,
+        cy: &DBig,
+        off: (f64, f64),
+        max_iter: usize,
+        mu: f64,
+        prec: usize,
+    ) -> usize {
+        let px = raise_precision(cx + dbig_f64(off.0), prec);
+        let py = raise_precision(cy + dbig_f64(off.1), prec);
+        let two = dbig_i(2);
+        let (mut zx, mut zy) = (dbig_i(0), dbig_i(0));
+        for i in 1..=max_iter {
+            let nx = (&zx * &zx - &zy * &zy + &px).with_precision(prec).value();
+            let ny = (&two * &zx * &zy + &py).with_precision(prec).value();
+            zx = nx;
+            zy = ny;
+            let (fx, fy) = (dbig_to_f64(&zx), dbig_to_f64(&zy));
+            if fx * fx + fy * fy > mu {
+                return i;
+            }
+        }
+        max_iter
+    }
+
+    /// Regression (the AGENTS.md example: -0.75 + 0.1i, scale 1e-11, angle
+    /// 0.4, ε 1e-6, the viewer's default bailout mu = 1e6). The reference
+    /// escapes at 36 and restarts from 0 (|Z|² > 1e6); a BLA block spanning the
+    /// step into that restart landed every pixel next to 0 instead of letting
+    /// it escape, so the BLA still drew a false interior where exact is flat.
+    /// Exact, BLA and Padé mirrors must all match a per-pixel DBig truth.
+    /// SCENE_* env vars probe another view (e.g. SCENE_MU=4, SCENE_SCALE=…).
+    #[test]
+    fn bla_never_skips_the_reference_restart() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let (cx, cy, scale) = (
+            env("SCENE_CX", "-0.75"),
+            env("SCENE_CY", "0.1"),
+            env("SCENE_SCALE", "1e-11"),
+        );
+        let angle: f64 = env("SCENE_ANGLE", "0.4").parse().unwrap();
+        let max_iter: u32 = env("SCENE_ITER", "400").parse().unwrap();
+        let mu: f32 = env("SCENE_MU", "1e6").parse().unwrap();
+        let eps: f32 = env("SCENE_EPS", "1e-6").parse().unwrap();
+        let mut nav = MandelbrotNavigator::new(&cx, &cy, &scale, angle);
+        nav.use_bla();
+        nav.set_bla_epsilon(eps);
+        let _ = nav.compute_reference_orbit_ptr(max_iter);
+        let _ = nav.compute_bla_reference_ptr(max_iter);
+        let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
+        let steps: Vec<BlaStep> = nav.bla_result.to_vec();
+        let levels: Vec<BlaLevel> = nav.bla_levels.to_vec();
+        // Structural half: every block whose span ends on or crosses a restart
+        // entry is dead (a block at `start` of `skip` covers the steps into
+        // start+1 ..= start+skip).
+        let restarts: Vec<usize> = (1..nav.result.len())
+            .filter(|&i| nav.result[i].restart != 0.0)
+            .collect();
+        for level in levels.iter() {
+            let skip = level.skip as usize;
+            for slot in 0..level.count as usize {
+                let start = 1 + slot * skip;
+                if restarts.iter().any(|&r| r > start && r <= start + skip) {
+                    let b = &steps[level.offset as usize + slot];
+                    assert_eq!(
+                        b.radius_alpha, 0.0,
+                        "live block of skip {} at {} spans a restart",
+                        skip, start
+                    );
+                }
+            }
+        }
+        let scale_f = dbig_to_f64(&nav.scale);
+        let (cxd, cyd) = (DBig::from_str(&cx).unwrap(), DBig::from_str(&cy).unwrap());
+        let (w, h) = (16usize, 9usize);
+        let aspect = 1024.0 / 576.0;
+        let (sa, ca) = angle.sin_cos();
+        let mut bad = [0usize; 3];
+        for gy in 0..h {
+            let mut row = [String::new(), String::new(), String::new()];
+            for gx in 0..w {
+                // pixel_to_complex's mapping at pixel centres.
+                let nx = ((gx as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+                let ny = 1.0 - ((gy as f64 + 0.5) / h as f64) * 2.0;
+                let (xr, yr) = (nx * aspect, ny);
+                let off = ((ca * xr - sa * yr) * scale_f, (sa * xr + ca * yr) * scale_f);
+                let dc = (off.0 as f32, off.1 as f32);
+                let truth = escape_truth_dbig(&cxd, &cyd, off, max_iter as usize, mu as f64, 256);
+                let modes = [
+                    ApproximationMode::Perturbation,
+                    ApproximationMode::BivariateLinear,
+                    ApproximationMode::Pade,
+                ];
+                for (k, mode) in modes.iter().enumerate() {
+                    let it = run_pixel(
+                        &orbit,
+                        &steps,
+                        &levels,
+                        dc,
+                        max_iter as usize,
+                        mu,
+                        *mode,
+                        eps,
+                    )
+                    .0;
+                    bad[k] += (it != truth) as usize;
+                    row[k].push(if it == truth { '.' } else { 'x' });
+                }
+            }
+            println!("{}   {}   {}", row[0], row[1], row[2]);
+        }
+        println!(
+            "mismatch vs DBig truth ({} px, restarts {:?}): exact {} bla {} pade {}",
+            w * h,
+            &restarts[..restarts.len().min(4)],
+            bad[0],
+            bad[1],
+            bad[2]
+        );
+        assert_eq!(
+            bad,
+            [0, 0, 0],
+            "exact / BLA / Padé escape iterations vs DBig truth"
         );
     }
 
