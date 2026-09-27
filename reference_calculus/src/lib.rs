@@ -4565,7 +4565,10 @@ mod gpu_bla_mirror {
             if z2 > mu {
                 return (i, turns);
             }
-            if z2 < dz.0 * dz.0 + dz.1 * dz.1 || ref_i == global_max {
+            // Shader's REF_RESTART_REBASE_MAG2: leave the reference before it
+            // restarts from 0 (|Z|² > 1e6).
+            if z2 < dz.0 * dz.0 + dz.1 * dz.1 || ref_i == global_max || z.0 * z.0 + z.1 * z.1 > 5e5
+            {
                 dz = full;
                 ref_i = 0;
             }
@@ -5226,11 +5229,13 @@ mod gpu_bla_mirror {
     }
 
     /// Regression (the AGENTS.md example: -0.75 + 0.1i, scale 1e-11, angle
-    /// 0.4, ε 1e-6, the viewer's default bailout mu = 1e6). The reference
+    /// 0.4, ε 1e-6, bailouts mu = 1e6 and 1e10). The reference
     /// escapes at 36 and restarts from 0 (|Z|² > 1e6); a BLA block spanning the
     /// step into that restart landed every pixel next to 0 instead of letting
     /// it escape, so the BLA still drew a false interior where exact is flat.
-    /// Exact, BLA and Padé mirrors must all match a per-pixel DBig truth.
+    /// Above mu = 1e6 exact stepped into the restart as well, until the
+    /// shader rebased before it (REF_RESTART_REBASE_MAG2). Exact, BLA and
+    /// Padé mirrors must all match a per-pixel DBig truth.
     /// SCENE_* env vars probe another view (e.g. SCENE_MU=4, SCENE_SCALE=…).
     #[test]
     fn bla_never_skips_the_reference_restart() {
@@ -5242,7 +5247,12 @@ mod gpu_bla_mirror {
         );
         let angle: f64 = env("SCENE_ANGLE", "0.4").parse().unwrap();
         let max_iter: u32 = env("SCENE_ITER", "400").parse().unwrap();
-        let mu: f32 = env("SCENE_MU", "1e6").parse().unwrap();
+        // 1e6: the viewer's default bailout, where BLA skipped the restart;
+        // 1e10: above the restart threshold, where exact stepped into it too.
+        let mus: Vec<f32> = env("SCENE_MU", "1e6,1e10")
+            .split(',')
+            .map(|m| m.parse().unwrap())
+            .collect();
         let eps: f32 = env("SCENE_EPS", "1e-6").parse().unwrap();
         let mut nav = MandelbrotNavigator::new(&cx, &cy, &scale, angle);
         nav.use_bla();
@@ -5277,53 +5287,58 @@ mod gpu_bla_mirror {
         let (w, h) = (16usize, 9usize);
         let aspect = 1024.0 / 576.0;
         let (sa, ca) = angle.sin_cos();
-        let mut bad = [0usize; 3];
-        for gy in 0..h {
-            let mut row = [String::new(), String::new(), String::new()];
-            for gx in 0..w {
-                // pixel_to_complex's mapping at pixel centres.
-                let nx = ((gx as f64 + 0.5) / w as f64) * 2.0 - 1.0;
-                let ny = 1.0 - ((gy as f64 + 0.5) / h as f64) * 2.0;
-                let (xr, yr) = (nx * aspect, ny);
-                let off = ((ca * xr - sa * yr) * scale_f, (sa * xr + ca * yr) * scale_f);
-                let dc = (off.0 as f32, off.1 as f32);
-                let truth = escape_truth_dbig(&cxd, &cyd, off, max_iter as usize, mu as f64, 256);
-                let modes = [
-                    ApproximationMode::Perturbation,
-                    ApproximationMode::BivariateLinear,
-                    ApproximationMode::Pade,
-                ];
-                for (k, mode) in modes.iter().enumerate() {
-                    let it = run_pixel(
-                        &orbit,
-                        &steps,
-                        &levels,
-                        dc,
-                        max_iter as usize,
-                        mu,
-                        *mode,
-                        eps,
-                    )
-                    .0;
-                    bad[k] += (it != truth) as usize;
-                    row[k].push(if it == truth { '.' } else { 'x' });
+        for mu in mus {
+            let mut bad = [0usize; 3];
+            for gy in 0..h {
+                let mut row = [String::new(), String::new(), String::new()];
+                for gx in 0..w {
+                    // pixel_to_complex's mapping at pixel centres.
+                    let nx = ((gx as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+                    let ny = 1.0 - ((gy as f64 + 0.5) / h as f64) * 2.0;
+                    let (xr, yr) = (nx * aspect, ny);
+                    let off = ((ca * xr - sa * yr) * scale_f, (sa * xr + ca * yr) * scale_f);
+                    let dc = (off.0 as f32, off.1 as f32);
+                    let truth =
+                        escape_truth_dbig(&cxd, &cyd, off, max_iter as usize, mu as f64, 256);
+                    let modes = [
+                        ApproximationMode::Perturbation,
+                        ApproximationMode::BivariateLinear,
+                        ApproximationMode::Pade,
+                    ];
+                    for (k, mode) in modes.iter().enumerate() {
+                        let it = run_pixel(
+                            &orbit,
+                            &steps,
+                            &levels,
+                            dc,
+                            max_iter as usize,
+                            mu,
+                            *mode,
+                            eps,
+                        )
+                        .0;
+                        bad[k] += (it != truth) as usize;
+                        row[k].push(if it == truth { '.' } else { 'x' });
+                    }
                 }
+                println!("{}   {}   {}", row[0], row[1], row[2]);
             }
-            println!("{}   {}   {}", row[0], row[1], row[2]);
+            println!(
+                "mu={:e} mismatch vs DBig truth ({} px, restarts {:?}): exact {} bla {} pade {}",
+                mu,
+                w * h,
+                &restarts[..restarts.len().min(4)],
+                bad[0],
+                bad[1],
+                bad[2]
+            );
+            assert_eq!(
+                bad,
+                [0, 0, 0],
+                "mu={:e}: exact / BLA / Padé escape iterations vs DBig truth",
+                mu
+            );
         }
-        println!(
-            "mismatch vs DBig truth ({} px, restarts {:?}): exact {} bla {} pade {}",
-            w * h,
-            &restarts[..restarts.len().min(4)],
-            bad[0],
-            bad[1],
-            bad[2]
-        );
-        assert_eq!(
-            bad,
-            [0, 0, 0],
-            "exact / BLA / Padé escape iterations vs DBig truth"
-        );
     }
 
     /// Regression guard (seconds): at the default ε the BLA must be as close

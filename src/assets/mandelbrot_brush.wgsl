@@ -554,6 +554,14 @@ fn analytic_terminal_geometry(
   return vec3<f32>(gradient, laplacian);
 }
 
+// The reference orbit restarts from 0 once |Z|² > 1e6 (lib.rs,
+// compute_reference_orbit_inner), so the entry after such a Z is 0, not
+// Z² + c. A pixel still below a bailout mu > 1e6 would step into that
+// restart and lose Z² + c; it rebases onto the orbit start instead, which is
+// exact at any Z. Below 1e6 so the f32-stored Z cannot round under the
+// reference's DBig test; an early rebase costs nothing but a few steps.
+const REF_RESTART_REBASE_MAG2: f32 = 5e5;
+
 fn getOrbit(index: i32) -> vec2<f32> {
   return vec2<f32>(
     mandelbrotOrbitPointSuite[index].zx,
@@ -1234,8 +1242,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     }
 
     // Rebase onto the reference start when the perturbation overtakes the
-    // orbit or the reference runs out.
-    if (dot_z < dot(dz, dz) || ref_i == globalMaxIterI) {
+    // orbit, the reference runs out or is about to restart.
+    if (dot_z < dot(dz, dz) || ref_i == globalMaxIterI
+        || dot(refZ, refZ) > REF_RESTART_REBASE_MAG2) {
       dz = z;
       ref_i = 0;
       refZ = getOrbit(0);
@@ -1395,7 +1404,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       der_renormalize(&derM, &derS, &derSLo, &derInvScale);
     }
 
-    if (dot_z < fe_mag2_f32(dz) || ref_i == globalMaxIterI) {
+    if (dot_z < fe_mag2_f32(dz) || ref_i == globalMaxIterI
+        || dot(refZ, refZ) > REF_RESTART_REBASE_MAG2) {
       dz = fe_from_vec(z, 0);
       ref_i = 0;
       refZ = getOrbit(0);
