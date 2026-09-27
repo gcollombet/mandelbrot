@@ -8,6 +8,7 @@ const resolve = read('../../src/assets/resolve.wgsl')
 const color = read('../../src/assets/color.wgsl')
 const reseed = read('../../src/assets/aa_reseed.wgsl')
 const panClear = read('../../src/assets/raw_pan_clear.wgsl')
+const framePlan = read('../../src/framePlan.ts')
 
 describe('toroidal raw pan (origin shift instead of reprojection copy)', () => {
   it('routes every raw access of the iteration kernel through the toroidal origin', () => {
@@ -32,11 +33,11 @@ describe('toroidal raw pan (origin shift instead of reprojection copy)', () => {
     expect(panClear).toContain('@group(0) @binding(1) var raw: texture_storage_2d_array<r32float, write>;')
     expect(panClear).toContain('let startX = select(dims.x - widthX, 0, shift.x > 0);')
     expect(panClear).toContain('let startY = select(dims.y - widthY, 0, shift.y > 0);')
-    expect(engine).toContain('this.rawOriginX = (((this.rawOriginX - roundedShiftTexX) % n) + n) % n')
+    expect(framePlan).toContain('x: (((origin.x - shift.x) % n) + n) % n,')
     expect(engine).toContain('Math.ceil(stripX / 16) + Math.ceil(stripY / 16)')
     // A clear still rewrites B wholesale and swaps it in at origin 0.
-    const clearBranch = engine.indexOf('if (this.clearHistoryNextFrame) {\n                // Clear frames rewrite B wholesale')
-    const panBranch = engine.indexOf('} else if (utilityNeeded) {')
+    const clearBranch = engine.indexOf("if (plan.utility === 'clear') {\n                // Clear frames rewrite B wholesale")
+    const panBranch = engine.indexOf("} else if (plan.utility === 'pan') {")
     expect(clearBranch).toBeGreaterThan(-1)
     expect(panBranch).toBeGreaterThan(clearBranch)
     expect(engine.slice(clearBranch, panBranch)).toContain('this.swapRawTextures()')

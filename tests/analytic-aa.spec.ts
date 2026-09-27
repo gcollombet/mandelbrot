@@ -58,7 +58,7 @@ async function waitForConverged(page: Page, timeout = 60_000) {
         && engine.unfinishedPixelCount <= 10
         && !engine.isRendering
         && !engine.needRender
-        && !engine.clearHistoryNextFrame;
+        && !engine.requests.clearPending;
     });
     stableSamples = idle ? stableSamples + 1 : 0;
     await page.waitForTimeout(250);
@@ -87,7 +87,7 @@ async function runAaAccumulation(page: Page, analytic: boolean, timeout = 150_00
         unfinished: engine.unfinishedPixelCount,
         remainingPx: engine.unfinishedPixelCount,
         needRender: engine.needRender,
-        clearPending: engine.clearHistoryNextFrame,
+        clearPending: engine.requests.clearPending,
         sampleIndex: engine.aaSampleIndex,
       };
     });
@@ -189,7 +189,7 @@ test("16x analytic AA matches brute within the Taylor bound and only re-iterates
   // accumulations bake the AA target from the exact same converged values.
   await page.evaluate(() => {
     const engine = (window as any).__mandelbrotEngine;
-    engine.clearHistoryNextFrame = true;
+    engine.requests.requestClear('external');
     engine.needRender = true;
   });
   await page.waitForTimeout(500);

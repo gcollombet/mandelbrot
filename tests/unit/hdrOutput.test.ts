@@ -37,13 +37,13 @@ describe('HDR presentation and capture separation', () => {
   })
   it('renders SDR exports in SDR even with HDR requested, then restores HDR presentation', async () => {
     const engine = fixture(); await engine.setHdrDisplay(true)
-    engine.videoExportActive = true; engine.hdrExport = false; engine.configureOutput()
+    engine.session = { hdr: false, layout: { kind: 'direct' } }; engine.configureOutput()
     expect(engine.outputDiagnostics.format).toBe('bgra8unorm'); expect(engine.pipelineColor).toBe('SDR')
-    engine.videoExportActive = false; engine.configureOutput()
+    engine.session = null; engine.configureOutput()
     expect(engine.pipelineColor).toBe('HDR'); expect(engine.outputDiagnostics.toneMapping).toBe('extended')
   })
   it('can render a float HDR export without an HDR display', () => {
-    const engine = fixture(); engine.videoExportActive = true; engine.hdrExport = true; engine.configureOutput()
+    const engine = fixture(); engine.session = { hdr: true, layout: { kind: 'direct' } }; engine.configureOutput()
     expect(engine.pipelineColor).toBe('HDR')
     expect(engine.outputDiagnostics).toMatchObject({format:'rgba16float',toneMapping:'standard',hdrRequested:false})
   })

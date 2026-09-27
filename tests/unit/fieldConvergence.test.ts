@@ -8,9 +8,8 @@ import {
 /** A fully converged, idle field: every gate open. */
 function converged(overrides: Partial<FieldConvergenceState> = {}): FieldConvergenceState {
     return {
-        clearHistoryNextFrame: false,
-        needFreezeSnapshot: false,
-        needMergeSnapshot: false,
+        clearPending: false,
+        snapshotPending: false,
         zoomActive: false,
         orbitIncomplete: false,
         unfinishedPixelCount: 0,
@@ -37,9 +36,8 @@ describe('isFieldConverged', () => {
     })
 
     it('rejects unconsumed swap effects', () => {
-        expect(isFieldConverged(converged({clearHistoryNextFrame: true}))).toBe(false)
-        expect(isFieldConverged(converged({needFreezeSnapshot: true}))).toBe(false)
-        expect(isFieldConverged(converged({needMergeSnapshot: true}))).toBe(false)
+        expect(isFieldConverged(converged({clearPending: true}))).toBe(false)
+        expect(isFieldConverged(converged({snapshotPending: true}))).toBe(false)
     })
 
     it('rejects an incomplete reference orbit', () => {
@@ -72,9 +70,8 @@ describe('isFieldConverged', () => {
             ['a readback in flight', {pendingCounterReadback: true}],
             ['an unknown pixel count', {unfinishedPixelCount: -1}],
             ['too many unfinished pixels', {unfinishedPixelCount: 500}],
-            ['an armed history clear', {clearHistoryNextFrame: true}],
-            ['an owed freeze snapshot', {needFreezeSnapshot: true}],
-            ['an owed merge', {needMergeSnapshot: true}],
+            ['an armed history clear', {clearPending: true}],
+            ['an owed frozen refresh', {snapshotPending: true}],
             ['an incomplete orbit', {orbitIncomplete: true}],
         ])('still rejects %s', (_label, overrides) => {
             const state = converged({zoomActive: true, ...overrides})
@@ -85,15 +82,14 @@ describe('isFieldConverged', () => {
         // term is ever added to one and not the other, this fails.
         it('differs from the real-time gate on the zoom term alone', () => {
             const states: FieldConvergenceState[] = []
-            for (let mask = 0; mask < 128; mask++) {
+            for (let mask = 0; mask < 64; mask++) {
                 states.push({
-                    clearHistoryNextFrame: !!(mask & 1),
-                    needFreezeSnapshot: !!(mask & 2),
-                    needMergeSnapshot: !!(mask & 4),
-                    zoomActive: !!(mask & 8),
-                    orbitIncomplete: !!(mask & 16),
-                    unfinishedPixelCount: mask & 32 ? -1 : 0,
-                    pendingCounterReadback: !!(mask & 64),
+                    clearPending: !!(mask & 1),
+                    snapshotPending: !!(mask & 2),
+                    zoomActive: !!(mask & 4),
+                    orbitIncomplete: !!(mask & 8),
+                    unfinishedPixelCount: mask & 16 ? -1 : 0,
+                    pendingCounterReadback: !!(mask & 32),
                 })
             }
             for (const state of states) {

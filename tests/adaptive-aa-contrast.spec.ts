@@ -39,7 +39,7 @@ async function waitForConverged(page: Page, timeout = 60_000) {
         && engine.unfinishedPixelCount <= 10
         && !engine.isRendering
         && !engine.needRender
-        && !engine.clearHistoryNextFrame;
+        && !engine.requests.clearPending;
     });
     stableSamples = idle ? stableSamples + 1 : 0;
     await page.waitForTimeout(250);

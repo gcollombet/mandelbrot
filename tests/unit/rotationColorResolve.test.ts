@@ -64,14 +64,14 @@ describe('settled rotation color resolve', () => {
     expect(engine).toContain('&& !this.rotationColorResolveChangedThisUpdate')
     expect(engine).toContain('&& (fullyConverged || hasFreshZero)')
     expect(engine).toContain('&& !renderOptions.activateAnimate')
-    expect(engine).toContain('&& !this.videoExportActive')
+    expect(engine).toContain('&& !this.exporting')
 
     expect(engine).toContain('} else if (!aaShowAccum && !rotationShowCache) {')
   })
 
   it('does not refill the counter ring after a fresh settled zero', () => {
     expect(engine).toContain('const shouldDispatchCounter = !hasFreshZeroCounter && (')
-    expect(engine).toContain('const hasFreshZeroCounter = !this.clearHistoryNextFrame')
+    expect(engine).toContain('const hasFreshZeroCounter = !plan.clear')
     expect(engine).toContain('&& !hasTranslationShift')
     expect(engine).toContain('&& !this.aaReseedPending')
     expect(engine).toContain('this.counterSampleFrame,')

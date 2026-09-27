@@ -1,61 +1,109 @@
-import { readFileSync } from 'node:fs'
-import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { estimateGpuWorkingSetBytes, fitSurfaceToGpuBudget, formatGpuBytes } from '../../src/gpuCompatibility'
-import { t } from '../../src/i18n'
+import { Engine } from '../../src/Engine'
+import { advanceTile, createExportSession, currentTile, resolveSurface, restartKeyframe, validateExportSettings, type TiledLayout } from '../../src/exportSession'
+vi.mock('mandelbrot', () => ({MandelbrotNavigator: class {}}))
 
-// Execute the production session/resize policy with an allocation stub, without
-// importing the browser engine's WASM, workers or WebGPU shaders into Node.
-const source = readFileSync(new URL('../../src/Engine.ts', import.meta.url), 'utf8')
-const start = source.indexOf('    async beginVideoExportSession(settings:')
-const end = source.indexOf('    /** Align a row stride', start)
-const compiled = ts.transpileModule(`class Session { ${source.slice(start, end)} }`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-}).outputText
-const Session = new Function('Engine', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', 't', `${compiled}; return Session`)(
-    { workingTextureSideFor: (w: number, h: number) => Math.ceil(Math.hypot(w, h)) }, estimateGpuWorkingSetBytes, formatGpuBytes, t,
-)
-const memoryStart = source.lastIndexOf('        const memoryOptions = {')
-const memoryEnd = source.indexOf('        this.canvas.width = this.width', memoryStart)
-const resizeMemory = new Function('fitSurfaceToGpuBudget', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', 'widthCSS', 'heightCSS', 't', source.slice(memoryStart, memoryEnd))
 const settings = { outputWidth: 3840, outputHeight: 2160, supersample: 1, magnificationThreshold: 2, batchTargetFps: 1 }
+const device = { maxTextureDimension: 8192, gpuMemoryBudgetBytes: 256 * 1024 * 1024, orbitMetrics: false, orbitTrap: false }
+
+/** Just the engine state beginVideoExportSession reads and writes. */
 function engine() {
     return {
-        gpuMemoryBudgetBytes: 256 * 1024 * 1024, width: 3840, height: 2160,
-        videoExportActive: false, orbitMetricsEnabled: false, orbitTrapEnabled: false,
+        session: null as unknown,
+        gpuMemoryBudgetBytes: device.gpuMemoryBudgetBytes, orbitMetricsEnabled: false, orbitTrapEnabled: false,
+        zoomMagnificationThreshold: 16, dprMultiplier: 1, targetFps: 60, aaAuto: true, _drawFn: null,
         device: { limits: { maxTextureDimension2D: 8192 }, pushErrorScope: vi.fn(), popErrorScope: vi.fn(async () => null) },
         stopRenderLoop: vi.fn(), endVideoExportSession: vi.fn(), resize: vi.fn(),
     }
 }
+const begin = (e: ReturnType<typeof engine>, s = settings) => Engine.prototype.beginVideoExportSession.call(e, s)
+
 afterEach(() => vi.restoreAllMocks())
 describe('video export memory policy', () => {
+    it('flags a request above the conservative estimate without refusing it', () => {
+        const result = validateExportSettings(settings, device)
+        expect(result.side).toBe(Math.ceil(Math.hypot(3840, 2160)))
+        expect(result.overBudget).toBe(true)
+    })
+
+    it('refuses a degenerate threshold, an oversized square and a mismatched tile plan', () => {
+        expect(() => validateExportSettings({ ...settings, magnificationThreshold: 1 }, device)).toThrow()
+        expect(() => validateExportSettings(settings, { ...device, maxTextureDimension: 4096 })).toThrow("beyond this device's limit")
+        const plan = { neutralSide: 1, tiles: [], estimate: { totalBytes: 0 } } as any
+        expect(() => validateExportSettings({ ...settings, tiledKeyframePlan: plan }, device)).toThrow()
+        expect(() => validateExportSettings({ ...settings, tiledKeyframePlan: plan, aaSamplesPerFrame: 4 }, device)).toThrow()
+    })
+
     it('starts above the conservative estimate and attempts the requested allocation', async () => {
         const e = engine(), warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
-        await Session.prototype.beginVideoExportSession.call(e, settings)
-        expect(e.videoExportActive).toBe(true)
+        await begin(e)
+        expect(e.session).toMatchObject({ surface: { width: 3840, height: 2160 }, layout: { kind: 'direct' } })
+        expect(e.stopRenderLoop).toHaveBeenCalledOnce()
         expect(e.resize).toHaveBeenCalledOnce()
         expect(warning).toHaveBeenCalledWith(expect.stringContaining('Export autorisé'))
         expect(e.device.popErrorScope).toHaveBeenCalledTimes(2)
     })
+
     it('still refuses a texture exceeding the real device limit before allocation', async () => {
         const e = engine(); e.device.limits.maxTextureDimension2D = 4096
-        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow("beyond this device's limit")
+        await expect(begin(e)).rejects.toThrow("beyond this device's limit")
+        expect(e.session).toBeNull()
         expect(e.resize).not.toHaveBeenCalled()
     })
+
     it('reports actual GPU allocation failures and ends the session', async () => {
         const e = engine(); vi.spyOn(console, 'warn').mockImplementation(() => {})
         e.device.popErrorScope.mockResolvedValueOnce(null).mockResolvedValueOnce({ message: 'OOM' } as any)
-        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow('insufficient GPU memory')
+        await expect(begin(e)).rejects.toThrow('insufficient GPU memory')
         expect(e.endVideoExportSession).toHaveBeenCalledOnce()
     })
+
     it('keeps export dimensions but still reduces the interactive surface', () => {
-        vi.spyOn(console, 'warn').mockImplementation(() => {})
-        const e = { ...engine(), videoExportActive: true, forcedSurfaceSize: { width: 3840, height: 2160 } }
-        resizeMemory.call(e, fitSurfaceToGpuBudget, estimateGpuWorkingSetBytes, formatGpuBytes, 3840, 2160)
-        expect([e.width, e.height]).toEqual([3840, 2160])
-        e.videoExportActive = false; e.forcedSurfaceSize = null
-        resizeMemory.call(e, fitSurfaceToGpuBudget, estimateGpuWorkingSetBytes, formatGpuBytes, 3840, 2160)
-        expect(e.width).toBeLessThan(3840)
-        expect(e.height).toBeLessThan(2160)
+        const input = {
+            cssWidth: 3840, cssHeight: 2160, devicePixelRatio: 1, maxTextureDimension: 8192,
+            gpuMemoryBudgetBytes: device.gpuMemoryBudgetBytes, orbitMetrics: false, orbitTrap: false,
+        }
+        const pinned = resolveSurface({ ...input, cssWidth: 100, cssHeight: 100, session: { surface: { width: 3840, height: 2160 } } })
+        expect([pinned.width, pinned.height, pinned.reduced]).toEqual([3840, 2160, false])
+        const interactive = resolveSurface({ ...input, session: null })
+        expect(interactive.reduced).toBe(true)
+        expect(interactive.width).toBeLessThan(3840)
+        expect(interactive.height).toBeLessThan(2160)
+    })
+})
+
+describe('export session value', () => {
+    const restore = { zoomMagnificationThreshold: 16, dprMultiplier: 1, targetFps: 60, aaAuto: true }
+
+    it('is direct without a plan, tiled with one', () => {
+        expect(createExportSession(settings, restore, null).layout).toEqual({ kind: 'direct' })
+        const plan = { tiles: [{}, {}], tileSide: 512 } as any
+        const tiled = createExportSession({ ...settings, tiledKeyframePlan: plan, angleRange: { from: 0, to: 1 } }, restore, null)
+        expect(tiled.layout).toMatchObject({ kind: 'tiled', tileIndex: 0, complete: false, rotating: true })
+        const still = createExportSession({ ...settings, tiledKeyframePlan: plan, angleRange: { from: 1, to: 1 } }, restore, null)
+        expect(still.layout).toMatchObject({ rotating: false })
+    })
+
+    it('pins the supersampled surface and normalises the AA budget', () => {
+        const session = createExportSession({ ...settings, supersample: 2, aaSamplesPerFrame: 3.6, hdr: true }, restore, null)
+        expect(session.surface).toEqual({ width: 7680, height: 4320 })
+        expect(session.aaSamples).toBe(4)
+        expect(session.hdr).toBe(true)
+    })
+})
+
+describe('tiled keyframe progression', () => {
+    it('walks every tile once, completes, then restarts from the first', () => {
+        const tiles = [{ index: 0 }, { index: 1 }, { index: 2 }] as any[]
+        const layout: TiledLayout = { kind: 'tiled', plan: { tiles } as any, tileIndex: 0, complete: false, rotating: false }
+        const seen = []
+        for (;;) {
+            seen.push(currentTile(layout))
+            if (advanceTile(layout) === 'keyframeComplete') break
+        }
+        expect(seen).toEqual(tiles)
+        expect(currentTile(layout)).toBeNull()
+        restartKeyframe(layout)
+        expect(currentTile(layout)).toBe(tiles[0])
     })
 })

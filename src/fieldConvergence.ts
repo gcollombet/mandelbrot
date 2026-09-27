@@ -20,11 +20,9 @@ export const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 
 export type FieldConvergenceState = {
   /** A history clear is armed for the next frame. */
-  clearHistoryNextFrame: boolean
-  /** A resolved → frozen snapshot is owed. */
-  needFreezeSnapshot: boolean
-  /** A resolved + frozen merge is owed. */
-  needMergeSnapshot: boolean
+  clearPending: boolean
+  /** A frozen refresh (resolved → frozen copy or merge) is owed. */
+  snapshotPending: boolean
   /** The frozen/live zoom cycle is running. */
   zoomActive: boolean
   /** The reference orbit is shorter than the current iteration budget. */
@@ -50,9 +48,8 @@ export function isFieldConverged(
   state: FieldConvergenceState,
   options: FieldConvergenceOptions = {},
 ): boolean {
-  return !state.clearHistoryNextFrame
-    && !state.needFreezeSnapshot
-    && !state.needMergeSnapshot
+  return !state.clearPending
+    && !state.snapshotPending
     && (options.ignoreZoomCycle === true || !state.zoomActive)
     && !state.orbitIncomplete
     && state.unfinishedPixelCount >= 0

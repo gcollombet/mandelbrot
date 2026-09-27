@@ -88,7 +88,6 @@ type EngineState = {
     currentReferenceAvailableIter: number
     lastShaderApproxFlag: number
     pendingRefActive: boolean
-    clearHistoryNextFrame: boolean
 }
 
 function engineState(engine: Engine): EngineState {
@@ -148,7 +147,7 @@ export function createDevCapture(deps: DevCaptureDeps) {
         // the raw texture when the export session starts (seen as blocky
         // remnants inside the set on the first still after a teleport). Start
         // every capture from a cleared field.
-        engineState(engine).clearHistoryNextFrame = true
+        engine.requests.requestClear('external')
         const t0 = performance.now()
         const result = await renderStill(stillDeps, {
             location: deps.getLocation(),

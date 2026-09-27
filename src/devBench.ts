@@ -137,7 +137,6 @@ type EngineState = {
     currentMaxIterations: number
     currentReferenceAvailableIter: number
     lastShaderApproxFlag: number
-    clearHistoryNextFrame: boolean
 }
 
 const NU_TOLERANCE = 0.5
@@ -269,9 +268,9 @@ export function createDevBench(deps: DevBenchDeps) {
 
     /** The app's screenshot render, plus a raw-field readback once converged. */
     async function screenshot(size: number, mu: number, withRaw: boolean): Promise<{ canvas: HTMLCanvasElement; raw?: RawField; pumps: number; convergeMs: number }> {
-        const { engine, state, stillDeps } = ready()
+        const { engine, stillDeps } = ready()
         let raw: RawField | undefined
-        state.clearHistoryNextFrame = true
+        engine.requests.requestClear('external')
         const result = await renderStill(stillDeps, {
             location: deps.getView(),
             width: size,

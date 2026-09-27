@@ -13,12 +13,12 @@ function methodSource(name: string, nextName: string): string {
 
 describe('tiled keyframe engine contract', () => {
   it('allocates raw/resolve at tile size, both keyframes at full size, and no merge display', () => {
-    expect(engine).toContain('const textureSize = this.tiledKeyframePlan?.tileSide ?? fullTextureSize')
+    expect(engine).toContain('const textureSize = this.tiled?.plan.tileSide ?? fullTextureSize')
     expect(engine).toContain("this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')")
     expect(engine).toContain("? createDisplaySet('Engine TiledLiveKeyframe', fullTextureSize)")
-    expect(engine).toContain("this.tiledKeyframePlan ? 'Engine TiledFrozenKeyframe'")
+    expect(engine).toContain("this.tiled ? 'Engine TiledFrozenKeyframe'")
     expect(engine).toContain("createLayeredTexture('Engine RawTexture (A)', rawLayers")
-    expect(engine).toContain("this.mergeDisplay = this.tiledKeyframePlan ? undefined : createDisplaySet('Engine MergeDisplay')")
+    expect(engine).toContain("this.mergeDisplay = this.tiled ? undefined : createDisplaySet('Engine MergeDisplay')")
   })
 
   it('exposes allocation-derived bytes per texel for both scales', () => {
@@ -37,7 +37,7 @@ describe('tiled keyframe engine contract', () => {
 
   it('resets tile-local state while preserving the reference worker', () => {
     const source = methodSource('private finishCurrentTiledKeyframeTile()', 'isViewFullyConverged()')
-    expect(source).toContain('this.clearHistoryNextFrame = true')
+    expect(source).toContain("this.requests.requestClear('tile')")
     expect(source).toContain('this.rawOriginX = 0')
     expect(source).toContain('this.resetAaState()')
     expect(source).toContain('this.invalidateCounterReadback()')
@@ -47,8 +47,8 @@ describe('tiled keyframe engine contract', () => {
 
   it('does not report readiness before every tile was copied', () => {
     const source = methodSource('videoFrameReady(): boolean', 'private beginNextTiledKeyframe()')
-    expect(source).toContain('if (!this.tiledKeyframeComplete) return this.finishCurrentTiledKeyframeTile()')
-    expect(engine).toContain('this.tiledKeyframeTileIndex + 1 >= this.tiledKeyframePlan!.tiles.length')
+    expect(source).toContain('if (!this.tiled.complete) return this.finishCurrentTiledKeyframeTile()')
+    expect(engine).toContain("if (advanceTile(tiled) === 'keyframeComplete') {")
   })
 
   it('passes the plan and rotation interval without replacing the frame loop', () => {

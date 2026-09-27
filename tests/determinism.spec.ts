@@ -42,7 +42,7 @@ async function waitForConverged(page: Page, timeout = 90_000) {
         && engine.unfinishedPixelCount <= 10
         && !engine.isRendering
         && !engine.needRender
-        && !engine.clearHistoryNextFrame;
+        && !engine.requests.clearPending;
     });
     stableSamples = idle ? stableSamples + 1 : 0;
     await page.waitForTimeout(250);
@@ -53,7 +53,7 @@ async function waitForConverged(page: Page, timeout = 90_000) {
 async function recomputeFromScratch(page: Page) {
   await page.evaluate(() => {
     const engine = (window as any).__mandelbrotEngine;
-    engine.clearHistoryNextFrame = true;
+    engine.requests.requestClear('external');
     engine.needRender = true;
   });
   await page.waitForTimeout(300);

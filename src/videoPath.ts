@@ -1,6 +1,10 @@
 import type { VideoEncoding } from './videoEncoding'
 import { canonicalDecimal, canonicalScale } from './expmap/decimal'
 import { t } from './i18n'
+import { neutralSizeFor } from './viewGrids'
+
+/** Side of the engine's square working texture (defined with the grid geometry). */
+export { neutralSizeFor }
 
 // ── Parcours model and validation for video export ──
 // Pure logic, no GPU and no Vue, so every refusal path is testable.
@@ -132,13 +136,6 @@ export function describeParcoursWarnings(
   }]
 }
 
-/**
- * Side of the square working texture the engine allocates for a given render
- * surface: the diagonal, so a rotated viewport always stays covered.
- */
-export function neutralSizeFor(width: number, height: number): number {
-  return Math.ceil(Math.sqrt(width * width + height * height))
-}
 
 /**
  * Validate an output spec against the device limit.

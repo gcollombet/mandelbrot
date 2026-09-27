@@ -24,14 +24,21 @@ import {generateMipmaps, mipLevelCountFor, packTextureLayers, TEXTURE_MAX_ANISOT
 import {Palette, PALETTE_TEXTURE_ROWS} from './Palette.ts'
 import {needsSurfaceColorPipeline} from './colorPipelineFeatures'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString, log10FromDecimalString} from './floatexp'
-import type {ZoomState} from './zoomState'
+import type {ZoomEffect, ZoomState} from './zoomState'
 import {
+    classifyFrame,
+    displayZoomFactors,
     getFrozenScale,
     getLiveScale,
     isZoomActive,
+    liveGridScale,
     reduceZoomState,
-    resetZoomState
+    resetZoomState,
+    smallZoomStopNeedsClear,
 } from './zoomState'
+import {advanceTile, createExportSession, currentTile, resolveSurface, restartKeyframe, validateExportSettings, type ExpmapLayout, type ExportSession, type ExportSessionSettings, type TiledLayout} from './exportSession'
+import {FrameRequests, frameClears, planFrame, type FramePlan} from './framePlan'
+import {ViewGrids, ZERO, neutralSizeFor, cameraShiftTexels, iterationDispatchBox, padRect, tileLocalRect, toUv, type GridMapping, type MergeUniforms} from './viewGrids'
 import {
     isFieldConverged as evaluateFieldConvergence,
     UNFINISHED_PIXEL_DONE_THRESHOLD,
@@ -66,8 +73,6 @@ import {
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
 import {
-    estimateGpuWorkingSetBytes,
-    fitSurfaceToGpuBudget,
     formatGpuBytes,
     isMobileLikeEnvironment,
     READ_WRITE_STORAGE_TEXTURES_FEATURE,
@@ -78,7 +83,6 @@ import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotation
 import {t} from './i18n'
 import type {
     KeyframeTile,
-    KeyframeTilePlan,
     TiledExportMemoryProfile,
 } from './tiledKeyframeExport'
 
@@ -573,10 +577,19 @@ export class Engine {
     private layoutPresent?: GPUBindGroupLayout;
     /** Full-size live keyframe. `resolvedDisplay` remains the tile-local resolve target. */
     private tiledLiveDisplay?: DisplaySet
-    private tiledKeyframePlan: KeyframeTilePlan | null = null
-    private tiledKeyframeTileIndex = 0
-    private tiledKeyframeComplete = false
-    private tiledRotationUnion = false
+    /** Interactive when null; otherwise the one running export (see exportSession.ts). */
+    private session: ExportSession | null = null
+    private get exporting(): boolean { return this.session !== null }
+    private get tiled(): TiledLayout | null {
+        return this.session?.layout.kind === 'tiled' ? this.session.layout : null
+    }
+    private get expmap(): ExpmapLayout | null {
+        return this.session?.layout.kind === 'expmap' ? this.session.layout : null
+    }
+    /** Jittered AA samples per exported frame (1 = off, and outside exports). */
+    private get exportAaSamples(): number { return this.session?.aaSamples ?? 1 }
+    /** Side of the working raw textures: the tile in a tiled keyframe, else the neutral square. */
+    private get workingSide(): number { return this.tiled?.plan.tileSide ?? this.neutralSize }
     private tiledKeyframeDiagnostics = {
         keyframesBuilt: 0,
         tilesConverted: 0,
@@ -592,8 +605,7 @@ export class Engine {
     /** SDR file/capture format, independent of the canvas presentation format. */
     format!: GPUTextureFormat
     private hdrDisplay = false
-    private hdrExport = false
-    private get hdrRendering() { return this.videoExportActive ? this.hdrExport : this.hdrDisplay }
+    private get hdrRendering() { return this.session ? this.session.hdr : this.hdrDisplay }
     private get canvasFormat(): GPUTextureFormat { return this.hdrRendering ? 'rgba16float' : this.format }
     private hdrColorPipelines?: ColorPipelineFamily
     private presentationPipelines?: {
@@ -630,7 +642,7 @@ export class Engine {
     }
 
     async setHdrDisplay(enabled: boolean): Promise<void> {
-        if (this.videoExportActive) throw new Error(t('engine.hdr.waitForExport'))
+        if (this.exporting) throw new Error(t('engine.hdr.waitForExport'))
         if (!this.presentationPipelines) throw new Error(t('engine.hdr.notReady'))
         const previous = this.hdrDisplay
         this.device.pushErrorScope('validation')
@@ -1051,10 +1063,13 @@ export class Engine {
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
-    // flag pour indiquer si l'historique doit être effacé au prochain rendu
-    clearHistoryNextFrame = false
+    /** Intents for the next frame: history clear (with its reasons) and
+     *  frozen snapshot. Public so dev tooling can force a fresh field. */
+    readonly requests = new FrameRequests()
+    /** Decisions of the last rendered frame (diagnostics, E2E specs). */
+    lastFramePlan: FramePlan | null = null
     // true when the previous rendered frame had a scale change (used to detect small-zoom stop)
-    _prevFrameScaleChanged = false
+    private prevFrameScaleChanged = false
 
     // ── Idle-time antialiasing (AA) accumulation state ────────────────
     /** True while AA accumulation is running (explicitly triggered, idle only). */
@@ -1095,12 +1110,10 @@ export class Engine {
     /** Configurable magnification threshold before swapping (default ×2). */
     zoomMagnificationThreshold = 16.0
     private zoomState: ZoomState = { kind: 'idle' }
-    /** Set to true when we need to GPU-copy resolved → frozen at the start of next render. */
-    private needFreezeSnapshot = false
-    /** Set to true when we need to run the merge pass (resolved+frozen→frozen) at zoom stop. */
-    private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
-    private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0, liveShiftU: 0, liveShiftV: 0 }
+    private mergeUniforms: MergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0, liveShiftU: 0, liveShiftV: 0 }
+    /** Placement of the live and frozen grids relative to the camera (see viewGrids.ts). */
+    private readonly grids = new ViewGrids()
 
     /**
      * Refresh the frozen fallback from the resolved (live) texture before the
@@ -1119,15 +1132,8 @@ export class Engine {
      * display space (zf = lzf = 1, no shift), which holds whenever
      * `frozenAligned` is true.
      */
-    private requestFrozenRefresh(uniforms?: {
-        zf: number
-        lzf: number
-        frozenShiftU: number
-        frozenShiftV: number
-        aspect: number
-        angle: number
-    }) {
-        if (this.tiledKeyframePlan) {
+    private requestFrozenRefresh(uniforms?: GridMapping) {
+        if (this.tiled) {
             this.beginNextTiledKeyframe()
             return
         }
@@ -1135,62 +1141,20 @@ export class Engine {
             && (uniforms !== undefined || this.frozenAligned)
         if (frozenUsable) {
             const aspect = this.width / Math.max(1, this.height)
-            // The destination is the live grid (live read unshifted). The old
-            // frozen grid sits at (frozen offset − live residual) from it: both
-            // are measured from the same last rendered camera.
+            // The destination is the live grid (live read unshifted).
             this.mergeUniforms = {
-                ...(uniforms ?? {
-                    zf: 1,
-                    lzf: 1,
-                    frozenShiftU: (this.frozenOffsetCommittedX - this.liveResidualX) / this.neutralSize,
-                    frozenShiftV: -(this.frozenOffsetCommittedY - this.liveResidualY) / this.neutralSize,
-                    aspect,
-                    angle: 0,
-                }),
+                ...(uniforms ?? this.grids.idleRefreshMapping(aspect, this.neutralSize)),
                 liveShiftU: 0,
                 liveShiftV: 0,
             }
-            this.needMergeSnapshot = true
-            this.needFreezeSnapshot = false
+            this.requests.requestSnapshot('merge', { replace: true })
         } else {
-            this.needFreezeSnapshot = true
+            this.requests.requestSnapshot('copy')
         }
         // Either way the new frozen texture is the live grid of the last
         // rendered frame, seen from the current camera.
-        this.frozenOffsetX = this.liveResidualX + this.frameLiveShiftX
-        this.frozenOffsetY = this.liveResidualY + this.frameLiveShiftY
+        this.grids.frozenBecomesLive()
     }
-    /**
-     * Displacement of the frozen grid relative to the camera, in frozen texels,
-     * with the content-shift convention of `shiftTexX/Y` (a texture displaced
-     * by D is read at `truth − D`). Exact: it follows the camera's float motion,
-     * never the rounded texel shifts applied to the live texture, and it keeps
-     * advancing on clear frames (reference re-anchor, table clear) where the
-     * live texture does not shift. `frozenOffset*` is this frame's value,
-     * `frozenOffsetCommitted*` the last rendered frame's.
-     */
-    private frozenOffsetX = 0
-    private frozenOffsetY = 0
-    private frozenOffsetCommittedX = 0
-    private frozenOffsetCommittedY = 0
-    /**
-     * Sub-texel displacement of the live grid relative to the camera, in live
-     * texels, same convention. Mid-zoom the navigator does not snap the centre,
-     * so a pan moves the camera by fractional texels while the live texture
-     * can only move by whole ones. The remainder is carried here (|r| ≤ 0.5)
-     * instead of being dropped each frame: the compute pass evaluates the grid
-     * (camera + r), the colour pass reads it back at (truth − r). Dropping it
-     * made the live content drift from the camera — and from the frozen
-     * texture — by the sum of every frame's rounding.
-     */
-    private liveResidualX = 0
-    private liveResidualY = 0
-    /** Camera motion of this frame in texels of the previous live grid (set by update()). */
-    private frameLiveShiftX = 0
-    private frameLiveShiftY = 0
-    /** Reference re-anchor jump (new reference − old one), consumed by the next update(). */
-    private referenceJumpX = 0
-    private referenceJumpY = 0
     /** Compute-centre uniforms as written by update(), before the live-residual correction. */
     private computeCenterUniform = { cx: 0, cy: 0, scale: 0 }
     /** True when the frozen texture is spatially aligned with the live texture.
@@ -1374,12 +1338,10 @@ export class Engine {
         const offsetBefore = this.mandelbrotNavigator.view_floatexp() as Float64Array
         this.mandelbrotNavigator.reference_origin(staging.cx, staging.cy)
         const offsetAfter = this.mandelbrotNavigator.view_floatexp() as Float64Array
-        const jumpX = offsetBefore[2] * 2 ** offsetBefore[3] - offsetAfter[2] * 2 ** offsetAfter[3]
-        const jumpY = offsetBefore[4] * 2 ** offsetBefore[5] - offsetAfter[4] * 2 ** offsetAfter[5]
-        if (Number.isFinite(jumpX) && Number.isFinite(jumpY)) {
-            this.referenceJumpX += jumpX
-            this.referenceJumpY += jumpY
-        }
+        this.grids.recordReferenceJump({
+            x: offsetBefore[2] * 2 ** offsetBefore[3] - offsetAfter[2] * 2 ** offsetAfter[3],
+            y: offsetBefore[4] * 2 ** offsetBefore[5] - offsetAfter[4] * 2 ** offsetAfter[5],
+        })
 
         // Set orbit length directly — NOT via markReferenceReset (which would zero it).
         // This lets the next frame use the uploaded orbit immediately.
@@ -1663,7 +1625,7 @@ export class Engine {
                 // visual fallback during reconvergence, exactly as it does for
                 // an immediate clear.
                 this.pendingTableClear = false
-                this.clearHistoryNextFrame = true
+                this.requests.requestClear('tableReady')
                 this.needRender = true
                 this.invalidateCounterReadback()
             } else {
@@ -2733,9 +2695,8 @@ export class Engine {
      */
     private isFieldConverged(ignoreZoomCycle = false): boolean {
         return evaluateFieldConvergence({
-            clearHistoryNextFrame: this.clearHistoryNextFrame,
-            needFreezeSnapshot: this.tiledKeyframePlan ? false : this.needFreezeSnapshot,
-            needMergeSnapshot: this.tiledKeyframePlan ? false : this.needMergeSnapshot,
+            clearPending: this.requests.clearPending,
+            snapshotPending: this.tiled ? false : this.requests.snapshot !== null,
             zoomActive: isZoomActive(this.zoomState),
             orbitIncomplete: this.orbitIncomplete,
             unfinishedPixelCount: this.unfinishedPixelCount,
@@ -2774,34 +2735,32 @@ export class Engine {
     videoFrameReady(): boolean {
         if (this.videoExportFrameEvaluationPending) return false
         if (!this.isFieldConverged(true)) return false
-        if (this.expmapProjection && this.unfinishedPixelCount !== 0) return false
-        if (this.tiledKeyframePlan) {
-            if (!this.tiledKeyframeComplete) return this.finishCurrentTiledKeyframeTile()
+        if (this.expmap && this.unfinishedPixelCount !== 0) return false
+        if (this.tiled) {
+            if (!this.tiled.complete) return this.finishCurrentTiledKeyframeTile()
             this.tiledKeyframeDiagnostics.freeFrames++
             return true
         }
-        if (this.videoExportAaSamples <= 1) return true
+        if (this.exportAaSamples <= 1) return true
         // With AA on, "ready" means the accumulation finished too: capturing
         // mid-accumulation would emit a frame averaged over fewer samples than
         // its neighbours, which reads as flicker in the film.
-        return !this.aaActive && this.aaAccumulatedSamples >= this.videoExportAaSamples
+        return !this.aaActive && this.aaAccumulatedSamples >= this.exportAaSamples
     }
 
     private beginNextTiledKeyframe(): void {
-        if (!this.tiledKeyframePlan || !this.tiledKeyframeComplete
+        const tiled = this.tiled
+        if (!tiled || !tiled.complete
             || !this.tiledLiveDisplay || !this.frozenDisplay) return
         const completedLive = this.tiledLiveDisplay
         this.tiledLiveDisplay = this.frozenDisplay
         this.frozenDisplay = completedLive
-        this.tiledKeyframeTileIndex = 0
-        this.tiledKeyframeComplete = false
+        restartKeyframe(tiled)
         this.frozenAligned = true
-        this.frozenOffsetX = this.frozenOffsetCommittedX = this.liveResidualX
-        this.frozenOffsetY = this.frozenOffsetCommittedY = this.liveResidualY
+        this.grids.alignFrozenToLive()
         this.frozenDisplayVersion = this.resolvedDisplayVersion
-        this.needFreezeSnapshot = false
-        this.needMergeSnapshot = false
-        this.clearHistoryNextFrame = true
+        this.requests.cancelSnapshot()
+        this.requests.requestClear('tile')
         this.rawOriginX = 0
         this.rawOriginY = 0
         this.resolvedDisplayVersion = -1
@@ -2851,25 +2810,23 @@ export class Engine {
     }
 
     private finishCurrentTiledKeyframeTile(): boolean {
+        const tiled = this.tiled
         const tile = this.currentTiledKeyframeTile()
-        if (!tile || !this.resolvedDisplay || !this.tiledLiveDisplay) return false
+        if (!tiled || !tile || !this.resolvedDisplay || !this.tiledLiveDisplay) return false
 
         const encoder = this.device.createCommandEncoder({ label: 'Engine Copy Tiled Keyframe Tile' })
         this.copyDisplayTile(encoder, this.resolvedDisplay, this.tiledLiveDisplay, tile)
         this.device.queue.submit([encoder.finish()])
         this.tiledKeyframeDiagnostics.tilesConverted++
 
-        if (this.tiledKeyframeTileIndex + 1 >= this.tiledKeyframePlan!.tiles.length) {
-            this.tiledKeyframeComplete = true
+        if (advanceTile(tiled) === 'keyframeComplete') {
             this.tiledKeyframeDiagnostics.keyframesBuilt++
             this.rebuildColorBindGroup()
             return true
         }
 
-        this.tiledKeyframeTileIndex++
-        this.clearHistoryNextFrame = true
-        this.needFreezeSnapshot = false
-        this.needMergeSnapshot = false
+        this.requests.requestClear('tile')
+        this.requests.cancelSnapshot()
         this.rawOriginX = 0
         this.rawOriginY = 0
         this.resolvedDisplayVersion = -1
@@ -2889,27 +2846,10 @@ export class Engine {
 
     // ── Video export session ──────────────────────────────────────────
 
-    /** Real-time values held for the duration of an export, restored on exit. */
-    private videoExportSavedSettings: {
-        zoomMagnificationThreshold: number
-        dprMultiplier: number
-        targetFps: number
-        aaAuto: boolean
-    } | null = null
-
-    private videoExportActive = false
-    /** Jittered AA samples accumulated per exported frame. 1 = off. */
-    private videoExportAaSamples = 1
     /** True until update()+render() has observed the newly selected path time. */
     private videoExportFrameEvaluationPending = false
-    /** Interactive draw callback parked for the duration of an export. */
-    private videoExportParkedDrawFn: (() => Promise<void>) | null = null
-    /** Pins the compute surface to an exact pixel size while set (export only). */
-    private expmapProjection: ExpmapKernelProjection | null = null
+    /** ExpMap block colour pipeline, compiled on the first block of a session. */
     private expmapCapturePipeline?: GPURenderPipeline
-    private expmapAppearance: RenderOptions | null = null
-    private expmapSavedNumerics: { mode: ApproximationMode; epsilon: number; skip: number; precision: string } | null = null
-    private forcedSurfaceSize: { width: number; height: number } | null = null
 
     /** Prepare an isolated direct-grid block. The caller places the navigator
      * at projection.scale and the immutable document center before pumping.
@@ -2917,7 +2857,8 @@ export class Engine {
      * the orbit/table resources.
      */
     async prepareExpmapBlock(projection: ExpmapKernelProjection, appearance: RenderOptions): Promise<void> {
-        if (!this.videoExportActive || this.tiledKeyframePlan) throw new Error('ExpMap requires an exclusive monolithic export session')
+        const session = this.session
+        if (!session || session.layout.kind === 'tiled') throw new Error('ExpMap requires an exclusive monolithic export session')
         if (projection.uniforms.length !== 12 || !Array.from(projection.uniforms).every(Number.isFinite)
             || !Number.isInteger(projection.width) || !Number.isInteger(projection.height)
             || projection.width < 1 || projection.height < 1
@@ -2936,24 +2877,29 @@ export class Engine {
             if (this.device !== device || this.destroyed) throw new Error('Device changed during ExpMap compilation')
             this.expmapCapturePipeline = pipeline
         }
-        if (!this.expmapSavedNumerics) {
-            this.expmapSavedNumerics = { mode: this.approximationMode, epsilon: this.blaEpsilon, skip: this.maxBlaSkip, precision: this.precisionBudget }
+        const firstBlock = session.layout.kind !== 'expmap'
+        const savedNumerics = session.layout.kind === 'expmap'
+            ? session.layout.savedNumerics
+            : { mode: this.approximationMode, epsilon: this.blaEpsilon, skip: this.maxBlaSkip, precision: this.precisionBudget }
+        if (firstBlock) {
             const recipe = appearance as RenderOptions & { approximationMode?: ApproximationMode; blaEpsilon?: number; maxBlaSkip?: number }
             if (recipe.approximationMode) this.setApproximationMode(recipe.approximationMode)
             if (recipe.blaEpsilon !== undefined) this.setBlaEpsilon(recipe.blaEpsilon)
             if (recipe.maxBlaSkip !== undefined) this.setMaxBlaSkip(recipe.maxBlaSkip)
             this.setPrecisionBudget(projection.precisionScale)
         }
-        const firstBlock = this.expmapProjection === null
-        this.expmapAppearance = structuredClone(appearance)
-        this.expmapProjection = { ...projection, uniforms: new Float32Array(projection.uniforms) }
+        session.layout = {
+            kind: 'expmap',
+            projection: { ...projection, uniforms: new Float32Array(projection.uniforms) },
+            appearance: structuredClone(appearance),
+            savedNumerics,
+        }
         // The session pins one surface large enough for every block. Reallocating
         // it for each thin tail strip adds canvas/texture setup to every row.
         // Preserve allocations; clear the same unsafe local state as a tile change.
         if (firstBlock) this.resize()
-        this.clearHistoryNextFrame = true
-        this.needFreezeSnapshot = false
-        this.needMergeSnapshot = false
+        this.requests.requestClear('expmapBlock')
+        this.requests.cancelSnapshot()
         this.rawOriginX = 0
         this.rawOriginY = 0
         this.prevFrameMandelbrot = undefined
@@ -2967,12 +2913,12 @@ export class Engine {
     /** Read one converged useful rectangle, preserving the 48-byte display ABI.
      * Row-aligned staging is released per plane; no full octave allocation. */
     async captureExpmapDisplay(rect: { x: number; y: number; width: number; height: number }): Promise<Uint8Array> {
-        if (!this.expmapProjection?.displaySet || !this.videoFrameReady() || !this.resolvedDisplay) {
+        if (!this.expmap?.projection.displaySet || !this.videoFrameReady() || !this.resolvedDisplay) {
             throw new Error('A converged shader ExpMap block is required')
         }
         if (![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger)
             || rect.x < 0 || rect.y < 0 || rect.width < 1 || rect.height < 1
-            || rect.x + rect.width > this.expmapProjection.width || rect.y + rect.height > this.expmapProjection.height) {
+            || rect.x + rect.width > this.expmap.projection.width || rect.y + rect.height > this.expmap.projection.height) {
             throw new Error('Invalid display capture rectangle')
         }
         const d = this.resolvedDisplay, output = new Uint8Array(rect.width * rect.height * 48)
@@ -3005,10 +2951,10 @@ export class Engine {
         return output
     }
 
-    get isExpmapProductionActive(): boolean { return this.expmapProjection !== null }
+    get isExpmapProductionActive(): boolean { return this.expmap !== null }
 
     isVideoExportActive(): boolean {
-        return this.videoExportActive
+        return this.exporting
     }
 
     /**
@@ -3017,16 +2963,16 @@ export class Engine {
      * the viewer happened to be set to.
      */
     private effectiveAntialiasLevel(requested: number | undefined): number {
-        return normalizeAntialiasLevel(this.videoExportActive ? this.videoExportAaSamples : requested)
+        return normalizeAntialiasLevel(this.exporting ? this.exportAaSamples : requested)
     }
 
     /** Start a fresh accumulation for the next exported frame. */
     beginExportFrameAa(): void {
-        if (this.videoExportActive && this.videoExportAaSamples > 1) this.resetAaState()
+        if (this.exporting && this.exportAaSamples > 1) this.resetAaState()
     }
 
     beginVideoExportFrame(): void {
-        if (!this.videoExportActive) return
+        if (!this.exporting) return
         this.videoExportFrameEvaluationPending = true
         this.needRender = true
     }
@@ -3049,7 +2995,7 @@ export class Engine {
     /** True while an export owns the engine — used to keep interactive-only
      *  telemetry (the fps meter) from reporting the export's pump rate. */
     get isExportDriven(): boolean {
-        return this.videoExportActive
+        return this.exporting
     }
 
     async waitForSubmittedWork(): Promise<void> {
@@ -3117,7 +3063,7 @@ export class Engine {
      */
     /** Side of the square working texture a given render surface needs. */
     static workingTextureSideFor(width: number, height: number): number {
-        return Math.ceil(Math.sqrt(width * width + height * height))
+        return neutralSizeFor(width, height)
     }
 
     /** Allocation contract consumed by the pure planner and the export panel. */
@@ -3154,90 +3100,23 @@ export class Engine {
         }
     }
 
-    async beginVideoExportSession(settings: {
-        magnificationThreshold: number
-        /** Output frame size; the compute surface is pinned to this × supersample. */
-        outputWidth: number
-        outputHeight: number
-        supersample: number
-        batchTargetFps: number
-        /** Jittered AA samples per emitted frame. 1 = no accumulation. */
-        aaSamplesPerFrame?: number
-        hdr?: boolean
-        /** Optional fixed-centre keyframe plan. Absence preserves the monolithic path. */
-        tiledKeyframePlan?: KeyframeTilePlan
-        /** Full path interval; a varying angle conservatively builds the circumscribed disc. */
-        angleRange?: { from: number; to: number }
-    }): Promise<void> {
-        if (this.videoExportActive) {
+    async beginVideoExportSession(settings: ExportSessionSettings): Promise<void> {
+        if (this.session) {
             throw new Error(t('engine.export.sessionActive'))
         }
-        // Only the degenerate case is refused. The threshold is deliberately
-        // NOT tied to the supersampling factor: it governs how often a full
-        // reconvergence is paid, which is the main lever on export speed, while
-        // supersampling governs sampling density. A high threshold trades a
-        // softer mid-cycle periphery for a much faster export — the caller's
-        // decision, surfaced as a warning in the UI rather than forbidden here.
-        if (!(settings.magnificationThreshold > 1)) {
-            throw new Error(t('engine.export.thresholdTooLow'))
-        }
-
-        // The interactive path clamps an oversized surface; an export must NOT,
-        // because silently shrinking would change the film's resolution behind
-        // the user's back. Refuse with the numbers instead.
-        const surfaceWidth = settings.outputWidth * settings.supersample
-        const surfaceHeight = settings.outputHeight * settings.supersample
-        const side = Engine.workingTextureSideFor(surfaceWidth, surfaceHeight)
-        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
-        if (side > maxDim) {
-            throw new Error(t('engine.export.surfaceTooLarge', {
-                width: settings.outputWidth, height: settings.outputHeight, supersample: settings.supersample, side, maxDim,
-            }))
-        }
-        if (settings.tiledKeyframePlan) {
-            if ((settings.aaSamplesPerFrame ?? 1) !== 1) {
-                throw new Error(t('engine.export.tiledNoJitterAa'))
-            }
-            if (settings.tiledKeyframePlan.neutralSide !== side) {
-                throw new Error(t('engine.export.tiledPlanMismatch', { planSide: settings.tiledKeyframePlan.neutralSide, side }))
-            }
-        }
-        const exportMemoryOptions = {
-            width: surfaceWidth,
-            height: surfaceHeight,
+        const {side, estimatedBytes, overBudget} = validateExportSettings(settings, {
+            maxTextureDimension: this.device?.limits?.maxTextureDimension2D ?? 8192,
+            gpuMemoryBudgetBytes: this.gpuMemoryBudgetBytes,
             orbitMetrics: this.orbitMetricsEnabled,
             orbitTrap: this.orbitTrapEnabled,
-        }
-        const estimatedExportBytes = settings.tiledKeyframePlan?.estimate.totalBytes
-            ?? estimateGpuWorkingSetBytes(exportMemoryOptions)
-        if (estimatedExportBytes > this.gpuMemoryBudgetBytes) {
+        })
+        if (overBudget) {
             console.warn(
                 `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} `
-                + `nécessiterait environ ${formatGpuBytes(estimatedExportBytes)}, au-delà du budget prudent `
+                + `nécessiterait environ ${formatGpuBytes(estimatedBytes)}, au-delà du budget prudent `
                 + `${formatGpuBytes(this.gpuMemoryBudgetBytes)} de cet appareil. `
                 + 'Export autorisé : la capacité réelle sera vérifiée lors de l’allocation GPU.',
             )
-        }
-
-        this.videoExportSavedSettings = {
-            zoomMagnificationThreshold: this.zoomMagnificationThreshold,
-            dprMultiplier: this.dprMultiplier,
-            targetFps: this.targetFps,
-            aaAuto: this.aaAuto,
-        }
-        this.videoExportActive = true
-        this.hdrExport = settings.hdr ?? false
-        this.videoExportAaSamples = Math.max(1, Math.round(settings.aaSamplesPerFrame ?? 1))
-        this.tiledKeyframePlan = settings.tiledKeyframePlan ?? null
-        this.tiledKeyframeTileIndex = 0
-        this.tiledKeyframeComplete = !this.tiledKeyframePlan
-        this.tiledRotationUnion = !!settings.angleRange
-            && Math.abs(settings.angleRange.to - settings.angleRange.from) > 1e-12
-        this.tiledKeyframeDiagnostics = {
-            keyframesBuilt: 0,
-            tilesConverted: 0,
-            pumpsPerTile: this.tiledKeyframePlan?.tiles.map(() => 0) ?? [],
-            freeFrames: 0,
         }
 
         // Park the interactive render loop. It calls the SAME draw() the export
@@ -3245,14 +3124,20 @@ export class Engine {
         // engine at once: duplicated GPU work per exported frame, an fps meter
         // reporting the export's pump rate instead of anything meaningful, and
         // interleaved update() calls racing the export's camera placement.
-        this.videoExportParkedDrawFn = this._drawFn
+        this.session = createExportSession(settings, {
+            zoomMagnificationThreshold: this.zoomMagnificationThreshold,
+            dprMultiplier: this.dprMultiplier,
+            targetFps: this.targetFps,
+            aaAuto: this.aaAuto,
+        }, this._drawFn)
         this.stopRenderLoop()
-
-        this.zoomMagnificationThreshold = settings.magnificationThreshold
-        this.forcedSurfaceSize = {
-            width: settings.outputWidth * settings.supersample,
-            height: settings.outputHeight * settings.supersample,
+        this.tiledKeyframeDiagnostics = {
+            keyframesBuilt: 0,
+            tilesConverted: 0,
+            pumpsPerTile: settings.tiledKeyframePlan?.tiles.map(() => 0) ?? [],
+            freeFrames: 0,
         }
+        this.zoomMagnificationThreshold = settings.magnificationThreshold
         this.targetFps = settings.batchTargetFps
         this.aaAuto = false
         // The pinned size only takes effect through a reallocation, which also
@@ -3271,7 +3156,12 @@ export class Engine {
         if (validationError || memoryError) {
             const reason = memoryError ? t('engine.export.reasonMemory') : t('engine.export.reasonRefused')
             this.endVideoExportSession()
-            throw new Error(t('engine.export.allocationFailed', { width: surfaceWidth, height: surfaceHeight, side, reason }))
+            throw new Error(t('engine.export.allocationFailed', {
+                width: settings.outputWidth * settings.supersample,
+                height: settings.outputHeight * settings.supersample,
+                side,
+                reason,
+            }))
         }
     }
 
@@ -3383,7 +3273,7 @@ export class Engine {
      * there rather than rebuilding the pass from outside.
      */
     captureHdrFrame(width: number, height: number, supersample = 1, hdrOptions: HdrGpuOptions = {format:'video'}): Promise<Uint16Array> {
-        if (!this.videoExportActive || !this.hdrExport) return Promise.reject(new Error(t('engine.export.hdrSessionRequired')))
+        if (!this.session?.hdr) return Promise.reject(new Error(t('engine.export.hdrSessionRequired')))
         if (this.exportCaptureRequest) return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
         const max = this.device.limits.maxTextureDimension2D
         if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error(t('engine.export.hdrDimensionsInvalid')))
@@ -3401,7 +3291,7 @@ export class Engine {
         timestampMicros: number
         durationMicros: number
     }): Promise<VideoFrame> {
-        if (this.hdrExport) return Promise.reject(new Error(t('engine.export.useHdrCapture')))
+        if (this.session?.hdr) return Promise.reject(new Error(t('engine.export.useHdrCapture')))
         if (this.exportCaptureRequest) {
             return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
         }
@@ -3430,43 +3320,29 @@ export class Engine {
     endVideoExportSession(): void {
         this.exportCaptureRequest?.reject(new Error('Export session ended before capture completed'))
         this.exportCaptureRequest = undefined
-        const saved = this.videoExportSavedSettings
-        this.videoExportActive = false
-        this.hdrExport = false
-        this.videoExportAaSamples = 1
         this.videoExportFrameEvaluationPending = false
-        this.videoExportSavedSettings = null
-        this.expmapProjection = null
-        this.expmapAppearance = null
         this.expmapCapturePipeline = undefined
-        const numerics = this.expmapSavedNumerics
-        this.expmapSavedNumerics = null
-        if (numerics) {
+        const session = this.session
+        this.session = null
+        if (!session) return
+
+        if (session.layout.kind === 'expmap') {
+            const numerics = session.layout.savedNumerics
             this.setApproximationMode(numerics.mode)
             this.setBlaEpsilon(numerics.epsilon)
             this.setMaxBlaSkip(numerics.skip)
             this.setPrecisionBudget(numerics.precision)
         }
-        this.tiledKeyframePlan = null
-        this.tiledKeyframeTileIndex = 0
-        this.tiledKeyframeComplete = false
-        this.tiledRotationUnion = false
-        if (!saved) return
-
-        const surfaceWasPinned = this.forcedSurfaceSize !== null
-        this.forcedSurfaceSize = null
-
         // Hand the interactive loop back exactly as it was found.
-        const parkedDrawFn = this.videoExportParkedDrawFn
-        this.videoExportParkedDrawFn = null
-        if (parkedDrawFn) this.startRenderLoop(parkedDrawFn)
+        if (session.parkedDrawFn) this.startRenderLoop(session.parkedDrawFn)
 
-        this.zoomMagnificationThreshold = saved.zoomMagnificationThreshold
-        this.dprMultiplier = saved.dprMultiplier
-        this.targetFps = saved.targetFps
-        this.aaAuto = saved.aaAuto
+        this.zoomMagnificationThreshold = session.restore.zoomMagnificationThreshold
+        this.dprMultiplier = session.restore.dprMultiplier
+        this.targetFps = session.restore.targetFps
+        this.aaAuto = session.restore.aaAuto
         this.animationTimeOverride = null
-        if (surfaceWasPinned || this.dprMultiplier !== saved.dprMultiplier) this.resize()
+        // The surface was pinned to the film: follow the canvas again.
+        this.resize()
         this.needRender = true
     }
 
@@ -3544,10 +3420,10 @@ export class Engine {
         // so the unified color path has a valid frozen fallback for future clears.
         if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
             && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
-            && !this.clearHistoryNextFrame
+            && !this.requests.clearPending
             && !isZoomActive(this.zoomState)
-            && !this.tiledKeyframePlan) {
-            this.needFreezeSnapshot = true
+            && !this.tiled) {
+            this.requests.requestSnapshot('copy')
         }
     }
 
@@ -3814,76 +3690,34 @@ export class Engine {
 
     /** Dispatch box padded by 8 texels each side and clamped to the neutral square. */
     private resolveScissorRect() {
-        const pad = 8
-        const n = this.tiledKeyframePlan?.tileSide ?? this.neutralSize
-        const x = Math.max(0, this.dispatchBox.x - pad)
-        const y = Math.max(0, this.dispatchBox.y - pad)
-        const right = Math.min(n, this.dispatchBox.x + this.dispatchBox.width + pad)
-        const bottom = Math.min(n, this.dispatchBox.y + this.dispatchBox.height + pad)
-        return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) }
+        return padRect(this.dispatchBox, 8, this.workingSide)
     }
 
     /** Shared `rotationUnion` code for the brush and resolve uniforms:
      *  2 expmap, 1 tiled rotating keyframe (full disc), −1 live rotation
      *  margin (disc on the even lattice, see liveRotationMargin), 0 viewport. */
     private rotationUnionCode(): number {
-        if (this.expmapProjection) return 2
-        if (this.tiledRotationUnion) return 1
+        if (this.expmap) return 2
+        if (this.tiled?.rotating) return 1
         return this.liveRotationMarginActive() ? -1 : 0
     }
 
     private liveRotationMarginActive(): boolean {
-        return this.liveRotationMargin && !this.tiledKeyframePlan && !this.videoExportActive
+        return this.liveRotationMargin && !this.tiled && !this.exporting
     }
 
     private computeIterationDispatchBox(aspect: number, angle: number) {
-        if ((this.tiledKeyframePlan && this.tiledRotationUnion) || this.liveRotationMarginActive()) {
-            return { x: 0, y: 0, width: this.neutralSize, height: this.neutralSize }
-        }
-        // Bounding box of the rotated viewport, snapped outwards to the 8×8
-        // iteration workgroup grid.
-        const neutralExtent = Math.sqrt(aspect * aspect + 1)
-        const absCos = Math.abs(Math.cos(angle))
-        const absSin = Math.abs(Math.sin(angle))
-        const halfTexels = this.neutralSize / 2
-        const halfX = ((aspect * absCos + absSin) / neutralExtent) * halfTexels
-        const halfY = ((aspect * absSin + absCos) / neutralExtent) * halfTexels
-        const x = Math.max(0, Math.floor((halfTexels - halfX) / 8) * 8)
-        const y = Math.max(0, Math.floor((halfTexels - halfY) / 8) * 8)
-        const right = Math.min(
-            this.neutralSize,
-            Math.ceil((halfTexels + halfX) / 8) * 8,
-        )
-        const bottom = Math.min(
-            this.neutralSize,
-            Math.ceil((halfTexels + halfY) / 8) * 8,
-        )
-        return {
-            x,
-            y,
-            width: Math.max(8, right - x),
-            height: Math.max(8, bottom - y),
-        }
+        const fullDisc = !!this.tiled?.rotating || this.liveRotationMarginActive()
+        return iterationDispatchBox(aspect, angle, this.neutralSize, fullDisc)
     }
 
     private currentTiledKeyframeTile(): KeyframeTile | null {
-        if (!this.tiledKeyframePlan || this.tiledKeyframeComplete) return null
-        return this.tiledKeyframePlan.tiles[this.tiledKeyframeTileIndex] ?? null
+        return this.tiled ? currentTile(this.tiled) : null
     }
 
     private tileLocalDispatchBox(globalBox: { x: number; y: number; width: number; height: number }) {
         const tile = this.currentTiledKeyframeTile()
-        if (!tile) return globalBox
-        const left = Math.max(globalBox.x, tile.originX)
-        const top = Math.max(globalBox.y, tile.originY)
-        const right = Math.min(globalBox.x + globalBox.width, tile.originX + tile.width)
-        const bottom = Math.min(globalBox.y + globalBox.height, tile.originY + tile.height)
-        return {
-            x: Math.max(0, left - tile.originX),
-            y: Math.max(0, top - tile.originY),
-            width: Math.max(0, right - left),
-            height: Math.max(0, bottom - top),
-        }
+        return tile ? tileLocalRect(globalBox, tile) : globalBox
     }
 
     /** Layers reprojection must copy for a TERMINAL texel. Layers 13..16 are
@@ -3926,70 +3760,27 @@ export class Engine {
         const parent = this.canvas.parentElement
         const widthCSS = parent?.clientWidth || 1
         const heightCSS = parent?.clientHeight || 1
-        if (this.forcedSurfaceSize) {
-            // Video export pins the compute surface to the film's geometry.
-            // Without this the working textures would follow the window, and the
-            // "threshold <= supersample" guarantee would be about the window
-            // rather than about the output — i.e. about nothing. It is also what
-            // makes the same parcours reproducible across window sizes.
-            this.width = Math.max(1, Math.round(this.forcedSurfaceSize.width))
-            this.height = Math.max(1, Math.round(this.forcedSurfaceSize.height))
-        } else {
-            this.width = Math.max(1, Math.round(widthCSS * dpr))
-            this.height = Math.max(1, Math.round(heightCSS * dpr))
-        }
-
-        // Clamper aux limites GPU (maxTextureDimension2D, typiquement 8192 ou 16384)
-        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
-        this.width = Math.min(this.width, maxDim)
-        this.height = Math.min(this.height, maxDim)
-
-        // Every working texture is a SQUARE of the surface diagonal, so clamping
-        // width and height alone is not enough: a 3840x2160 surface needs a
-        // 4406² texture. Past the limit WebGPU does not throw — createTexture
-        // returns an invalid texture and reports asynchronously, so the whole
-        // pipeline reads garbage and renders BLACK, very fast, with no error
-        // anywhere. Shrink the surface instead, keeping its aspect ratio.
-        const diagonal = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
-        if (diagonal > maxDim) {
-            const shrink = maxDim / diagonal
-            this.width = Math.max(8, Math.floor(this.width * shrink))
-            this.height = Math.max(8, Math.floor(this.height * shrink))
-        }
-
-        const memoryOptions = {
-            width: this.width,
-            height: this.height,
+        const surface = resolveSurface({
+            cssWidth: widthCSS,
+            cssHeight: heightCSS,
+            devicePixelRatio: dpr,
+            maxTextureDimension: this.device?.limits?.maxTextureDimension2D ?? 8192,
+            gpuMemoryBudgetBytes: this.gpuMemoryBudgetBytes,
             orbitMetrics: this.orbitMetricsEnabled,
             orbitTrap: this.orbitTrapEnabled,
-        }
-        // Video export keeps the requested resolution even above our heuristic
-        // budget. Actual texture limits and scoped allocation errors still apply.
-        const surfaceFit = this.tiledKeyframePlan || this.videoExportActive
-            ? {
-                width: this.width,
-                height: this.height,
-                scale: 1,
-                reduced: false,
-                estimatedBytes: this.tiledKeyframePlan?.estimate.totalBytes
-                    ?? estimateGpuWorkingSetBytes(memoryOptions),
-            }
-            : fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
-        if (this.forcedSurfaceSize && surfaceFit.reduced) {
-            throw new Error(t('engine.export.surfaceOverBudget', {
-                width: this.width, height: this.height,
-                estimate: formatGpuBytes(estimateGpuWorkingSetBytes(memoryOptions)),
-                budget: formatGpuBytes(this.gpuMemoryBudgetBytes),
-            }))
-        }
-        if (!this.forcedSurfaceSize && surfaceFit.reduced) {
-            this.width = surfaceFit.width
-            this.height = surfaceFit.height
+            session: this.session && {
+                surface: this.session.surface,
+                tiledEstimateBytes: this.tiled?.plan.estimate.totalBytes,
+            },
+        })
+        this.width = surface.width
+        this.height = surface.height
+        if (surface.reduced) {
             const reductionKey = `${widthCSS}x${heightCSS}:${this.width}x${this.height}:${this.gpuMemoryBudgetBytes}`
             if (reductionKey !== this.lastSurfaceReductionKey) {
                 console.warn(
                     `[Engine] physical surface reduced to ${this.width}×${this.height} `
-                    + `(scale ${surfaceFit.scale.toFixed(3)}, estimated ${formatGpuBytes(surfaceFit.estimatedBytes)} `
+                    + `(scale ${surface.scale.toFixed(3)}, estimated ${formatGpuBytes(surface.estimatedBytes)} `
                     + `within ${formatGpuBytes(this.gpuMemoryBudgetBytes)} budget)`,
                 )
                 this.lastSurfaceReductionKey = reductionKey
@@ -4006,12 +3797,12 @@ export class Engine {
         this.configureOutput()
 
         // taille suffisante pour contenir la diagonale de l'écran après rotation
-        this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
+        this.neutralSize = neutralSizeFor(this.width, this.height)
         // Fresh textures start at toroidal origin 0.
         this.rawOriginX = 0
         this.rawOriginY = 0
         const fullTextureSize = this.neutralSize
-        const textureSize = this.tiledKeyframePlan?.tileSide ?? fullTextureSize
+        const textureSize = this.tiled?.plan.tileSide ?? fullTextureSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
@@ -4168,14 +3959,14 @@ export class Engine {
 
         this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')
         this.frozenDisplay = createDisplaySet(
-            this.tiledKeyframePlan ? 'Engine TiledFrozenKeyframe' : 'Engine FrozenDisplay',
-            this.tiledKeyframePlan ? fullTextureSize : textureSize,
+            this.tiled ? 'Engine TiledFrozenKeyframe' : 'Engine FrozenDisplay',
+            this.tiled ? fullTextureSize : textureSize,
         )
-        this.tiledLiveDisplay = this.tiledKeyframePlan
+        this.tiledLiveDisplay = this.tiled
             ? createDisplaySet('Engine TiledLiveKeyframe', fullTextureSize)
             : undefined
         // Tiled keyframes exchange full display roles and never encode this merge.
-        this.mergeDisplay = this.tiledKeyframePlan ? undefined : createDisplaySet('Engine MergeDisplay')
+        this.mergeDisplay = this.tiled ? undefined : createDisplaySet('Engine MergeDisplay')
         this.resolvedDisplayVersion = -1
         this.frozenDisplayVersion = -1
 
@@ -4493,7 +4284,7 @@ export class Engine {
             this.pendingTableClearDeadline = performance.now() + TABLE_CLEAR_FALLBACK_MS
         } else {
             this.pendingTableClear = false
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('tableClear')
         }
     }
 
@@ -4650,7 +4441,7 @@ export class Engine {
     private shaderReplayContext?: Mandelbrot
 
     async prepareShaderExpmapColor(options: RenderOptions, time: number, angle: number, sourceMu?: number, stereo?: StereoColorPass) {
-        if (!this.shaderReplayContext || this.expmapProjection) throw new Error('Engine not ready for shader playback')
+        if (!this.shaderReplayContext || this.expmap) throw new Error('Engine not ready for shader playback')
         const saved = this.animationTimeOverride
         this.animationTimeOverride = time
         const context = this.shaderReplayContext
@@ -4662,15 +4453,15 @@ export class Engine {
     }
 
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
-        if (!this.expmapProjection) this.shaderReplayContext = { ...mandelbrot }
-        if (this.expmapAppearance) {
-            renderOptions = this.expmapAppearance
-            const recipe = this.expmapAppearance as RenderOptions & { mu?: number; epsilon?: number; maxIterationMultiplier?: number }
+        if (!this.expmap) this.shaderReplayContext = { ...mandelbrot }
+        if (this.expmap) {
+            renderOptions = this.expmap.appearance
+            const recipe = this.expmap.appearance as RenderOptions & { mu?: number; epsilon?: number; maxIterationMultiplier?: number }
             const mu = recipe.mu ?? mandelbrot.mu
             const multiplier = recipe.maxIterationMultiplier
             mandelbrot = { ...mandelbrot, mu, epsilon: recipe.epsilon ?? mandelbrot.epsilon,
                 maxIterations: multiplier === undefined ? mandelbrot.maxIterations : Math.min(
-                    Math.max(100, 1000 * multiplier * -log2FromDecimalString(this.expmapProjection!.iterationScale))
+                    Math.max(100, 1000 * multiplier * -log2FromDecimalString(this.expmap!.projection.iterationScale))
                     + Math.max(0, Math.ceil(Math.log2(Math.log(Math.max(mu, 4)) / Math.log(4)))), 10_000_000) }
         }
         await this.preparePalettePath(renderOptions)
@@ -4683,7 +4474,7 @@ export class Engine {
                 ? animationContribution(pathOffsetTrack, renderOptions.activateAnimate ? this.time : 0, clamp(pathAnimation.globalSpeed, 0, 10)) * this.palettePathGpu.span
                 : null
             this.palettePathGpu.update(this.device, -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale)),
-                this.expmapProjection ?? undefined, this.expmapProjection ? -log10FromDecimalString(this.expmapProjection.scale) : undefined, pathWrapOffset)
+                this.expmap?.projection, this.expmap ? -log10FromDecimalString(this.expmap.projection.scale) : undefined, pathWrapOffset)
         }
         this.selectColorPipelines(needsSurfaceColorPipeline(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
@@ -4699,7 +4490,7 @@ export class Engine {
             && (this.orbitTrapEnabled || orbitTrapUsesOrbit(previousOrbitTrap))
             && orbitTrapAccumulatorSignature(orbitTrap)
                 !== orbitTrapAccumulatorSignature(previousOrbitTrap)) {
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('orbitTrap')
             this.needRender = true
         }
         // Calcul du temps écoulé depuis la dernière frame
@@ -4735,8 +4526,8 @@ export class Engine {
         // Orbit metrics decide the raw layer count and the sixth display
         // attachment, so a flip has to re-create the textures. Done here, before
         // any previous-state comparison: resize() clears the render anyway, which
-        // is what the flip already forced through clearHistoryNextFrame.
-        this.orbitMetricsEnabled = !!this.expmapProjection?.displaySet || shouldTrackOrbitMetrics(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops)
+        // is what the flip already forced through a history clear request.
+        this.orbitMetricsEnabled = !!this.expmap?.projection.displaySet || shouldTrackOrbitMetrics(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops)
         if ((this.orbitMetricsEnabled !== this.orbitGradientAllocated
             || this.orbitTrapEnabled !== this.trapPayloadAllocated) && this.rawTexture) {
             this.resize()
@@ -4756,7 +4547,7 @@ export class Engine {
         if (this.pendingTableClear
             && (this.referenceWorkerFailed || performance.now() > this.pendingTableClearDeadline)) {
             this.pendingTableClear = false
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('tableDeadline')
             this.needRender = true
         }
 
@@ -4784,7 +4575,7 @@ export class Engine {
             })
             this.requestTableClear(navigatorApproximationMode !== 'perturbation')
             // Invalidate the frozen fallback: it still holds the OLD mode's
-            // completed image. clearHistoryNextFrame wipes only the live texture,
+            // completed image. A history clear wipes only the live texture,
             // so without this the color pass composites old-mode frozen pixels
             // (step=1) against the new mode's coarse in-progress pixels via
             // min-step-wins — a visible old/new "mix" that resolves slowly. A
@@ -4793,7 +4584,7 @@ export class Engine {
             // completion. (Not gated on zoom: mid-zoom mode changes are rare and
             // the zoom path owns frozenAligned itself.)
             this.frozenAligned = false
-            this.needFreezeSnapshot = false
+            this.requests.cancelSnapshot()
             this.needRender = true
             this.invalidateCounterReadback()
         }
@@ -4825,7 +4616,7 @@ export class Engine {
         // zoom cycle stays active), and DPR supersampling replaces it for a
         // fraction of the cost — but leaving it armed would let it trigger the
         // instant the session ends, on a view the user never asked it for.
-        this.aaAuto = this.videoExportActive ? false : (renderOptions.aaAuto ?? false)
+        this.aaAuto = this.exporting ? false : (renderOptions.aaAuto ?? false)
         // Continuous zoom is display-only between raw-field clear/swap
         // boundaries. Invalidating here every tick discarded the preceding
         // counter before its asynchronous map completed, so timestamp+work
@@ -4837,7 +4628,7 @@ export class Engine {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
         if (activeStripeFrequencyChanged || orbitMetricsChanged) {
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('orbitMetrics')
         }
         this.previousOrbitMetricsEnabled = orbitMetricsEnabled
 
@@ -4865,7 +4656,7 @@ export class Engine {
         const muChanged = !!this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu
         const preserveZoomFrozen = isZoomActive(this.zoomState) && hardResetHistory && !muChanged
         if (hardResetHistory || muChanged) {
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('referenceReset')
             if (!preserveZoomFrozen) {
                 this.zoomState = resetZoomState()
             }
@@ -4875,37 +4666,23 @@ export class Engine {
             // pass copies resolved -> frozen before executing the clear.
             // The reducer's `copyResolvedToFrozen` effect (idle reset, same mu)
             // requests the frozen refresh below; nothing to arm here.
-            this.needFreezeSnapshot = false
-            this.needMergeSnapshot = false
+            this.requests.cancelSnapshot()
         }
         this.videoExportFrameEvaluationPending = false
 
         // ── Zoom reprojection state update (before uniform write) ─────
-        // Use the state machine to handle scale changes and reprojection cycles.
+        // The frame is classified into a zoom event (see classifyFrame), the
+        // grids follow the camera, then the state machine's effects run.
         {
-            const scaleChanged = this.prevFrameMandelbrot
-                && this.prevFrameMandelbrot.scale !== mandelbrot.scale
-
-            let event: import('./zoomState').ZoomEvent | null = null
-
-            if (hardResetHistory || muChanged) {
-                event = { type: 'referenceReset', muChanged, orbitWasReset }
-            } else if (scaleChanged) {
-                event = { type: 'scaleChanged', scale: mandelbrot.scale, prevScale: this.prevFrameMandelbrot!.scale }
-            } else if (this.prevFrameMandelbrot && !this.videoExportActive) {
-                // Real time compares against the PREVIOUS PASS, and a pass with an
-                // unchanged scale genuinely means the user stopped zooming.
-                //
-                // An export pumps render() many times at a FIXED camera position —
-                // that idempotence is what lets a frame converge. Those repeat
-                // passes look identical to a stop, so `scaleStable` fired on the
-                // second pump of every frame: merge, clear history, back to idle,
-                // and the next frame rebuilt the cycle from scratch. The frozen/live
-                // cycle was torn down and recreated on EVERY frame, which is why the
-                // magnification threshold changed nothing and why real time — where
-                // the scale really does move every tick — stayed fast.
-                event = { type: 'scaleStable' }
-            }
+            const previousScale = this.prevFrameMandelbrot ? this.prevFrameMandelbrot.scale : null
+            const scaleChanged = previousScale !== null && previousScale !== mandelbrot.scale
+            const event = classifyFrame({
+                previousScale,
+                scale: mandelbrot.scale,
+                orbitWasReset,
+                muChanged,
+                repeatPump: this.exporting,
+            })
 
             // Capture zoom state values BEFORE state transition (needed for merge uniforms)
             const wasZoomActive = isZoomActive(this.zoomState)
@@ -4914,101 +4691,66 @@ export class Engine {
 
             // Camera motion since the last rendered frame, in texels of the
             // previous live and frozen grids. Measured on every frame, clear
-            // frames included, and across a reference re-anchor (dx/dy are
-            // reference-relative, so the jump is added back).
-            const referenceJumpX = orbitWasReset ? this.referenceJumpX : 0
-            const referenceJumpY = orbitWasReset ? this.referenceJumpY : 0
-            if (orbitWasReset) {
-                this.referenceJumpX = 0
-                this.referenceJumpY = 0
-            }
-            let frameShiftX = 0
-            let frameShiftY = 0
-            if (this.prevFrameMandelbrot && !this.expmapProjection) {
-                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot.dx + referenceJumpX
-                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot.dy + referenceJumpY
-                frameShiftX = -(deltaDx * this.neutralSize) / (2 * neutralExtent)
-                frameShiftY = (deltaDy * this.neutralSize) / (2 * neutralExtent)
-            }
+            // frames included, and across a reference re-anchor.
             const oldLiveScale = wasZoomActive && prevLiveScale > 0
                 ? prevLiveScale
                 : (this.prevFrameMandelbrot?.scale ?? mandelbrot.scale)
-            const oldFrozenScale = wasZoomActive && prevFrozenScale > 0 ? prevFrozenScale : oldLiveScale
-            const finiteShift = (v: number) => Number.isFinite(v) ? v : 0
-            this.frameLiveShiftX = finiteShift(frameShiftX / oldLiveScale)
-            this.frameLiveShiftY = finiteShift(frameShiftY / oldLiveScale)
-            this.frozenOffsetX = this.frozenOffsetCommittedX + finiteShift(frameShiftX / oldFrozenScale)
-            this.frozenOffsetY = this.frozenOffsetCommittedY + finiteShift(frameShiftY / oldFrozenScale)
+            this.grids.advanceCamera({
+                delta: this.prevFrameMandelbrot && !this.expmap
+                    ? { x: mandelbrot.dx - this.prevFrameMandelbrot.dx, y: mandelbrot.dy - this.prevFrameMandelbrot.dy }
+                    : null,
+                orbitWasReset,
+                aspect,
+                neutralSize: this.neutralSize,
+                liveScale: oldLiveScale,
+                frozenScale: wasZoomActive && prevFrozenScale > 0 ? prevFrozenScale : oldLiveScale,
+            })
 
             const {state, effects} = event
                 ? reduceZoomState(this.zoomState, event, { threshold: this.zoomMagnificationThreshold })
-                : { state: this.zoomState, effects: [] as import('./zoomState').ZoomEffect[] }
+                : { state: this.zoomState, effects: [] as ZoomEffect[] }
             this.zoomState = state
 
-            // Small-zoom stop: scale just stabilised while the zoom state machine
-            // stayed in 'idle' (zoom factor was too small to trigger reprojecting).
-            // The previous frame had an un-snapped cx (is_zooming=true in Rust),
-            // so prevFrameMandelbrot.dx is fractional.  The current frame snaps cx
-            // to an integer pixel, making the delta non-integer → 1-frame sub-pixel
-            // misalignment.  Force a history clear so shiftTexX is 0 for this frame
-            // and the texture rebuilds from the snapped position.
-            // Same reasoning: in an export a "scale that just stabilised" is a
-            // second pump on the same frame, not a stop, and forcing a history
-            // clear there would discard the field the pump is converging.
-            if (!wasZoomActive && this._prevFrameScaleChanged && !scaleChanged
-                && !this.videoExportActive) {
-                this.clearHistoryNextFrame = true
+            if (smallZoomStopNeedsClear({
+                wasZoomActive,
+                previousFrameScaleChanged: this.prevFrameScaleChanged,
+                scaleChanged,
+                repeatPump: this.exporting,
+            })) {
+                this.requests.requestClear('smallZoomStop')
             }
-            this._prevFrameScaleChanged = !!scaleChanged
+            this.prevFrameScaleChanged = scaleChanged
 
             for (const effect of effects) {
                 switch (effect.type) {
                     case 'copyResolvedToFrozen':
-                        if (wasZoomActive && prevFrozenScale > 0 && prevLiveScale > 0) {
-                            // Mid-zoom swap: the new frozen texture takes the live
-                            // grid (lzf = 1, live read unshifted) and absorbs the
-                            // old frozen where it is still finer (zf = threshold).
-                            // The old frozen sits at (its offset − the live
-                            // residual, in frozen texels) from that grid.
-                            const liveToFrozen = prevLiveScale / prevFrozenScale
-                            this.requestFrozenRefresh({
-                                zf: prevFrozenScale / prevLiveScale,
-                                lzf: 1,
-                                frozenShiftU: (this.frozenOffsetCommittedX - this.liveResidualX * liveToFrozen) / this.neutralSize,
-                                frozenShiftV: -(this.frozenOffsetCommittedY - this.liveResidualY * liveToFrozen) / this.neutralSize,
+                        // Mid-zoom swap, or cycle start / idle reset (frozen and
+                        // live share the previous frame's display space).
+                        this.requestFrozenRefresh(wasZoomActive && prevFrozenScale > 0 && prevLiveScale > 0
+                            ? this.grids.swapRefreshMapping({
+                                frozenScale: prevFrozenScale,
+                                liveScale: prevLiveScale,
                                 aspect,
                                 angle: mandelbrot.angle,
+                                neutralSize: this.neutralSize,
                             })
-                        } else {
-                            // Cycle start or idle reset: frozen and live share the
-                            // previous frame's display space when aligned.
-                            this.requestFrozenRefresh()
-                        }
+                            : undefined)
                         break
                     case 'mergeResolvedAndFrozen':
-                        this.needMergeSnapshot = !this.tiledKeyframePlan
+                        if (!this.tiled) this.requests.requestSnapshot('merge')
                         if (wasZoomActive && prevFrozenScale > 0) {
-                            // Zoom stop: merge into the CURRENT camera's display
-                            // space (the navigator snaps the centre on this very
-                            // frame), so both sources are read at their exact
-                            // displacement from it.
-                            this.mergeUniforms = {
-                                zf: prevFrozenScale / mandelbrot.scale,
-                                lzf: prevLiveScale / mandelbrot.scale,
-                                frozenShiftU: this.frozenOffsetX / this.neutralSize,
-                                frozenShiftV: -this.frozenOffsetY / this.neutralSize,
+                            this.mergeUniforms = this.grids.stopMerge({
+                                frozenScale: prevFrozenScale,
+                                liveScale: prevLiveScale,
+                                scale: mandelbrot.scale,
                                 aspect,
                                 angle: mandelbrot.angle,
-                                liveShiftU: (this.liveResidualX + this.frameLiveShiftX) / this.neutralSize,
-                                liveShiftV: -(this.liveResidualY + this.frameLiveShiftY) / this.neutralSize,
-                            }
-                            this.frozenOffsetX = 0
-                            this.frozenOffsetY = 0
+                                neutralSize: this.neutralSize,
+                            })
                         }
                         break
-                    case 'clearHistoryNextFrame':
-                        this.clearHistoryNextFrame = true
+                    case 'clearHistory':
+                        this.requests.requestClear('zoomCycle')
                         break
                 }
             }
@@ -5041,10 +4783,9 @@ export class Engine {
             this.needRender = true
         }
 
-        if (this.expmapProjection) {
+        if (this.expmap) {
             this.zoomState = resetZoomState()
-            this.needFreezeSnapshot = false
-            this.needMergeSnapshot = false
+            this.requests.cancelSnapshot()
         }
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
@@ -5088,12 +4829,9 @@ export class Engine {
         const lightDirLen = Math.hypot(Math.cos(effectiveLightAngle), Math.sin(effectiveLightAngle), 1.85)
         const textureMapping = normalizeTextureMappingConfig(renderOptions.textureMapping)
         const zoomActive = isZoomActive(this.zoomState)
-        const zoomFactor = zoomActive
-            ? getFrozenScale(this.zoomState) / mandelbrot.scale
-            : 1.0
-        const liveZoomFactor = zoomActive
-            ? getLiveScale(this.zoomState) / mandelbrot.scale
-            : 1.0
+        const {frozen: zoomFactor, live: liveZoomFactor} = displayZoomFactors(this.zoomState, mandelbrot.scale)
+        const [frozenShiftU, frozenShiftV] = toUv(this.grids.frozenOffset, this.neutralSize)
+        const [liveShiftU, liveShiftV] = toUv(this.grids.liveResidual, this.neutralSize)
         const antialiasLevelColor = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
 
         // Phase D analytic AA: current sample's jitter δc as unit direction +
@@ -5122,13 +4860,13 @@ export class Engine {
             renderOptions.activateAnimate ? 1 : 0, // 6: animate
             mandelbrot.mu,                  // 7: mu
             zoomFactor,                     // 8: zoomFactor
-            (zoomActive || this.frozenAligned || this.needFreezeSnapshot) ? 1.0 : 0.0, // 9: frozenAligned
+            (zoomActive || this.frozenAligned || this.requests.snapshot === 'copy') ? 1.0 : 0.0, // 9: frozenAligned
             liveZoomFactor,                 // 10: liveZoomFactor
             // Exact displacement of the frozen grid from this frame's camera
-            // (see frozenOffsetX): follows the camera, not the rounded shifts
+            // (see ViewGrids): follows the camera, not the rounded shifts
             // of the live texture.
-            this.frozenOffsetX / this.neutralSize,  // 11: frozenShiftU
-            -this.frozenOffsetY / this.neutralSize, // 12: frozenShiftV
+            frozenShiftU,                   // 11: frozenShiftU
+            frozenShiftV,                   // 12: frozenShiftV
             effectiveTessellationLevel,     // 13: tessellationLevel
             effectiveDisplacementAmount,    // 14: displacementAmount
             animGlobalSpeed,                // 15: animationSpeed (legacy/global speed)
@@ -5181,9 +4919,9 @@ export class Engine {
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
             effectiveGradeSaturation,            // 64: gradeSaturation (display grade)
-            this.liveResidualX / this.neutralSize,  // 65: liveShiftU (patched in render())
+            liveShiftU,                           // 65: liveShiftU (patched in render())
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
-            -this.liveResidualY / this.neutralSize, // 67: liveShiftV (patched in render())
+            liveShiftV,                           // 67: liveShiftV (patched in render())
             effectiveProtrusionPhase,             // 68: protrusionPhase [0, 1)
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
@@ -5208,9 +4946,7 @@ export class Engine {
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations)
         this.currentMaxIterations = maxIterations
-        const computeScale = isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0
-            ? getLiveScale(this.zoomState)
-            : mandelbrot.scale
+        const computeScale = liveGridScale(this.zoomState, mandelbrot.scale)
 
         // floatexp decomposition for the deep-zoom path. scale and the
         // reference-relative center offset (dx, dy) share one base-2 exponent
@@ -5369,11 +5105,11 @@ export class Engine {
         // Suppressed during AA: the present pass already shows a stable average,
         // and a freeze + clearHistory here would clobber selective-reseed state.
         if (!isZoomActive(this.zoomState)
-            && !this.clearHistoryNextFrame
+            && !this.requests.clearPending
             && !this.aaActive
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
             this.requestFrozenRefresh()
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('orbitComplete')
         }
         this.prevGuardedMaxIter = guardedMaxIter
 
@@ -5415,12 +5151,11 @@ export class Engine {
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             && !renderOptions.activateAnimate
-            && !this.videoExportActive
+            && !this.exporting
             && !hasLiveWebcam
             && !isZoomActive(this.zoomState)
-            && !this.clearHistoryNextFrame
-            && !this.needFreezeSnapshot
-            && !this.needMergeSnapshot
+            && !this.requests.clearPending
+            && this.requests.snapshot === null
             && !this.pendingTableClear
             && !this.isReferenceValidating
             && !this.orbitIncomplete
@@ -5499,7 +5234,7 @@ export class Engine {
         // below the palette's resolution, so exact re-iteration takes over
         // only under that.
         const muOk = (this.previousMandelbrot?.mu ?? Number.POSITIVE_INFINITY) >= AA_ANALYTIC_MIN_MU
-        const enabled = !this.expmapProjection && this.aaAnalyticEnabled && Number.isFinite(logDelta) && muOk
+        const enabled = !this.expmap && this.aaAnalyticEnabled && Number.isFinite(logDelta) && muOk
         // Deep re-enabled (2026-07-07, third attempt — root cause found in the
         // KERNEL this time): the block z″ update computed at the
         // old derS scale overflowed on deep blocks (coefficient exponents ~±133
@@ -5545,7 +5280,7 @@ export class Engine {
         // jitter; recompute so sample 0 is the unjittered base again (unbiased
         // mean, deterministic A/B re-runs).
         if (this.rawJittered) {
-            this.clearHistoryNextFrame = true
+            this.requests.requestClear('aaRestart')
             this.invalidateCounterReadback()
         }
         this.aaActive = true
@@ -5604,25 +5339,17 @@ export class Engine {
             const currentSpec = this.inplacePipelineSpec(this.floatExpActive)
             if (currentSpec.key !== pipelineKey) return
         }
-        if (this.tiledKeyframePlan) {
-            // Full-image snapshots are represented by binding-role swaps in this
-            // mode; no legacy copy/merge request may leak into a tile build.
-            this.needFreezeSnapshot = false
-            this.needMergeSnapshot = false
-        }
-
+        // ── Frame plan: decide the field topology, then execute it ───────
         const aspect = (this.width / Math.max(1, this.height))
         const analyticRawPayloadNeeded = this.analyticRawPayloadNeeded(renderOptions, aspect)
-        if (analyticRawPayloadNeeded && !this.rawAnalyticPayloadAligned) {
-            // A previous 9-layer pan left the Taylor-only layers in the old
-            // scratch role. Rebuild once before any analytic consumer can read.
-            this.clearHistoryNextFrame = true
-            this.invalidateCounterReadback()
+        // A previous 9-layer pan can leave the Taylor-only layers in the old
+        // scratch role: rebuild once before any analytic consumer can read.
+        const clearInput = {
+            clearReasons: this.requests.clearReasons,
+            analyticPayloadStale: analyticRawPayloadNeeded && !this.rawAnalyticPayloadAligned,
         }
-        const clearFlag = this.clearHistoryNextFrame ? 1 : 0
-        const zoomRefreshFrame = clearFlag !== 0 && isZoomActive(this.zoomState)
-        const zoomRefreshHasSnapshot = zoomRefreshFrame && this.needFreezeSnapshot
-        if (this.clearHistoryNextFrame) {
+        const clear = frameClears(clearInput)
+        if (clear) {
             this.invalidateCounterReadback()
         }
         const frameSerial = ++this.renderFrameSerial
@@ -5632,98 +5359,91 @@ export class Engine {
                 = (this.tiledKeyframeDiagnostics.pumpsPerTile[tiledTile.index] ?? 0) + 1
         }
 
-        let shiftTexX = 0
-        let shiftTexY = 0
-        if (!this.expmapProjection && !this.clearHistoryNextFrame && this.prevFrameMandelbrot) {
-            const deltaDx = this.previousMandelbrot.dx - this.prevFrameMandelbrot.dx
-            const deltaDy = this.previousMandelbrot.dy - this.prevFrameMandelbrot.dy
+        // Camera motion of the live texture since the last rendered frame, in
+        // texels of the grid it is computed at (liveScale during a zoom
+        // cycle). A clear or an expmap block rebuilds it from scratch (null).
+        // The texture moves by whole texels, the camera by the float amount,
+        // and the grids carry the difference (see ViewGrids.carryLiveShift).
+        const rebuildLive = clear || !!this.expmap
+        const liveShift = rebuildLive ? null : this.prevFrameMandelbrot
+            ? cameraShiftTexels(
+                {
+                    x: this.previousMandelbrot.dx - this.prevFrameMandelbrot.dx,
+                    y: this.previousMandelbrot.dy - this.prevFrameMandelbrot.dy,
+                },
+                aspect,
+                this.neutralSize,
+                liveGridScale(this.zoomState, this.previousMandelbrot.scale),
+            )
+            : ZERO
+        const shift = this.grids.carryLiveShift(liveShift)
+        const zoomActive = isZoomActive(this.zoomState)
+        const visiblePixelCount = Math.max(
+            1,
+            tiledTile ? tiledTile.width * tiledTile.height : this.width * this.height,
+        )
+        const plan = planFrame({
+            ...clearInput,
+            snapshot: this.requests.snapshot,
+            zoomActive,
+            tiled: !!this.tiled,
+            tiledTileActive: !!tiledTile,
+            shift,
+            rawOrigin: { x: this.rawOriginX, y: this.rawOriginY },
+            rawSide: this.workingSide,
+            visiblePixelCount,
+            width: this.width,
+            height: this.height,
+            unfinishedPixelCount: this.unfinishedPixelCount,
+        })
+        this.lastFramePlan = plan
+        const {hasTranslationShift, activePixelCount} = plan
+        const {x: roundedShiftTexX, y: roundedShiftTexY} = shift
+        const clearFlag = plan.clear ? 1 : 0
+        const zoomRefreshFrame = plan.clear && zoomActive
+        const zoomRefreshHasSnapshot = zoomRefreshFrame && plan.snapshot === 'copy'
+        // Cancellations decided by the plan are durable (tiled mode, idle pan).
+        if (plan.snapshot === null) this.requests.cancelSnapshot()
+        if (plan.frozenLosesAlignment) {
+            // Translation shifts the live texture but not the frozen texture.
+            this.frozenAligned = false
+        }
+        this.rawOriginX = plan.rawOrigin.x
+        this.rawOriginY = plan.rawOrigin.y
 
-            // Convert Mandelbrot translation (complex-plane units) -> texture texel shift.
-            // See `src/assets/reproject_cs.wgsl` translation reprojection logic.
-            // During zoom reprojection, use liveScale (the scale at which the
-            // live texture is computed) instead of the display scale.
-            const texSize = this.neutralSize
-            const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-            const scaleForShift = (isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0)
-                ? getLiveScale(this.zoomState)
-                : this.previousMandelbrot.scale
-            shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
-            shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
-        }
-        // Carry the sub-texel remainder instead of dropping it: the texture
-        // moves by whole texels, the camera by the float amount, and the live
-        // residual keeps the difference (see liveResidualX).
-        let roundedShiftTexX = 0
-        let roundedShiftTexY = 0
-        if (this.clearHistoryNextFrame || this.expmapProjection) {
-            this.liveResidualX = 0
-            this.liveResidualY = 0
-        } else {
-            const totalX = this.liveResidualX + shiftTexX
-            const totalY = this.liveResidualY + shiftTexY
-            roundedShiftTexX = Math.round(totalX)
-            roundedShiftTexY = Math.round(totalY)
-            this.liveResidualX = totalX - roundedShiftTexX
-            this.liveResidualY = totalY - roundedShiftTexY
-        }
-        shiftTexX = roundedShiftTexX
-        shiftTexY = roundedShiftTexY
         if (this.computeCenterUniform.scale !== 0) {
             // The compute pass evaluates the grid the live texture actually
             // holds (camera + residual); the colour pass reads it back at
-            // (truth − residual). One live texel = 2·extent/N local units.
-            const texelLocal = 2 * Math.sqrt(aspect * aspect + 1.0) / this.neutralSize
-            const center = this.computeCenterUniform
+            // (truth − residual).
+            const [liveShiftU, liveShiftV] = toUv(this.grids.liveResidual, this.neutralSize)
             this.device.queue.writeBuffer(
                 this.uniformBufferMandelbrot!,
                 0,
-                new Float32Array([
-                    center.cx + this.liveResidualX * texelLocal * center.scale,
-                    center.cy - this.liveResidualY * texelLocal * center.scale,
-                ]),
+                new Float32Array(this.grids.liveComputeCenter(this.computeCenterUniform, aspect, this.neutralSize)),
             )
             this.device.queue.writeBuffer(
                 this.uniformBufferColor!,
                 COLOR_UNIFORM_LIVE_SHIFT_U_SLOT * 4,
-                new Float32Array([this.liveResidualX / this.neutralSize]),
+                new Float32Array([liveShiftU]),
             )
             this.device.queue.writeBuffer(
                 this.uniformBufferColor!,
                 COLOR_UNIFORM_LIVE_SHIFT_V_SLOT * 4,
-                new Float32Array([-this.liveResidualY / this.neutralSize]),
+                new Float32Array([liveShiftV]),
             )
         }
-        const hasTranslationShift = roundedShiftTexX !== 0 || roundedShiftTexY !== 0
         const enteringTranslation = hasTranslationShift && !this.batchTranslationActive
         if (enteringTranslation) {
             // Discard a pre-pan count once. Subsequent pan frames keep this new
             // generation so dense translations can contribute fresh samples.
             this.invalidateCounterReadback()
         }
-        const visiblePixelCount = Math.max(
-            1,
-            tiledTile ? tiledTile.width * tiledTile.height : this.width * this.height,
-        )
-        const exposedX = Math.min(this.width, Math.abs(roundedShiftTexX))
-        const exposedY = Math.min(this.height, Math.abs(roundedShiftTexY))
-        const exposedPixelCount = Math.min(
-            visiblePixelCount,
-            exposedX * this.height + exposedY * this.width - exposedX * exposedY,
-        )
-        const activePixelCount = clearFlag !== 0
-            ? visiblePixelCount
-            : this.unfinishedPixelCount >= 0
-                ? Math.min(
-                    visiblePixelCount,
-                    this.unfinishedPixelCount + exposedPixelCount,
-                )
-                : exposedPixelCount > 0 ? exposedPixelCount : -1
         this.dispatchBox = this.tileLocalDispatchBox(
             this.computeIterationDispatchBox(aspect, this.previousMandelbrot.angle),
         )
-        if (this.expmapProjection) this.dispatchBox = { x: 0, y: 0,
-            width: Math.ceil(this.expmapProjection.width / 16) * 16,
-            height: Math.ceil(this.expmapProjection.height / 16) * 16 }
+        if (this.expmap) this.dispatchBox = { x: 0, y: 0,
+            width: Math.ceil(this.expmap.projection.width / 16) * 16,
+            height: Math.ceil(this.expmap.projection.height / 16) * 16 }
         const dispatchPixelCount = this.dispatchBox.width * this.dispatchBox.height
         const zoomRefreshRegimeKey = this.iterationBatchRegimeKey(
             analyticRawPayloadNeeded,
@@ -5734,7 +5454,7 @@ export class Engine {
 
         // Frame topology is known only here. Zoom clears use their matching
         // first-dense-frame model; other clears and pans use the global rate.
-        if (clearFlag !== 0 && !this.batchSeededForPendingClear) {
+        if (plan.clear && !this.batchSeededForPendingClear) {
             this.batchControllerGeneration++
             this.batchSeededForPendingClear = true
         }
@@ -5743,7 +5463,7 @@ export class Engine {
         }
         this.batchTranslationActive = hasTranslationShift
 
-        if (clearFlag !== 0 || hasTranslationShift) {
+        if (plan.clear || hasTranslationShift) {
             const learnedBatchSize = zoomRefreshFrame
                 ? this.learnedZoomRefreshBatchSizeFor(
                     activePixelCount,
@@ -5762,45 +5482,16 @@ export class Engine {
             }
         }
 
-        if (!this.clearHistoryNextFrame) {
-            // Translation shifts the live texture but not the frozen texture,
-            // so any non-zero shift desynchronizes them.
-            if (hasTranslationShift) {
-                this.frozenAligned = false
-            }
-        }
-
-        if (hasTranslationShift && !isZoomActive(this.zoomState)) {
-            // A pending non-zoom snapshot would copy the pre-translation
-            // resolved texture, then incorrectly mark it aligned with the
-            // translated live texture. Same for a pending idle merge, whose
-            // uniforms assumed a shared display space.
-            this.needFreezeSnapshot = false
-            this.needMergeSnapshot = false
-        }
-
         const workCounterShift = iterationWorkCounterShift(
             this.iterationBatchSize,
             dispatchPixelCount,
         )
-
-        // Toroidal raw origin. A clear rewrites B wholesale and swaps it to the
-        // front at origin 0; a pan shifts the origin so logical texel L now
-        // reads what L − shift held, and only the wrapped-in strip is stamped.
-        if (clearFlag !== 0) {
-            this.rawOriginX = 0
-            this.rawOriginY = 0
-        } else if (hasTranslationShift) {
-            const n = Math.max(1, this.tiledKeyframePlan?.tileSide ?? this.neutralSize)
-            this.rawOriginX = (((this.rawOriginX - roundedShiftTexX) % n) + n) % n
-            this.rawOriginY = (((this.rawOriginY - roundedShiftTexY) % n) + n) % n
-        }
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
             clearFlag,
-            shiftTexX,
-            shiftTexY,
+            roundedShiftTexX,
+            roundedShiftTexY,
             this.dispatchBox.x,
             this.dispatchBox.y,
             this.rawCopyLayerCount(analyticRawPayloadNeeded),
@@ -5812,7 +5503,7 @@ export class Engine {
             tiledTile?.originY ?? 0,
             this.neutralSize,
             this.rotationUnionCode(),
-            ...(this.expmapProjection?.uniforms ?? new Float32Array(12)),
+            ...(this.expmap?.projection.uniforms ?? new Float32Array(12)),
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
         if (clearFlag !== 0 || hasTranslationShift) {
@@ -5827,7 +5518,7 @@ export class Engine {
 
         // Use the readback ring as intended: mapping one slot must not suppress
         // the next frame's sample while another slot remains available.
-        const hasFreshZeroCounter = !this.clearHistoryNextFrame
+        const hasFreshZeroCounter = !plan.clear
             && !hasTranslationShift
             && !this.aaReseedPending
             && rotationHasFreshZeroCounter(
@@ -5880,7 +5571,7 @@ export class Engine {
         // Suppressed during an export: its pumps are not displayed frames, and
         // reporting their rate made the fps readout track something with no
         // relation to the film being produced.
-        if (!this.videoExportActive && this.frameIntervalMs > 0 && this.frameIntervalMs < 5000) {
+        if (!this.exporting && this.frameIntervalMs > 0 && this.frameIntervalMs < 5000) {
             this._emaFrameMs = this._emaFrameMs > 0
                 ? this._emaFrameMs * 0.85 + this.frameIntervalMs * 0.15
                 : this.frameIntervalMs
@@ -5896,8 +5587,7 @@ export class Engine {
         // space and keeps the finest-resolution pixel (min-step-wins).
         // Read both input sets directly, render into the third set, then exchange
         // destination/frozen roles. No full-surface preparation copies are needed.
-        if (this.needMergeSnapshot
-            && !this.tiledKeyframePlan
+        if (plan.snapshot === 'merge'
             && this.pipelineMerge && this.bindGroupMerge
             && this.resolvedDisplay && this.frozenDisplay && this.mergeDisplay
             && this.frozenDisplayVersion >= 0) {
@@ -5937,12 +5627,12 @@ export class Engine {
             rpassMerge.end()
             this.swapMergedDisplay()
             this.frozenDisplayVersion = this.resolvedDisplayVersion
-            this.needMergeSnapshot = false
+            this.requests.snapshotDone()
             this.frozenAligned = true
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
-        if (this.needFreezeSnapshot && !this.tiledKeyframePlan
+        if (plan.snapshot === 'copy'
             && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
             this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
@@ -5977,7 +5667,7 @@ export class Engine {
             }
             this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
             this.frozenDisplayVersion = this.resolvedDisplayVersion
-            this.needFreezeSnapshot = false
+            this.requests.snapshotDone()
             this.frozenAligned = true
         }
 
@@ -6007,8 +5697,8 @@ export class Engine {
         // Single production iteration path: the fused in-place compute.
         // Pan and clear frames prepare B through the same utility kernel, then
         // swap it to the front before the in-place iteration dispatch.
-        const utilityNeeded = this.clearHistoryNextFrame || hasTranslationShift
-        const shouldRunFieldPasses = !this.tiledKeyframePlan || !!tiledTile
+        const utilityNeeded = plan.utility !== 'none'
+        const shouldRunFieldPasses = plan.runFieldPasses
 
         // Track frames that may mutate A: utility frames rewrite it wholesale;
         // in-place frames only write when work remains (unknown counts are
@@ -6021,7 +5711,7 @@ export class Engine {
         }
 
         if (shouldRunFieldPasses) {
-            if (this.clearHistoryNextFrame) {
+            if (plan.utility === 'clear') {
                 // Clear frames rewrite B wholesale, then the texture roles swap
                 // so iteration proceeds on the freshly prepared front texture.
                 const utilPass = commandEncoder.beginComputePass({
@@ -6029,7 +5719,7 @@ export class Engine {
                 })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
-                const uwg = Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16)
+                const uwg = Math.ceil(this.workingSide / 16)
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
                 // Ping-pong instead of copying B back over A: B now holds the
@@ -6039,7 +5729,7 @@ export class Engine {
                 // A clear establishes a fresh payload as the in-place pass fills
                 // requested texels.
                 this.rawAnalyticPayloadAligned = true
-            } else if (utilityNeeded) {
+            } else if (plan.utility === 'pan') {
                 // Pan: the toroidal origin already moved every texel; stamp the
                 // wrapped-in strip (|shiftX| columns + |shiftY| rows) in place
                 // on A. Nothing else is touched, so the Taylor layers survive
@@ -6049,7 +5739,7 @@ export class Engine {
                 })
                 panPass.setPipeline(this.pipelinePanClear!)
                 panPass.setBindGroup(0, this.bindGroupPanClear!)
-                const n = this.tiledKeyframePlan?.tileSide ?? this.neutralSize
+                const n = this.workingSide
                 const stripX = Math.min(n, Math.abs(roundedShiftTexX))
                 const stripY = Math.min(n, Math.abs(roundedShiftTexY))
                 panPass.dispatchWorkgroups(
@@ -6081,7 +5771,7 @@ export class Engine {
                         0, 0, 0, 0, 0,
                         this.rawOriginX, this.rawOriginY,
                         tiledTile?.originX ?? 0, tiledTile?.originY ?? 0,
-                        this.neutralSize, this.tiledRotationUnion ? 1 : 0,
+                        this.neutralSize, this.tiled?.rotating ? 1 : 0,
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {
@@ -6092,7 +5782,7 @@ export class Engine {
                 })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
-                const rwg = Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16)
+                const rwg = Math.ceil(this.workingSide / 16)
                 reseedPass.dispatchWorkgroups(rwg, rwg)
                 reseedPass.end()
                 // The stamped band reconverges at this sample's (non-zero) jitter.
@@ -6131,18 +5821,17 @@ export class Engine {
         // Reuse the typed display set on color-only frames. Raw is never a
         // display ABI bypass: resolve may be skipped only when the cached
         // geometry version matches the field version.
-        const converged = !this.needFreezeSnapshot
-            && !this.needMergeSnapshot
+        const converged = this.requests.snapshot === null
             && this.unfinishedPixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
-        const skipResolve = this.tiledKeyframePlan && this.tiledKeyframeComplete
+        const skipResolve = this.tiled?.complete
             ? true
             : converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
         // An export keeps the frozen/live zoom cycle alive on purpose, so the
         // real-time predicate would never fire and no AA sample could ever be
         // composited. Same relaxation as videoFrameReady(), and only that one.
-        const fullyConverged = this.isFieldConverged(this.videoExportActive)
+        const fullyConverged = this.isFieldConverged(this.exporting)
 
         if (!skipResolve) {
             // Resolve only copies/interpolates terminal analytic geometry and
@@ -6217,8 +5906,8 @@ export class Engine {
         // Stage B) and skips analytically-tagged texels entirely, so a sample
         // costs a thin band rather than a reconvergence — which is what makes
         // per-frame AA affordable at all.
-        if (this.videoExportActive
-            && this.videoExportAaSamples > 1
+        if (this.exporting
+            && this.exportAaSamples > 1
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             && fullyConverged) {
@@ -6393,15 +6082,15 @@ export class Engine {
                     tiledTile?.originX ?? 0,
                     tiledTile?.originY ?? 0,
                     this.neutralSize,
-                    this.tiledRotationUnion ? 1 : 0,
+                    this.tiled?.rotating ? 1 : 0,
                 ]).buffer,
             )
             const bakePass = commandEncoder.beginComputePass()
             bakePass.setPipeline(this.pipelineAaTarget!)
             bakePass.setBindGroup(0, this.bindGroupAaTarget!)
             bakePass.dispatchWorkgroups(
-                Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16),
-                Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16),
+                Math.ceil(this.workingSide / 16),
+                Math.ceil(this.workingSide / 16),
             )
             bakePass.end()
         }
@@ -6454,20 +6143,19 @@ export class Engine {
             this.readbackAaFrontier()
         }
 
-        // Reset the clear flag now that it has been consumed by the GPU passes.
-        if (this.clearHistoryNextFrame) {
+        // The clear has been consumed by the GPU passes.
+        if (plan.clear) {
             // A clear re-stamps every pixel for recompute at the current jitter
             // offset (0 outside AA accumulation → the base is unjittered again).
             // Pan gathers COPY pixels, so they deliberately don't touch this.
             this.rawJittered = this.aaOffsetX !== 0 || this.aaOffsetY !== 0
             this.batchSeededForPendingClear = false
         }
-        this.clearHistoryNextFrame = false
+        this.requests.clearDone()
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
-        this.frozenOffsetCommittedX = this.frozenOffsetX
-        this.frozenOffsetCommittedY = this.frozenOffsetY
+        this.grids.commit()
 
         // Parameters have been consumed — clear the flag so the engine can go idle
         // once all other conditions (orbit, unfinished pixels, etc.) are satisfied.
@@ -6505,7 +6193,7 @@ export class Engine {
                     // count so the next composite waits for the sliver to reconverge.
                     this.invalidateCounterReadback()
                 } else {
-                    this.clearHistoryNextFrame = true
+                    this.requests.requestClear('aaSample')
                 }
                 this.needRender = true
             } else {
@@ -6535,7 +6223,7 @@ export class Engine {
                 // reduce pass expects, since present.wgsl normalises by alpha.
                 // Re-rendering a single sample here would throw the whole
                 // accumulation away.
-                const useAccumulator = this.videoExportAaSamples > 1
+                const useAccumulator = this.exportAaSamples > 1
                     && this.aaAccumulatedSamples > 0
                     && !!this.accumTextureView
                 if (useAccumulator) {
@@ -6557,7 +6245,7 @@ export class Engine {
                         }],
                         label: 'Engine ExportCapture Linear',
                     })
-                    rpassLinear.setPipeline(this.expmapProjection ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!)
+                    rpassLinear.setPipeline(this.expmap ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!)
                     rpassLinear.setBindGroup(0, colorBindGroup)
                     rpassLinear.draw(6, 1, 0, 0)
                     rpassLinear.end()
@@ -6761,20 +6449,20 @@ export class Engine {
         else if (this.exportCaptureRequest) reason = 'exportCapture'
         else if (this.snapshotCallback) reason = 'snapshot'
         else if (isZoomActive(this.zoomState)) reason = 'zoomActive'
-        else if (this.clearHistoryNextFrame) reason = 'clearHistory'
+        else if (this.requests.clearPending) reason = 'clearHistory'
         // Deferred invalidation clear armed: the view is a stale (identical)
         // image awaiting its rebuilt table. Keep the loop alive so update()
         // checks the fallback deadline and the session reads as "rendering"
         // (specs and the completion timer span the whole param-change
         // re-render, table build included).
         else if (this.pendingTableClear) reason = 'tablePending'
-        else if (this.needFreezeSnapshot) reason = 'freezeSnapshot'
-        else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
+        else if (this.requests.snapshot === 'copy') reason = 'freezeSnapshot'
+        else if (this.requests.snapshot === 'merge') reason = 'mergeSnapshot'
         else if (this.isReferenceValidating) reason = 'referenceValidating'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
         else if (
             this.unfinishedPixelCount < 0
-            || this.unfinishedPixelCount > (this.expmapProjection ? 0 : UNFINISHED_PIXEL_DONE_THRESHOLD)
+            || this.unfinishedPixelCount > (this.expmap ? 0 : UNFINISHED_PIXEL_DONE_THRESHOLD)
         ) {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
@@ -6786,13 +6474,12 @@ export class Engine {
         // whenever the zoom cycle happens to be idle — frame 0 above all.
         // Deliberately omits the counter freshness guard, exactly like
         // aaAutoPending below: including it would livelock the loop.
-        else if (this.videoExportActive
-            && this.videoExportAaSamples > 1
+        else if (this.exporting
+            && this.exportAaSamples > 1
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
-            && !this.clearHistoryNextFrame
-            && !this.needFreezeSnapshot
-            && !this.needMergeSnapshot
+            && !this.requests.clearPending
+            && this.requests.snapshot === null
             && !this.orbitIncomplete
             && this.unfinishedPixelCount >= 0
             && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD) {
@@ -7025,7 +6712,7 @@ export class Engine {
             this.palettePathGpu?.destroy(); this.palettePathGpu = undefined
             this.palettePathSignature = ''; this.rebuildColorBindGroup(); this.previousRenderOptions = undefined
             this.palettePathStatus = t('engine.palettePath.notApplied', { error: String(error) })
-            if (this.expmapAppearance) throw error
+            if (this.expmap) throw error
         }
     }
 
@@ -7163,7 +6850,7 @@ export class Engine {
     }
 
     private rebuildColorBindGroup() {
-        const liveDisplay = this.tiledKeyframePlan ? this.tiledLiveDisplay : this.resolvedDisplay
+        const liveDisplay = this.tiled ? this.tiledLiveDisplay : this.resolvedDisplay
         if (this.pipelineColor && liveDisplay && this.frozenDisplay && this.rawArrayView) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
             const entries: GPUBindGroupEntry[] = [
