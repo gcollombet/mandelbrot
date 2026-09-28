@@ -328,7 +328,7 @@ export class ShaderExpmapRenderer {
         this.stereoPass=pass
         await this.render(view,signal)
         return this.linear!
-      },signal,config.layout)
+      },signal,config.layout,config.relief)
     } catch(error) {failure=error;throw error} finally {
       this.stereoPass=undefined;this.workingReserveBytes=reserve
       const validation=await device.popErrorScope(),memoryError=await device.popErrorScope()

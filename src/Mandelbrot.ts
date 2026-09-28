@@ -70,6 +70,8 @@ export interface MandelbrotParams {
     protrusionTerrace?: number;
     ambientOcclusionStrength?: number;
     localShadowStrength?: number;
+    castShadowStrength?: number;
+    castShadowLength?: number;
     varnishStrength?: number;
     gradeContrast?: number;
     gradeSaturation?: number;

@@ -61,6 +61,8 @@ const props = defineProps<{
   lightAngle?: number,
   ambientOcclusionStrength?: number,
   localShadowStrength?: number,
+  castShadowStrength?: number,
+  castShadowLength?: number,
   varnishStrength?: number,
   gradeContrast?: number,
   gradeSaturation?: number,
@@ -485,6 +487,8 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :lightAngle="props.lightAngle"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :localShadowStrength="props.localShadowStrength"
+      :castShadowStrength="props.castShadowStrength"
+      :castShadowLength="props.castShadowLength"
       :varnishStrength="props.varnishStrength"
       :gradeContrast="props.gradeContrast"
       :gradeSaturation="props.gradeSaturation"

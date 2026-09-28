@@ -17,7 +17,7 @@ describe('material relief gain shader contract', () => {
     expect(palette).toContain('Row 6: reliefGain, metalReflectance, metalEnvironmentTint, protrusion');
     expect(shader).toContain('(*e).reliefGain = clamp(row6.r, 0.0, 2.0);');
     expect(shader).toContain('return clamp(parameters.reliefDepth * wShading, 0.0, 2.0) * exp2(2.0 * (reliefGain - 1.0));');
-    expect(shader).toContain('let scale = relief_material_scale(wShading, reliefGain);');
+    expect(shader).toContain('m.scale = relief_material_scale(row1.b, clamp(row6.r, 0.0, 2.0));');
   });
 
   it('derives the brushing flow from the full rendered height gradient', () => {
@@ -25,7 +25,7 @@ describe('material relief gain shader contract', () => {
     expect(shader).not.toContain('fx.directionalVolume');
     expect(shader).toContain('const RELIEF_HEIGHT_SCALE: f32 = 24.0 * 0.34;');
     expect(shader).toContain('let heightGradient = relief.gradient;');
-    expect(shader).toContain('let surfaceGradientLocal = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;');
+    expect(shader).toContain('let surfaceGradientLocal = heightGradient + textureGradient;');
     expect(shader).toContain('s.flow = select(fieldDir, surfaceGradient / max(slope, 1e-5), slope > 1e-5);');
     expect(shader).toContain('anisotropy_tangent_from_dir(s.flow, normal)');
   });

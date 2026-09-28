@@ -263,6 +263,8 @@ const model =  defineModel<MandelbrotParams>({
      protrusionTerrace: 0,
      ambientOcclusionStrength: 0,
      localShadowStrength: 0,
+     castShadowStrength: 0,
+     castShadowLength: 4,
      varnishStrength: 0,
      gradeContrast: 1.18,
      gradeSaturation: 1.12,
@@ -1388,6 +1390,8 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     lightAngle: model.value.lightAngle,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     localShadowStrength: model.value.localShadowStrength,
+    castShadowStrength: model.value.castShadowStrength,
+    castShadowLength: model.value.castShadowLength,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
@@ -1495,6 +1499,8 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.lightAngle != null) model.value.lightAngle = source.lightAngle;
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
+  model.value.castShadowStrength = source.castShadowStrength ?? 0;
+  model.value.castShadowLength = source.castShadowLength ?? 4;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
@@ -3333,6 +3339,8 @@ async function startVideoExport(payload: {
           :protrusionTerrace="model.protrusionTerrace"
           :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :localShadowStrength="model.localShadowStrength"
+          :castShadowStrength="model.castShadowStrength"
+          :castShadowLength="model.castShadowLength"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
           :gradeSaturation="model.gradeSaturation"
@@ -3516,6 +3524,10 @@ async function startVideoExport(payload: {
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
           <DenseField :label="t('settings.palettes.surface.localShadows')" :min="0" :max="10" :step="0.01" :default="0" f="p2"
             :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
+          <DenseField :label="t('settings.palettes.surface.castShadows')" :min="0" :max="1" :step="0.01" :default="0" f="p2"
+            :model-value="model.castShadowStrength ?? 0" @update:model-value="(v: number) => model.castShadowStrength = v" />
+          <DenseField :label="t('settings.palettes.surface.castShadowLength')" :min="1" :max="20" :step="0.1" :default="4" f="p2"
+            :model-value="model.castShadowLength ?? 4" @update:model-value="(v: number) => model.castShadowLength = v" />
           <DenseField :label="t('settings.palettes.surface.ambientOcclusion')" :min="0" :max="10" :step="0.01" :default="0" f="p2"
             :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
           <DenseField :label="t('settings.palettes.surface.varnish')" :min="0" :max="100" :step="0.05" :default="0" f="p2"

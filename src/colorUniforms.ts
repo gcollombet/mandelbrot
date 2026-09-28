@@ -115,8 +115,10 @@ export const COLOR_UNIFORM_FIELDS = [
     'paletteScreenShiftX',        // palette cycles across the screen width
     'paletteScreenShiftY',
     'stereoEyeSlope',             // orthographic eye direction X/Z, 0 in mono
-    'stereoHeightPass',           // analytic height only, before material/colour
+    'stereoHeightPass',           // 0 colour; >= 1: height pass with relief gain (value - 1)
     'protrusionTerrace',          // integrable lobe form: 0 bounded bumps, 1 terraces
+    'castShadowStrength',         // cast shadows marched on the relief height h, [0, 1]
+    'castShadowLength',           // relief exaggeration for cast shadows only, [1, 20]
 ] as const
 
 export type ColorUniformField = typeof COLOR_UNIFORM_FIELDS[number]

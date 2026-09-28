@@ -50,11 +50,14 @@ describe('palette protrusion effect', () => {
     expect(shader).toContain('1.0 + strength * (base - 1.0),');
     expect(shader).toContain('let geometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);');
     expect(shader).toContain('let period = clamp(parameters.protrusionPeriod, 0.1, 16.0);');
-    expect(shader).toContain('geometricGain = max(1.0 + protrusion * profile, 0.0);');
+    // Geometric lobe: h = S·(F - Hc + P·R(H)·F\'), R a periodic ripple along H.
+    expect(shader).toContain('let geometricGain = max(1.0 + material.protrusion * geometric.y, 0.0);');
+    expect(shader).toContain('let geometricHeight = scale * (offset + ripple);');
     expect(shader).toContain('out.styledRelief = scale * mix(iterationGain.x, geometricGain, geometryMix);');
     // Integrable lobe: terraces h = S·g·(F - Hc) mixed with bounded bumps.
     expect(shader).toContain('let terrace = clamp(parameters.protrusionTerrace, 0.0, 1.0);');
-    expect(shader).toContain('out.gradient = out.gradient + iterationWeight * mix(bumpGradient, terraceGradient, terrace);');
+    expect(shader).toContain('let iterationGradient = mix(bumpGradient, terraceGradient, terrace);');
+    expect(shader).toContain('out.gradient = RELIEF_HEIGHT_SCALE * mix(iterationGradient, geometricGradient, geometryMix);');
     expect(shader).toContain('let styledAnalyticRelief = relief.styledRelief;');
     expect(shader).toContain('let heightGradient = relief.gradient;');
     expect(editor).toContain('paletteEditor.labels.');

@@ -2,8 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { normalizeStereoVideo, stereoProjection } from '../../src/stereoVideo'
 describe('stereo projection contract',()=>{
   it('keeps legacy exports mono and bounds persisted strength',()=>{
-    expect(normalizeStereoVideo()).toEqual({enabled:false,strength:1,layout:'side-by-side'})
-    expect(normalizeStereoVideo({enabled:true,strength:NaN})).toEqual({enabled:true,strength:1,layout:'side-by-side'})
+    expect(normalizeStereoVideo()).toEqual({enabled:false,strength:1,layout:'side-by-side',relief:10})
+    expect(normalizeStereoVideo({enabled:true,strength:NaN})).toEqual({enabled:true,strength:1,layout:'side-by-side',relief:10})
+    // Relief depth: exaggeration of the lit relief height, default 10, bounded [0, 40].
+    expect(normalizeStereoVideo({relief:NaN}).relief).toBe(10)
+    expect(normalizeStereoVideo({relief:-2}).relief).toBe(0)
+    expect(normalizeStereoVideo({relief:99}).relief).toBe(40)
+    expect(normalizeStereoVideo({relief:2.5}).relief).toBe(2.5)
     expect(normalizeStereoVideo({strength:-1}).strength).toBe(0)
     expect(normalizeStereoVideo({strength:99}).strength).toBe(3)
   })

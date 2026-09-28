@@ -25,6 +25,7 @@ it('shades both eyes independently, transfers float height and composes only a c
   expect(passes.map(p=>p.height)).toEqual([false,false,true])
   expect(passes[0].eyeSlope).toBeLessThan(0);expect(passes[1].eyeSlope).toBe(-passes[0].eyeSlope)
   expect(passes[2].eyeSlope).toBe(0)
+  expect(passes[2].relief).toBe(10)
   expect(commands.map(c=>c[0])).toEqual(['copy','copy','copy','compose'])
   expect(textures.every(t=>t.format==='rgba16float')).toBe(true)
   renderer.dispose();expect(textures.every(t=>t.destroy.mock.calls.length===1)).toBe(true)

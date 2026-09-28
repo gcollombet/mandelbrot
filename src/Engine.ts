@@ -1,5 +1,6 @@
 import type { HdrGpuOptions } from './hdrGpuOutput'
-import type { StereoColorPass } from './stereoVideo'
+import { STEREO_RELIEF_DEFAULT, type StereoColorPass } from './stereoVideo'
+import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, withoutCastShadowBinding } from './castShadow'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
 import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
@@ -121,6 +122,9 @@ interface ColorPipelines {
     rotation: GPURenderPipeline
     clear: GPURenderPipeline
     accum: GPURenderPipeline
+    /** Cast-shadow height raster (screen / rotation cache), full family only. */
+    castHeight?: GPURenderPipeline
+    castHeightRotation?: GPURenderPipeline
 }
 
 interface ColorPipelineFamily { full: ColorPipelines, simple: ColorPipelines }
@@ -280,6 +284,8 @@ export type RenderOptions = {
     protrusionTerrace: number,
     lightAngle: number,
     localShadowStrength: number,
+    castShadowStrength: number,
+    castShadowLength: number,
     varnishStrength: number,
     gradeContrast?: number,
     gradeSaturation?: number,
@@ -536,6 +542,15 @@ export class Engine {
     // ── Settled non-AA rotation resolve ───────────────────────────────
     /** Existing color shader rendered once into a scene-aligned linear cache. */
     private pipelineRotationColorCache?: GPURenderPipeline
+    // Cast shadows: h / T raster written just before a colour pass (castShadow.ts).
+    private castShadowSupported = false
+    private pipelineCastHeight?: GPURenderPipeline
+    private pipelineCastHeightRotation?: GPURenderPipeline
+    private castShadowTexture?: GPUTexture
+    private castShadowTextureView?: GPUTextureView
+    // The height pass renders into the raster, so it binds a 1x1 stand-in at 21.
+    private castShadowDummyView?: GPUTextureView
+    private bindGroupColorCastHeight?: GPUBindGroup
     /** Cheap screen pass that bilinearly reconstructs the final cached color. */
     private pipelineRotationPresent?: GPURenderPipeline
     private bindGroupRotationPresent?: GPUBindGroup
@@ -1101,9 +1116,11 @@ export class Engine {
             }
         }
         // Full shader ExpMap adds one regular display-set texture to the
-        // sixteen material bindings. Older adapters keep the block fallback.
-        if (this.adapter.limits.maxSampledTexturesPerShaderStage >= 17) {
-            requiredLimits.maxSampledTexturesPerShaderStage = 17
+        // sixteen material bindings, and cast shadows one more (the height
+        // raster). Older adapters keep the block fallback / no cast shadows.
+        const sampledTextures = this.adapter.limits.maxSampledTexturesPerShaderStage
+        if (sampledTextures >= 17) {
+            requiredLimits.maxSampledTexturesPerShaderStage = Math.min(sampledTextures, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES)
         }
         try {
             this.device = await this.adapter.requestDevice({ requiredFeatures, requiredLimits })
@@ -1114,6 +1131,8 @@ export class Engine {
             console.warn('[Engine] requestDevice with raised limits failed, falling back to defaults', error)
             this.device = await this.adapter.requestDevice({ requiredFeatures })
         }
+        this.castShadowSupported = this.device.limits.maxSampledTexturesPerShaderStage >= CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES
+        if (!this.castShadowSupported) this.shaderPassColor = withoutCastShadowBinding(colorShader)
         console.info('[Engine] limits: '
             + `maxBufferSize=${this.device.limits.maxBufferSize} `
             + `maxStorageBufferBindingSize=${this.device.limits.maxStorageBufferBindingSize} `
@@ -1369,6 +1388,7 @@ export class Engine {
             bind.data(),                     // frozenTrapPayloadTex
             bind.readOnlyStorage(),          // palettePath
             bind.sampler(),                  // tileSampler
+            ...(this.castShadowSupported ? [bind.data()] : []), // castShadowHeightTex
         ])
         this.colorPipelineSource = { device, module: color.module, layout: color.pipelineLayout }
         const [full, simple, hdrFull, hdrSimple] = await Promise.all([
@@ -1645,7 +1665,8 @@ export class Engine {
                 vertexEntry: rotation ? 'vs_rotation_cache' : 'vs_main',
                 fragmentEntry: entryPoint,
             }))
-        const [direct, rotation, clear, accum] = await Promise.all([
+        const castShadows = surfaceEffects && this.castShadowSupported
+        const [direct, rotation, clear, accum, castHeight, castHeightRotation] = await Promise.all([
             create('fs_main_direct', { format: hdr ? 'rgba16float' : this.format }),
             create('fs_rotation_cache', { format: 'rgba16float' }, true),
             create('fs_main', { format: 'rgba16float' }),
@@ -1656,8 +1677,10 @@ export class Engine {
                     alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
                 },
             }),
+            castShadows ? create('fs_cast_height', { format: CAST_SHADOW_HEIGHT_FORMAT }) : undefined,
+            castShadows ? create('fs_cast_height_rotation', { format: CAST_SHADOW_HEIGHT_FORMAT }, true) : undefined,
         ])
-        return { direct, rotation, clear, accum }
+        return { direct, rotation, clear, accum, ...(castHeight && castHeightRotation ? { castHeight, castHeightRotation } : {}) }
     }
 
     /**
@@ -1698,6 +1721,8 @@ export class Engine {
         this.pipelineRotationColorCache = pipelines.rotation
         this.pipelineColorAccumClear = pipelines.clear
         this.pipelineColorAccum = pipelines.accum
+        this.pipelineCastHeight = pipelines.castHeight
+        this.pipelineCastHeightRotation = pipelines.castHeightRotation
     }
 
     private rebuildInplaceBindGroup() {
@@ -3101,7 +3126,7 @@ export class Engine {
         const context = this.shaderReplayContext
         try { await this.update({ ...context, angle, mu: sourceMu ?? context.mu }, options) }
         finally { this.animationTimeOverride = saved; this.shaderReplayContext = context }
-        const stereoRun = packColorUniformRun({ stereoEyeSlope: stereo?.eyeSlope ?? 0, stereoHeightPass: stereo?.height ? 1 : 0 })
+        const stereoRun = packColorUniformRun({ stereoEyeSlope: stereo?.eyeSlope ?? 0, stereoHeightPass: stereo?.height ? 1 + Math.max(0, stereo.relief ?? STEREO_RELIEF_DEFAULT) : 0 })
         this.device.queue.writeBuffer(this.uniformBufferColor!, stereoRun.byteOffset, stereoRun.data)
         if (!this.bindGroupColor || !this.pipelineColor) throw new Error('Color resources unavailable')
         return { code: this.shaderPassColor, layout: this.pipelineColor.getBindGroupLayout(0), bindGroup: this.bindGroupColor }
@@ -3515,7 +3540,7 @@ export class Engine {
             lightDirY: Math.sin(effectiveLightAngle) / lightDirLen,
             lightDirZ: 1.85 / lightDirLen,
             paletteMirror: renderOptions.paletteMirror ? 1 : 0,
-            // 1 = debug wheel; 2 = relief integrability residual (dev console only)
+            // 1 = debug wheel; dev console only: 2 = relief integrability residual, 3 = stereo depth
             debugShading: Number(renderOptions.debugShading ?? 0),
             heightPaletteShift: effectiveHeightPaletteShift,
             orbitTrapStrength: effectiveOrbitTrap.strength,
@@ -3571,6 +3596,8 @@ export class Engine {
             // Stereo replay overrides; interactive and classic exports stay mono.
             stereoEyeSlope: 0,
             stereoHeightPass: 0,
+            castShadowStrength: this.castShadowSupported ? Math.max(0, Math.min(1, renderOptions.castShadowStrength ?? 0)) : 0,
+            castShadowLength: Math.max(1, Math.min(20, renderOptions.castShadowLength ?? 4)),
         }
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
 
@@ -4476,6 +4503,8 @@ export class Engine {
         }
 
         // ── Terminal color branches: direct, AA, or settled rotation ──────
+        const castShadows = this.castShadowsActive(renderOptions)
+        if (castShadows) this.prepareCastShadowRaster(Math.max(this.width, this.neutralSize), Math.max(this.height, this.neutralSize))
         const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
 
@@ -4564,6 +4593,7 @@ export class Engine {
 
         if (aaCompositeThisFrame) {
             const firstSample = this.aaSampleIndex === 0
+            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
             const rpassAccum = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: this.accumTextureView!,
@@ -4584,6 +4614,7 @@ export class Engine {
             // Colorize each neutral texel once. The cache contains final linear
             // color, so its later bilinear filtering cannot invent semantic
             // iteration/geometry/orbit-trap states.
+            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.neutralSize, this.neutralSize, true)
             const rpassRotationCache = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: this.rotationColorTextureView!,
@@ -4602,6 +4633,7 @@ export class Engine {
         } else if (!aaShowAccum && !rotationShowCache) {
             // Direct path: color straight to the swapchain (AA off, or sample 0 not
             // yet converged). Byte-identical to the historical behaviour.
+            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
             const rpassColor = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: swapView,
@@ -4816,6 +4848,11 @@ export class Engine {
                 swapchainView: () => this.ctx.getCurrentTexture().createView(),
                 colorBindGroup,
                 linearPipeline: this.expmap ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!,
+                // The ExpMap block capture reads raw-grid coordinates: no height raster.
+                castShadow: castShadows && !this.expmap ? {
+                    prepare: (width: number, height: number) => this.prepareCastShadowRaster(width, height),
+                    encode: (encoder: GPUCommandEncoder, width: number, height: number) => this.encodeCastShadowHeight(encoder, width, height),
+                } : undefined,
                 accumulator: this.exportAaSamples > 1 && this.aaAccumulatedSamples > 0 && this.accumTextureView
                     ? this.accumTextureView
                     : null,
@@ -4835,6 +4872,11 @@ export class Engine {
                 });
                 {
                   const encoder = this.device.createCommandEncoder();
+                  let snapshotBindGroup = colorBindGroup!;
+                  if (castShadows) {
+                    snapshotBindGroup = this.prepareCastShadowRaster(targetWidth, targetHeight);
+                    this.encodeCastShadowHeight(encoder, targetWidth, targetHeight);
+                  }
                   const renderPass = encoder.beginRenderPass({
                     colorAttachments: [{
                       view: snapshotTex.createView(),
@@ -4844,7 +4886,7 @@ export class Engine {
                     }]
                   });
                   renderPass.setPipeline((this.colorPipelineFamily(false) ?? this.colorPipelines!).full.direct);
-                  renderPass.setBindGroup(0, colorBindGroup!);
+                  renderPass.setBindGroup(0, snapshotBindGroup);
                   renderPass.draw(6, 1, 0, 0);
                   renderPass.end();
                   this.device.queue.submit([encoder.finish()]);
@@ -5344,6 +5386,66 @@ export class Engine {
         return this.skyboxTextureSourceKey === sourceKey
     }
 
+    /**
+     * Height raster for cast shadows, at least width x height. Grows only;
+     * a regrowth rebinds the colour group. Returns true if it was reallocated.
+     */
+    private ensureCastShadowTexture(width: number, height: number): boolean {
+        const current = this.castShadowTexture
+        if (current && current.width >= width && current.height >= height) return false
+        const w = Math.max(1, Math.ceil(width), current?.width ?? 1)
+        const h = Math.max(1, Math.ceil(height), current?.height ?? 1)
+        current?.destroy()
+        this.castShadowTexture = this.device.createTexture({
+            size: { width: w, height: h, depthOrArrayLayers: 1 },
+            format: CAST_SHADOW_HEIGHT_FORMAT,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine CastShadow Height',
+        })
+        this.castShadowTextureView = this.castShadowTexture.createView({ label: 'Engine CastShadow Height View' })
+        return true
+    }
+
+    /** True when the next colour pass should get a fresh height raster. */
+    private castShadowsActive(renderOptions: RenderOptions): boolean {
+        return this.castShadowSupported && !!this.pipelineCastHeight
+            && (renderOptions.castShadowStrength ?? 0) > 0
+    }
+
+    /**
+     * Encode the h / T raster for a colour pass of width x height pixels
+     * (screen raster, or the neutral square when `rotation`). It must share the
+     * colour pass's raster exactly: same vertex shader, same viewport origin.
+     */
+    private encodeCastShadowHeight(encoder: GPUCommandEncoder, width: number, height: number, rotation = false): void {
+        const pipeline = rotation ? this.pipelineCastHeightRotation : this.pipelineCastHeight
+        if (!pipeline || !this.castShadowTextureView || !this.bindGroupColorCastHeight) return
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: this.castShadowTextureView,
+                clearValue: { r: CAST_SHADOW_NO_SURFACE, g: 0, b: 0, a: 1 },
+                loadOp: 'clear',
+                storeOp: 'store',
+            }],
+            label: 'Engine CastShadow Height',
+        })
+        pass.setViewport(0, 0, width, height, 0, 1)
+        pass.setScissorRect(0, 0, width, height)
+        pass.setPipeline(pipeline)
+        pass.setBindGroup(0, this.bindGroupColorCastHeight)
+        pass.draw(6, 1, 0, 0)
+        pass.end()
+    }
+
+    /**
+     * Make sure the height raster covers a colour pass of this size before the
+     * colour bind group is used; returns the (possibly rebuilt) group.
+     */
+    prepareCastShadowRaster(width: number, height: number): GPUBindGroup {
+        if (this.castShadowSupported && this.ensureCastShadowTexture(width, height)) this.rebuildColorBindGroup()
+        return this.bindGroupColor!
+    }
+
     private rebuildColorBindGroup() {
         const liveDisplay = this.tiled ? this.tiledLiveDisplay : this.resolvedDisplay
         if (this.pipelineColor && liveDisplay && this.frozenDisplay && this.rawArrayView) {
@@ -5371,6 +5473,21 @@ export class Engine {
                 { binding: 19, resource: { buffer: this.palettePathGpu?.buffer ?? this.palettePathDummy! } },
                 { binding: 20, resource: this.tileSampler! },
             ]
+            if (this.castShadowSupported) {
+                this.ensureCastShadowTexture(1, 1)
+                this.castShadowDummyView ??= this.device.createTexture({
+                    size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+                    format: CAST_SHADOW_HEIGHT_FORMAT,
+                    usage: GPUTextureUsage.TEXTURE_BINDING,
+                    label: 'Engine CastShadow Dummy',
+                }).createView()
+                this.bindGroupColorCastHeight = this.device.createBindGroup({
+                    layout,
+                    entries: [...entries, { binding: 21, resource: this.castShadowDummyView }],
+                    label: 'Engine BindGroup Color (cast height)',
+                })
+                entries.push({ binding: 21, resource: this.castShadowTextureView! })
+            }
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
                 entries,

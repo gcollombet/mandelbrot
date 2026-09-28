@@ -753,6 +753,8 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   protrusionTerrace: 0,
   ambientOcclusionStrength: 0,
   localShadowStrength: 0,
+  castShadowStrength: 0,
+  castShadowLength: 4,
   varnishStrength: 0,
   gradeContrast: 1.18,
   gradeSaturation: 1.12,
@@ -1953,6 +1955,8 @@ function tickTravelAnimation() {
     mandelbrotParams.value.protrusionTerrace = target.protrusionTerrace ?? 0;
     mandelbrotParams.value.ambientOcclusionStrength = target.ambientOcclusionStrength ?? 0;
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
+    mandelbrotParams.value.castShadowStrength = target.castShadowStrength ?? 0;
+    mandelbrotParams.value.castShadowLength = target.castShadowLength ?? 4;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
     mandelbrotParams.value.gradeSaturation = target.gradeSaturation ?? 1.12;
@@ -2241,6 +2245,8 @@ async function startTravelToPreset(preset: PresetRecord) {
       :lightAngle="mandelbrotParams.lightAngle"
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
+      :castShadowStrength="mandelbrotParams.castShadowStrength"
+      :castShadowLength="mandelbrotParams.castShadowLength"
       :varnishStrength="mandelbrotParams.varnishStrength"
       :gradeContrast="mandelbrotParams.gradeContrast"
       :gradeSaturation="mandelbrotParams.gradeSaturation"

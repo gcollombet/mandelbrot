@@ -62,7 +62,7 @@ describe('packed geometry display ABI', () => {
 
 describe('typed display consumers', () => {
   it('uses cached gradient/curvature for base shading without distance-neighbour reads', () => {
-    expect(color).toContain('out.gradient = cachedGradient * (RELIEF_HEIGHT_SCALE * out.styledRelief);')
+    expect(color).toContain('let terraceGradient = lobed * fade * cachedGradient + offset * lobedGradient;')
     expect(color).toContain('s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;')
     expect(color).toContain('atan2(geometry.y, geometry.x)')
     expect(color).not.toContain('fn orbit_metric_gradients_at_coord(')
@@ -78,8 +78,9 @@ describe('typed display consumers', () => {
     expect(resolve).toContain('@location(5) orbitGradient: vec4<f32>')
     expect(resolve).toContain('orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);')
     expect(merge).toContain('@location(5) orbitGradient: vec4<f32>')
-    expect(color).toContain('let stripeGrad = cachedStripeGradient * 8.0;')
-    expect(color).toContain('let directionCoherenceGrad = cachedCoherenceGradient * 16.0;')
+    // Stripe and coherence are heights: 12·Ws·(-0.5 - 0.5 cos 2πp) and 12·Wc·(coherence - 1).
+    expect(color).toContain('let stripeProfileGradient = (3.141592653589793 * sin(TWO_PI * stripePhase) * 0.5) * stripeGradient;')
+    expect(color).toContain('+ material.coherence * coherenceGradient + (coherence - 1.0) * coherenceWeightGradient);')
     expect(color).toContain('fn normalize_orbit_gradient(')
     expect(engine).toContain('const RAW_ORBIT_GRADIENT_LAYERS = 18')
     // The deep kernel tracks the same metrics from the same w = z'/z.

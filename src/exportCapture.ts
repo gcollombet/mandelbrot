@@ -46,6 +46,14 @@ export type CaptureFrameContext = {
     linearPipeline: GPURenderPipeline
     /** AA accumulator holding the frame (linear sum, sample count in alpha), when used. */
     accumulator: GPUTextureView | null
+    /**
+     * Cast shadows: size the height raster (may rebuild the colour group, which
+     * is returned) and encode it for the linear pass. Absent when disabled.
+     */
+    castShadow?: {
+        prepare: (width: number, height: number) => GPUBindGroup
+        encode: (encoder: GPUCommandEncoder, width: number, height: number) => void
+    }
 }
 
 /** Align a row stride to WebGPU's 256-byte copyTextureToBuffer requirement. */
@@ -156,12 +164,19 @@ export class ExportCapture {
                 }
                 reduceSource = this.accumBindGroup!
             } else {
+                const linearWidth = outputWidth * supersample
+                const linearHeight = outputHeight * supersample
+                let colorBindGroup = frame.colorBindGroup
+                if (frame.castShadow) {
+                    colorBindGroup = frame.castShadow.prepare(linearWidth, linearHeight)
+                    frame.castShadow.encode(encoder, linearWidth, linearHeight)
+                }
                 const linear = encoder.beginRenderPass({
                     colorAttachments: [{ view: this.linearView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
                     label: 'Engine ExportCapture Linear',
                 })
                 linear.setPipeline(frame.linearPipeline)
-                linear.setBindGroup(0, frame.colorBindGroup)
+                linear.setBindGroup(0, colorBindGroup)
                 linear.draw(6, 1, 0, 0)
                 linear.end()
                 reduceSource = this.presentBindGroup!

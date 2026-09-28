@@ -1,4 +1,5 @@
-// Orthographic off-axis stereo over a bounded analytic height field.
+// Orthographic off-axis stereo over the analytic relief height h of the colour
+// pass (color.wgsl, relief_field): z = 1 + h/T, interior at z = -1.
 // All lookups stay in the source rectangle through a common symmetric crop.
 @group(0) @binding(0) var leftImage: texture_2d<f32>;
 @group(0) @binding(1) var rightImage: texture_2d<f32>;

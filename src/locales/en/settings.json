@@ -210,6 +210,8 @@
       "lightDirection": "Light direction",
       "microBump": "Fine bump",
       "localShadows": "Local shadows",
+      "castShadows": "Cast shadows",
+      "castShadowLength": "Shadow length",
       "ambientOcclusion": "Ambient occlusion",
       "varnish": "Varnish",
       "contrast": "Contrast",

@@ -41,7 +41,9 @@ it('persists stereo independently of the preferred mono render order',()=>{
   saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,stereo:{enabled:true,strength:1.4},ringFirst:true})
   expect(loadShaderPreferences()).toMatchObject({stereo:{enabled:true,strength:1.4},ringFirst:true})
   store.set('shader-expmap-preferences',JSON.stringify({stereo:{enabled:'yes',strength:'bad'}}))
-  expect(loadShaderPreferences().stereo).toEqual({enabled:false,strength:1,layout:'side-by-side'})
+  expect(loadShaderPreferences().stereo).toEqual({enabled:false,strength:1,layout:'side-by-side',relief:10})
+  saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,stereo:{enabled:true,strength:1,relief:3}})
+  expect(loadShaderPreferences().stereo).toMatchObject({relief:3})
 })
 
 it('remembers top-bottom packing',()=>{

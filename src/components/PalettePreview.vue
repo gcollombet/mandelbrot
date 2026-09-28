@@ -4,6 +4,7 @@ import type {ColorStop} from '../ColorStop.ts';
 import type {InterpolationMode} from '../Mandelbrot.ts';
 import {Palette} from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
+import { withoutCastShadowBinding } from '../castShadow';
 import {getDefaultSkyboxTextureUrl, getDefaultTileTextureUrl} from '../textureLibrary';
 import {generateMipmaps, mipLevelCountFor, TEXTURE_MAX_ANISOTROPY} from '../mipmaps';
 import {
@@ -208,6 +209,8 @@ function previewUniforms(): ColorUniforms {
     paletteScreenShiftY: 0,
     stereoEyeSlope: 0,
     stereoHeightPass: 0,
+    castShadowStrength: 0,
+    castShadowLength: 4,
   };
 }
 
@@ -577,7 +580,8 @@ async function init() {
   });
 
   // ── Pipeline (renders straight to the sRGB canvas) ──
-  const module = device.createShaderModule({ code: colorShader, label: 'PalettePreview ShaderModule' });
+  // No height raster here: the preview's synthetic surface casts no shadows.
+  const module = device.createShaderModule({ code: withoutCastShadowBinding(colorShader), label: 'PalettePreview ShaderModule' });
   pipeline = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
     vertex: { module, entryPoint: 'vs_main' },

@@ -74,7 +74,7 @@ watch(dynamicRange,value=>{if(value==='hdr'&&codec.value==='avc')codec.value='he
 const useRingFirst=computed(()=>ringFirst.value&&!stereo.value.enabled&&dynamicRange.value!=='hdr')
 const outputWidth=ref(saved.width),outputHeight=ref(saved.height),preview=ref<HTMLCanvasElement|null>(null)
 watch(dynamicRange, mode => { if (mode === 'sdr' && encoding.value.profile === 'quantizer') encoding.value = { ...encoding.value, profile: 'high' } }, { immediate: true })
-watch([encoding,dynamicRange,hdrExposure,hdrQuantizer,()=>stereo.value.enabled,()=>stereo.value.strength,()=>stereo.value.layout,interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
+watch([encoding,dynamicRange,hdrExposure,hdrQuantizer,()=>stereo.value.enabled,()=>stereo.value.strength,()=>stereo.value.relief,()=>stereo.value.layout,interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
   interpolation:interpolation.value,sampleDistribution:sampleDistribution.value,radialDensity:radialDensity.value,budgetMiB:budgetMiB.value,samples:samples.value,previewScale:previewScale.value,angle:angle.value,
   encoding:{...encoding.value},dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,ringFirst:ringFirst.value,keepRings:keepRings.value,ringBitrateMbps:ringBitrateMbps.value}))
 let abort:AbortController|undefined,hardAbort:AbortController|undefined
@@ -319,6 +319,7 @@ function updateWindow() {
             <template v-if="stereo.enabled">
               <DenseSelect v-model="stereo.layout" :label="t('shaderExpmapPanel.video.layout')" :options="layoutOptions"/>
               <DenseField v-model="stereo.strength" :label="t('shaderExpmapPanel.video.stereoStrength')" :min="0" :max="3" :step="0.1" :default="1"/>
+              <DenseField v-model="stereo.relief" :label="t('shaderExpmapPanel.video.stereoRelief')" :min="0" :max="40" :step="0.5" :default="10"/>
               <p class="hint">{{ t('shaderExpmapPanel.video.stereoHint', { eyes: stereo.layout==='top-bottom'?t('shaderExpmapPanel.video.eyesTopBottom'):t('shaderExpmapPanel.video.eyesSideBySide'), layout: stereo.layout==='top-bottom'?'Half Over-Under':'Half SBS' }) }}</p>
               <p class="hint">{{ t('shaderExpmapPanel.video.stereoCost') }}</p>
               <p v-if="!memory" role="alert">{{ t('shaderExpmapPanel.video.stereoBudgetInsufficient') }}</p>

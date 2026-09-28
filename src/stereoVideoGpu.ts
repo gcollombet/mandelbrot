@@ -1,6 +1,6 @@
 import shader from './assets/stereo_video.wgsl?raw'
 import { t } from './i18n'
-import { stereoProjection, validateStereoDimensions, type StereoVideoLayout, type StereoColorPass } from './stereoVideo'
+import { stereoProjection, validateStereoDimensions, STEREO_RELIEF_DEFAULT, type StereoVideoLayout, type StereoColorPass } from './stereoVideo'
 
 /** Three deterministic source passes, then height-field projection for both eyes.
  * Color is shaded per eye BEFORE projection, never copied from the other eye. */
@@ -34,10 +34,10 @@ export class StereoVideoGpu {
       {binding:4,resource:{buffer:this.uniform}},
     ]})
   }
-  async render(strength:number, renderSource:(pass:StereoColorPass)=>Promise<GPUTexture>, signal?:{aborted:boolean}, layout:StereoVideoLayout='side-by-side') {
+  async render(strength:number, renderSource:(pass:StereoColorPass)=>Promise<GPUTexture>, signal?:{aborted:boolean}, layout:StereoVideoLayout='side-by-side', relief:number=STEREO_RELIEF_DEFAULT) {
     validateStereoDimensions(this.width,this.height,layout)
     const projection=stereoProjection(this.width,this.height,strength)
-    const passes:StereoColorPass[]=[{eyeSlope:-projection.eyeSlope,height:false},{eyeSlope:projection.eyeSlope,height:false},{eyeSlope:0,height:true}]
+    const passes:StereoColorPass[]=[{eyeSlope:-projection.eyeSlope,height:false},{eyeSlope:projection.eyeSlope,height:false},{eyeSlope:0,height:true,relief}]
     for(let i=0;i<passes.length;i++) {
       if(signal?.aborted)throw new DOMException(t('video.runner.interrupted'),'AbortError')
       const source=await renderSource(passes[i])
