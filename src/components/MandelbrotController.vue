@@ -69,6 +69,7 @@ const props = defineProps<{
   tiltViewTilt?: number,
   tiltViewHeading?: number,
   tiltViewRelief?: number,
+  tiltViewInteriorDepth?: number,
   varnishStrength?: number,
   gradeContrast?: number,
   gradeSaturation?: number,
@@ -501,6 +502,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :tiltViewTilt="props.tiltViewTilt"
       :tiltViewHeading="props.tiltViewHeading"
       :tiltViewRelief="props.tiltViewRelief"
+      :tiltViewInteriorDepth="props.tiltViewInteriorDepth"
       :varnishStrength="props.varnishStrength"
       :gradeContrast="props.gradeContrast"
       :gradeSaturation="props.gradeSaturation"

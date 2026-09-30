@@ -78,6 +78,7 @@ export interface MandelbrotParams {
     tiltViewTilt?: number;
     tiltViewHeading?: number;
     tiltViewRelief?: number;
+    tiltViewInteriorDepth?: number;
     varnishStrength?: number;
     gradeContrast?: number;
     gradeSaturation?: number;

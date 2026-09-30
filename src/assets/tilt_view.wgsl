@@ -23,12 +23,16 @@ struct TiltParams {
   heading: vec2<f32>,  // e = (cos, sin) of the heading, screen frame, y up
   relief: f32,         // exaggeration of h / T
   fit: f32,            // view scale applied to the output coordinates
+  interiorDepth: f32,  // basin depth D in z, [0, 1]; 0 = flat plateau at the rim
+  basinRadius: f32,    // basin length scale R, in half-heights
+  _pad: vec2<f32>,
 };
 
 @group(0) @binding(0) var sourceTex: texture_2d<f32>;   // linear rgb, sample count in alpha
 @group(0) @binding(1) var heightTex: texture_2d<f32>;   // h / T, -1e4 where no surface
 @group(0) @binding(2) var linearSampler: sampler;
 @group(0) @binding(3) var<uniform> params: TiltParams;
+@group(0) @binding(4) var seedTex: texture_2d<f32>;     // nearest surface pixel (tilt_distance.wgsl)
 
 const NO_SURFACE: f32 = -1e4;
 const MIN_STEPS: f32 = 32.0;
@@ -51,11 +55,24 @@ fn ground_to_pixel(g: vec2<f32>) -> vec2<f32> {
                    (0.5 - g.y * 0.5) * params.raster.y);
 }
 
+// Interior (no surface): a basin z = -D·(1 - exp(-d/R)), d the distance to
+// the nearest surface pixel in half-heights. It starts level with the rim and
+// sinks smoothly, so no vertical cliff holds the rim colour; D = 0 leaves a
+// flat plateau at the rim's height.
+fn interior_z(p: vec2<i32>) -> f32 {
+  let depth = params.interiorDepth;
+  if (depth <= 0.0) { return 0.0; }
+  let seed = textureLoad(seedTex, p, 0).xy;
+  if (seed.x < 0.0) { return -depth; }
+  let d = length(seed - (vec2<f32>(p) + vec2<f32>(0.5))) * 2.0 / params.raster.y;
+  return -depth * (1.0 - exp(-d / max(params.basinRadius, 1e-4)));
+}
+
 fn height_at(p: vec2<i32>) -> f32 {
-  let dims = vec2<i32>(textureDimensions(heightTex));
-  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return -1.0; }
+  let dims = vec2<i32>(textureDimensions(seedTex));
+  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return -params.interiorDepth; }
   let h = textureLoad(heightTex, p, 0).r;
-  return select(clamp(params.relief * h, -1.0, 0.0), -1.0, h <= NO_SURFACE * 0.5);
+  return select(clamp(params.relief * h, -1.0, 0.0), interior_z(p), h <= NO_SURFACE * 0.5);
 }
 
 // Surface depth z at a ground point, bilinear between raster pixel centres.
@@ -107,7 +124,7 @@ fn source_color(g: vec2<f32>) -> vec3<f32> {
   return c.rgb / max(c.a, 1e-6);
 }
 
-// Walls: a vertical face (the drop into the interior, terrace walls) holds no
+// Walls: a steep face (terrace walls, filament ridges) holds no
 // colour of its own in the top-down image; every column would take the
 // colour of the single rim pixel above it, i.e. vertical streaks. The faces
 // the camera sees drop away from it, so a hit is on a wall when the terrain

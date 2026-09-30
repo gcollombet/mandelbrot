@@ -761,6 +761,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   tiltViewTilt: 0,
   tiltViewHeading: 0,
   tiltViewRelief: 10,
+  tiltViewInteriorDepth: 1,
   varnishStrength: 0,
   gradeContrast: 1.18,
   gradeSaturation: 1.12,
@@ -2262,6 +2263,7 @@ async function startTravelToPreset(preset: PresetRecord) {
       :tiltViewTilt="mandelbrotParams.tiltViewTilt"
       :tiltViewHeading="mandelbrotParams.tiltViewHeading"
       :tiltViewRelief="mandelbrotParams.tiltViewRelief"
+      :tiltViewInteriorDepth="mandelbrotParams.tiltViewInteriorDepth"
       :varnishStrength="mandelbrotParams.varnishStrength"
       :gradeContrast="mandelbrotParams.gradeContrast"
       :gradeSaturation="mandelbrotParams.gradeSaturation"

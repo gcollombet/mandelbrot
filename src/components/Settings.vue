@@ -3125,6 +3125,8 @@ async function startVideoExport(payload: {
             :model-value="model.tiltViewHeading ?? 0" @update:model-value="(v: number) => model.tiltViewHeading = v" />
           <DenseField :label="t('settings.navigation.view3d.relief')" :min="0" :max="40" :step="0.5" :default="10" f="p1"
             :model-value="model.tiltViewRelief ?? 10" @update:model-value="(v: number) => model.tiltViewRelief = v" />
+          <DenseField :label="t('settings.navigation.view3d.interiorDepth')" :min="0" :max="1" :step="0.01" :default="1" f="p2"
+            :model-value="model.tiltViewInteriorDepth ?? 1" @update:model-value="(v: number) => model.tiltViewInteriorDepth = v" />
         </div>
       </DenseSection>
 

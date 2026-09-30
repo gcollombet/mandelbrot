@@ -17,6 +17,7 @@ import resolveShader from './assets/resolve.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
 import tiltViewShader from './assets/tilt_view.wgsl?raw'
+import tiltDistanceShader from './assets/tilt_distance.wgsl?raw'
 import { normalizeTiltView, tiltViewUniforms } from './tiltView'
 import rotationPresentShader from './assets/rotation_present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
@@ -292,6 +293,7 @@ export type RenderOptions = {
     tiltViewTilt?: number,
     tiltViewHeading?: number,
     tiltViewRelief?: number,
+    tiltViewInteriorDepth?: number,
     horizonOcclusionStrength: number,
     horizonOcclusionRadius: number,
     varnishStrength: number,
@@ -567,6 +569,10 @@ export class Engine {
     private tiltSourceTexture?: GPUTexture
     private tiltOutTexture?: GPUTexture
     private tiltExportOutTexture?: GPUTexture
+    // Nearest-rim seeds for the interior basin (tilt_distance.wgsl), ping-pong.
+    private pipelineTiltSeed?: GPURenderPipeline
+    private pipelineTiltJump?: GPURenderPipeline
+    private tiltSeedTextures: GPUTexture[] = []
     /** Cheap screen pass that bilinearly reconstructs the final cached color. */
     private pipelineRotationPresent?: GPURenderPipeline
     private bindGroupRotationPresent?: GPUBindGroup
@@ -1511,7 +1517,17 @@ export class Engine {
             primitive: { topology: 'triangle-list' },
         })
         this.tiltViewSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', label: 'Engine TiltView Sampler' })
-        const tiltUniform = (label: string) => device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
+        const distanceModule = device.createShaderModule({ code: tiltDistanceShader, label: 'Engine ShaderModule TiltDistance' })
+        const distancePipeline = (entryPoint: string) => device.createRenderPipeline({
+            label: `Engine RenderPipeline TiltDistance (${entryPoint})`,
+            layout: 'auto',
+            vertex: { module: distanceModule, entryPoint: 'vs_main' },
+            fragment: { module: distanceModule, entryPoint, targets: [{ format: 'rg32float' }] },
+            primitive: { topology: 'triangle-list' },
+        })
+        this.pipelineTiltSeed = distancePipeline('fs_seed')
+        this.pipelineTiltJump = distancePipeline('fs_jump')
+        const tiltUniform = (label: string) => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
         this.tiltViewUniformLive = tiltUniform('Engine TiltView Uniform (live)')
         this.tiltViewUniformExport = tiltUniform('Engine TiltView Uniform (export)')
 
@@ -5491,6 +5507,7 @@ export class Engine {
             tilt: (renderOptions.tiltViewTilt ?? 0) + track('tiltViewTilt'),
             heading: (renderOptions.tiltViewHeading ?? 0) + 360 * track('tiltViewHeading'),
             relief: (renderOptions.tiltViewRelief ?? 10) + track('tiltViewRelief'),
+            interiorDepth: renderOptions.tiltViewInteriorDepth ?? 1,
         }
     }
 
@@ -5509,8 +5526,51 @@ export class Engine {
      * Encode the tilted view of `source` (linear rgb, sample count in alpha) on
      * a width x height raster whose height raster is current, into `target`.
      */
+    /**
+     * Jump flooding over the height raster (width x height): each pixel gets
+     * its nearest surface pixel, for the interior basin. Returns the seeds.
+     */
+    private encodeTiltSeeds(encoder: GPUCommandEncoder, width: number, height: number): GPUTexture | undefined {
+        if (!this.pipelineTiltSeed || !this.pipelineTiltJump || !this.castShadowTextureView) return undefined
+        for (let i = 0; i < 2; i++) {
+            const t = this.tiltSeedTextures[i]
+            if (!t || t.width !== width || t.height !== height) {
+                t?.destroy()
+                this.tiltSeedTextures[i] = this.device.createTexture({
+                    size: { width, height, depthOrArrayLayers: 1 },
+                    format: 'rg32float',
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+                    label: `Engine TiltView Seeds ${i}`,
+                })
+            }
+        }
+        const run = (pipeline: GPURenderPipeline, source: GPUTextureView, target: GPUTexture, step: number) => {
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{ view: target.createView(), clearValue: { r: -1, g: -1, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
+                label: 'Engine TiltView Seeds',
+            })
+            pass.setPipeline(pipeline)
+            pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: source }] }))
+            pass.draw(3, 1, 0, step)
+            pass.end()
+        }
+        run(this.pipelineTiltSeed, this.castShadowTextureView, this.tiltSeedTextures[0], 0)
+        let current = 0
+        // Halving steps, then one extra step of 1 (JFA+1) to mend the rare misses.
+        const steps: number[] = []
+        for (let step = 2 ** Math.ceil(Math.log2(Math.max(width, height))) / 2; step >= 1; step /= 2) steps.push(step)
+        steps.push(1)
+        for (const step of steps) {
+            run(this.pipelineTiltJump, this.tiltSeedTextures[current].createView(), this.tiltSeedTextures[1 - current], step)
+            current = 1 - current
+        }
+        return this.tiltSeedTextures[current]
+    }
+
     private encodeTiltView(encoder: GPUCommandEncoder, source: GPUTextureView, target: GPUTexture, uniform: GPUBuffer, renderOptions: RenderOptions, aspect: number): void {
         if (!this.pipelineTiltView || !this.castShadowTextureView) return
+        const seeds = this.encodeTiltSeeds(encoder, target.width, target.height)
+        if (!seeds) return
         this.device.queue.writeBuffer(uniform, 0, tiltViewUniforms(target.width, target.height, aspect, normalizeTiltView(this.tiltViewSettings(renderOptions))).buffer)
         const bindGroup = this.device.createBindGroup({
             layout: this.pipelineTiltView.getBindGroupLayout(0),
@@ -5519,6 +5579,7 @@ export class Engine {
                 { binding: 1, resource: this.castShadowTextureView },
                 { binding: 2, resource: this.tiltViewSampler! },
                 { binding: 3, resource: { buffer: uniform } },
+                { binding: 4, resource: seeds.createView() },
             ],
             label: 'Engine BindGroup TiltView',
         })

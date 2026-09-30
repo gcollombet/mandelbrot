@@ -65,7 +65,8 @@
       "scope": "Camera tilt over the relief",
       "tilt": "Tilt (°)",
       "heading": "Heading (°)",
-      "relief": "Relief"
+      "relief": "Relief",
+      "interiorDepth": "Interior depth"
     }
   },
   "presets": {

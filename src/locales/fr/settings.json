@@ -65,7 +65,8 @@
       "scope": "Inclinaison de la caméra sur le relief",
       "tilt": "Inclinaison (°)",
       "heading": "Orientation (°)",
-      "relief": "Relief"
+      "relief": "Relief",
+      "interiorDepth": "Profondeur de l’intérieur"
     }
   },
   "presets": {

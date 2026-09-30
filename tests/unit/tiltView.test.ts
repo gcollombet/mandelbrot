@@ -3,8 +3,8 @@ import { normalizeTiltView, tiltViewFit, tiltViewUniforms } from '../../src/tilt
 
 describe('tilted 3D view', () => {
   it('bounds and wraps the settings', () => {
-    expect(normalizeTiltView()).toEqual({ tilt: 0, heading: 0, relief: 10 })
-    expect(normalizeTiltView({ tilt: 90, heading: -30, relief: NaN })).toEqual({ tilt: 50, heading: 330, relief: 10 })
+    expect(normalizeTiltView()).toEqual({ tilt: 0, heading: 0, relief: 10, interiorDepth: 1 })
+    expect(normalizeTiltView({ tilt: 90, heading: -30, relief: NaN })).toEqual({ tilt: 50, heading: 330, relief: 10, interiorDepth: 1 })
   })
 
   it('keeps every ray inside the computed frame', () => {
@@ -27,7 +27,9 @@ describe('tilted 3D view', () => {
 
   it('packs the uniform block with 0° heading pointing up the screen', () => {
     const u = tiltViewUniforms(1920, 1080, 16 / 9, { tilt: 30, heading: 0, relief: 10 })
-    expect(u.length).toBe(8)
+    expect(u.length).toBe(12)
+    expect(u[8]).toBe(1)
+    expect(u[9]).toBeCloseTo(1 / 3)
     expect(u[4]).toBeCloseTo(0)
     expect(u[5]).toBeCloseTo(1)
     expect(u[7]).toBeGreaterThan(0)

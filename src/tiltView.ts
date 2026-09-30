@@ -3,10 +3,13 @@
 // top-down view computed, so the tilted view is zoomed in (`fit` < 1) until
 // every ray, from the top plane z = 0 down to the floor z = -1, lands inside it.
 
-export type TiltViewSettings = { tilt: number; heading: number; relief: number }
+/** interiorDepth: depth D of the interior basin (0 = flat plateau at the rim, 1 = down to the floor). */
+export type TiltViewSettings = { tilt: number; heading: number; relief: number; interiorDepth?: number }
 
 export const TILT_VIEW_MAX_DEGREES = 50
-export const DEFAULT_TILT_VIEW: TiltViewSettings = { tilt: 0, heading: 0, relief: 10 }
+export const DEFAULT_TILT_VIEW: TiltViewSettings = { tilt: 0, heading: 0, relief: 10, interiorDepth: 1 }
+/** Basin length scale per unit of depth: the slope at the rim is 1 / this (here 3). */
+export const TILT_VIEW_BASIN_RADIUS_PER_DEPTH = 1 / 3
 
 export function normalizeTiltView(value?: Partial<TiltViewSettings>): TiltViewSettings {
     const finite = (v: unknown, fallback: number) => typeof v === 'number' && Number.isFinite(v) ? v : fallback
@@ -14,6 +17,7 @@ export function normalizeTiltView(value?: Partial<TiltViewSettings>): TiltViewSe
         tilt: Math.max(0, Math.min(TILT_VIEW_MAX_DEGREES, finite(value?.tilt, 0))),
         heading: ((finite(value?.heading, 0) % 360) + 360) % 360,
         relief: Math.max(0, Math.min(40, finite(value?.relief, 10))),
+        interiorDepth: Math.max(0, Math.min(1, finite(value?.interiorDepth, 1))),
     }
 }
 
@@ -42,12 +46,13 @@ export function tiltViewFit(aspect: number, tiltRadians: number, headingRadians:
     return Math.max(0.05, Math.min(1, k))
 }
 
-/** Uniform block of tilt_view.wgsl (8 floats). */
+/** Uniform block of tilt_view.wgsl (12 floats). */
 export function tiltViewUniforms(width: number, height: number, aspect: number, settings: TiltViewSettings): Float32Array {
     const tilt = settings.tilt * Math.PI / 180
     const heading = settings.heading * Math.PI / 180 + Math.PI / 2 // 0° = the screen's up
     return new Float32Array([
         width, height, aspect, tilt,
         Math.cos(heading), Math.sin(heading), settings.relief, tiltViewFit(aspect, tilt, heading),
+        settings.interiorDepth ?? 1, (settings.interiorDepth ?? 1) * TILT_VIEW_BASIN_RADIUS_PER_DEPTH, 0, 0,
     ])
 }
