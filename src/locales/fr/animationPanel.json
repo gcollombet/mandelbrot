@@ -27,7 +27,10 @@
     "orbitTrapStrength": "Intensité piège orbite",
     "gradeSaturation": "Saturation",
     "gradeContrast": "Contraste",
-    "palettePathOffset": "Décalage parcours"
+    "palettePathOffset": "Décalage parcours",
+    "tiltViewTilt": "Vue 3D : inclinaison",
+    "tiltViewHeading": "Vue 3D : orientation",
+    "tiltViewRelief": "Vue 3D : relief"
   },
   "mixer": {
     "title": "Mixer",

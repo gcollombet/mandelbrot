@@ -265,6 +265,9 @@ const model =  defineModel<MandelbrotParams>({
      localShadowStrength: 0,
      castShadowStrength: 0,
      castShadowLength: 4,
+     castShadowSoftness: 0.35,
+     horizonOcclusionStrength: 0,
+     horizonOcclusionRadius: 0.1,
      varnishStrength: 0,
      gradeContrast: 1.18,
      gradeSaturation: 1.12,
@@ -1392,6 +1395,9 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     localShadowStrength: model.value.localShadowStrength,
     castShadowStrength: model.value.castShadowStrength,
     castShadowLength: model.value.castShadowLength,
+    castShadowSoftness: model.value.castShadowSoftness,
+    horizonOcclusionStrength: model.value.horizonOcclusionStrength,
+    horizonOcclusionRadius: model.value.horizonOcclusionRadius,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
@@ -1501,6 +1507,9 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.castShadowStrength = source.castShadowStrength ?? 0;
   model.value.castShadowLength = source.castShadowLength ?? 4;
+  model.value.castShadowSoftness = source.castShadowSoftness ?? 0.35;
+  model.value.horizonOcclusionStrength = source.horizonOcclusionStrength ?? 0;
+  model.value.horizonOcclusionRadius = source.horizonOcclusionRadius ?? 0.1;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
@@ -3341,6 +3350,9 @@ async function startVideoExport(payload: {
           :localShadowStrength="model.localShadowStrength"
           :castShadowStrength="model.castShadowStrength"
           :castShadowLength="model.castShadowLength"
+          :castShadowSoftness="model.castShadowSoftness"
+          :horizonOcclusionStrength="model.horizonOcclusionStrength"
+          :horizonOcclusionRadius="model.horizonOcclusionRadius"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
           :gradeSaturation="model.gradeSaturation"
@@ -3528,8 +3540,20 @@ async function startVideoExport(payload: {
             :model-value="model.castShadowStrength ?? 0" @update:model-value="(v: number) => model.castShadowStrength = v" />
           <DenseField :label="t('settings.palettes.surface.castShadowLength')" :min="1" :max="20" :step="0.1" :default="4" f="p2"
             :model-value="model.castShadowLength ?? 4" @update:model-value="(v: number) => model.castShadowLength = v" />
+          <DenseField :label="t('settings.palettes.surface.castShadowSoftness')" :min="0.02" :max="1" :step="0.01" :default="0.35" f="p2"
+            :model-value="model.castShadowSoftness ?? 0.35" @update:model-value="(v: number) => model.castShadowSoftness = v" />
           <DenseField :label="t('settings.palettes.surface.ambientOcclusion')" :min="0" :max="10" :step="0.01" :default="0" f="p2"
             :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
+          <DenseField :label="t('settings.palettes.surface.horizonOcclusion')" :min="0" :max="1" :step="0.01" :default="0" f="p2"
+            :model-value="model.horizonOcclusionStrength ?? 0" @update:model-value="(v: number) => model.horizonOcclusionStrength = v" />
+          <DenseField :label="t('settings.palettes.surface.horizonOcclusionRadius')" :min="0.01" :max="0.5" :step="0.005" :default="0.1" f="p3"
+            :model-value="model.horizonOcclusionRadius ?? 0.1" @update:model-value="(v: number) => model.horizonOcclusionRadius = v" />
+          <DenseField :label="t('settings.palettes.surface.tiltViewTilt')" :min="0" :max="50" :step="0.5" :default="0" f="p1"
+            :model-value="model.tiltViewTilt ?? 0" @update:model-value="(v: number) => model.tiltViewTilt = v" />
+          <DenseField :label="t('settings.palettes.surface.tiltViewHeading')" :min="0" :max="360" :step="1" :default="0" f="p0"
+            :model-value="model.tiltViewHeading ?? 0" @update:model-value="(v: number) => model.tiltViewHeading = v" />
+          <DenseField :label="t('settings.palettes.surface.tiltViewRelief')" :min="0" :max="40" :step="0.5" :default="10" f="p1"
+            :model-value="model.tiltViewRelief ?? 10" @update:model-value="(v: number) => model.tiltViewRelief = v" />
           <DenseField :label="t('settings.palettes.surface.varnish')" :min="0" :max="100" :step="0.05" :default="0" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
           <DenseField :label="t('settings.palettes.surface.contrast')" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"

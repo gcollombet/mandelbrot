@@ -62,12 +62,18 @@ describe('ExpMap appearance eligibility', () => {
     Object.assign(opts.colorStops[0], DEFAULT_VALUES)
     expect(expmapAppearanceProblems(opts)).toEqual([])
   })
-  it.each(ANIMATION_TRACK_IDS.filter(id => !['lightAngle', 'skyReflectionDrift', 'varnish', 'microBump', 'protrusionPhase', 'reliefDepth', 'textureDrift', 'displacement', 'tessellation'].includes(id)))('refuses enabled animation %s that changes the rendered colors', id => {
+  it.each(ANIMATION_TRACK_IDS.filter(id => !['lightAngle', 'skyReflectionDrift', 'varnish', 'microBump', 'protrusionPhase', 'reliefDepth', 'textureDrift', 'displacement', 'tessellation', 'tiltViewTilt', 'tiltViewHeading', 'tiltViewRelief'].includes(id)))('refuses enabled animation %s that changes the rendered colors', id => {
     const opts = options()
     opts.animation.tracks[id].enabled = true
     opts.activateAnimate = true
     expect(expmapAppearanceProblems(opts).some(p => p.field === `animation.${id}`)).toBe(true)
     opts.animation.tracks[id].amplitude = 0
+    expect(expmapAppearanceProblems(opts)).toEqual([])
+  })
+  it.each(['tiltViewTilt', 'tiltViewHeading', 'tiltViewRelief'] as const)('ignores the 3D view track %s, which ExpMap does not render', id => {
+    const opts = options()
+    opts.animation.tracks[id].enabled = true
+    opts.activateAnimate = true
     expect(expmapAppearanceProblems(opts)).toEqual([])
   })
   it.each(['heightPaletteShift'])('refuses %s without mutating it', field => {

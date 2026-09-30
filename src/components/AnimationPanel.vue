@@ -270,6 +270,7 @@ const TRACK_LABEL_IDS = [
   'paletteOffset', 'heightPaletteShift', 'lightAngle', 'textureDrift', 'skyReflectionDrift', 'phaseColoring',
   'varnish', 'microBump', 'displacement', 'tessellation', 'protrusionPhase', 'reliefDepth',
   'orbitTrapPhaseOffset', 'orbitTrapStrength', 'gradeSaturation', 'gradeContrast', 'palettePathOffset',
+  'tiltViewTilt', 'tiltViewHeading', 'tiltViewRelief',
 ] as const;
 const trackLabels = computed<Record<string, string>>(() =>
   Object.fromEntries(TRACK_LABEL_IDS.map(id => [id, t(`animationPanel.tracks.${id}`)])));

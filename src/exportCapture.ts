@@ -46,10 +46,18 @@ export type CaptureFrameContext = {
     linearPipeline: GPURenderPipeline
     /** AA accumulator holding the frame (linear sum, sample count in alpha), when used. */
     accumulator: GPUTextureView | null
+    /** Size of the accumulator raster (the canvas), for the tilted view. */
+    accumulatorSize?: { width: number; height: number }
     /**
      * Cast shadows: size the height raster (may rebuild the colour group, which
      * is returned) and encode it for the linear pass. Absent when disabled.
      */
+    /**
+     * Tilted 3D view: encode the tilt of the linear source (w x h raster,
+     * sample count in alpha) and return the present bind group the reduction
+     * reads instead. Absent when the view is not tilted.
+     */
+    tiltView?: (encoder: GPUCommandEncoder, source: GPUTextureView, width: number, height: number) => GPUBindGroup
     castShadow?: {
         prepare: (width: number, height: number) => GPUBindGroup
         encode: (encoder: GPUCommandEncoder, width: number, height: number) => void
@@ -163,6 +171,10 @@ export class ExportCapture {
                     this.accumBindGroupSource = frame.accumulator
                 }
                 reduceSource = this.accumBindGroup!
+                if (frame.tiltView) {
+                    const size = frame.accumulatorSize
+                    if (size) reduceSource = frame.tiltView(encoder, frame.accumulator, size.width, size.height)
+                }
             } else {
                 const linearWidth = outputWidth * supersample
                 const linearHeight = outputHeight * supersample
@@ -179,7 +191,9 @@ export class ExportCapture {
                 linear.setBindGroup(0, colorBindGroup)
                 linear.draw(6, 1, 0, 0)
                 linear.end()
-                reduceSource = this.presentBindGroup!
+                reduceSource = frame.tiltView
+                    ? frame.tiltView(encoder, this.linearView!, linearWidth, linearHeight)
+                    : this.presentBindGroup!
             }
 
             const reduce = encoder.beginRenderPass({

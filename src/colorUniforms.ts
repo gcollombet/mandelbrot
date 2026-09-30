@@ -119,6 +119,9 @@ export const COLOR_UNIFORM_FIELDS = [
     'protrusionTerrace',          // integrable lobe form: 0 bounded bumps, 1 terraces
     'castShadowStrength',         // cast shadows marched on the relief height h, [0, 1]
     'castShadowLength',           // relief exaggeration for cast shadows only, [1, 20]
+    'castShadowSoftness',         // penumbra width, as a fraction of the light elevation
+    'horizonOcclusionStrength',   // horizon-based ambient occlusion on the relief height h, [0, 1]
+    'horizonOcclusionRadius',     // its search radius in view half-heights, [0.01, 0.5]
 ] as const
 
 export type ColorUniformField = typeof COLOR_UNIFORM_FIELDS[number]

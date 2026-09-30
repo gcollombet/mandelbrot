@@ -127,6 +127,9 @@ struct Uniforms {
   protrusionTerrace: f32, // 104: iteration lobe height, 0 bounded bumps .. 1 terraces
   castShadowStrength: f32, // 105: shadows cast by marching the relief height h, [0, 1]
   castShadowLength: f32, // 106: relief exaggeration for cast shadows only, [1, 20]
+  castShadowSoftness: f32, // 107: penumbra width as a fraction of the light elevation, [0.02, 1]
+  horizonOcclusionStrength: f32, // 108: horizon-based ambient occlusion on h, [0, 1]
+  horizonOcclusionRadius: f32, // 109: its radius in view half-heights, [0.01, 0.5]
 };
 @group(0) @binding(0) var<uniform> baseParameters: Uniforms;
 var<private> parameters: Uniforms;
@@ -1227,16 +1230,18 @@ fn build_surface(
   // slope-only micro detail.
   let heightGradient = relief.gradient;
   let surfaceGradientLocal = heightGradient + textureGradient;
-  // uv_neutral = R(scene) * uv_screen, so a gradient on the neutral fractal
-  // plane enters screen/world space through R^-1. This one 2D rotation
-  // replaces the per-vector 3D rotations the lighting used to perform.
+  // uv_neutral = R(scene) * uv_screen (y up), so a gradient enters the screen
+  // through R^-1 in y-up frames. Cached gradients and the lighting frame are
+  // y-down (texel rows, F = diag(1, -1)), where that becomes F·R^-1·F = R:
+  // rotate_sincos, not its inverse (which turned the light by -2θ in rotated
+  // views, against the screen-fixed light and cast shadows).
   let sceneSin = parameters.sceneSin;
   let sceneCos = parameters.sceneCos;
-  let surfaceGradient = rotate_inverse_sincos(surfaceGradientLocal, sceneSin, sceneCos);
+  let surfaceGradient = rotate_sincos(surfaceGradientLocal, sceneSin, sceneCos);
   let slope = length(surfaceGradient);
   // Flat areas have no downhill direction: the brushing then follows the
   // cached geometry angle, as before.
-  let fieldDir = rotate_inverse_sincos(vec2<f32>(cos(geometryAngle), sin(geometryAngle)), sceneSin, sceneCos);
+  let fieldDir = rotate_sincos(vec2<f32>(cos(geometryAngle), sin(geometryAngle)), sceneSin, sceneCos);
 
   var s: Surface;
   s.normal = surface_normal_from_gradient(surfaceGradient);
@@ -1249,7 +1254,7 @@ fn build_surface(
   s.logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   s.bandRate = sqrt(max(cachedCurvature, 0.0));
   // True band normal: grad(nu), no longer the grad(H) approximation.
-  let bandGradient = rotate_inverse_sincos(nuGradient, sceneSin, sceneCos);
+  let bandGradient = rotate_sincos(nuGradient, sceneSin, sceneCos);
   s.bandDir = select(fieldDir, bandGradient / max(length(bandGradient), 1e-8), dot(bandGradient, bandGradient) > 1e-16);
   return s;
 }
@@ -1342,8 +1347,28 @@ fn diffraction_response(s: Surface, lightDir: vec3<f32>, viewDir: vec3<f32>, rou
 // inverts d(uv)/d(pixel), so the same code serves the screen raster and the
 // neutral-square rotation cache.
 const CAST_SHADOW_STEPS: i32 = 40;
-const CAST_SHADOW_PENUMBRA: f32 = 0.04; // penumbra slope, in height per distance
 const CAST_SHADOW_MAX_PIXELS: f32 = 1024.0;
+
+// Bilinear height between raster pixel centres, ignoring taps with no surface.
+fn cast_shadow_height_smooth(p: vec2<f32>) -> f32 {
+  let q = p - vec2<f32>(0.5);
+  let base = floor(q);
+  let f = q - base;
+  let i = vec2<i32>(base);
+  var sum = 0.0;
+  var weight = 0.0;
+  for (var k = 0; k < 4; k = k + 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let h = cast_shadow_height(i + o);
+    let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+    if (h > CAST_SHADOW_NO_SURFACE * 0.5 && w > 0.0) {
+      sum = sum + w * h;
+      weight = weight + w;
+    }
+  }
+  return select(CAST_SHADOW_NO_SURFACE, sum / max(weight, 1e-6), weight > 1e-3);
+}
+
 fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
   let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
   let lightPlane = length(lightDir.xy);
@@ -1364,18 +1389,69 @@ fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
   // The ray clears the highest possible terrain (h = 0) past this distance.
   let reach = min(-h0 / max(unitsPerPixel * tanElevation, 1e-12), CAST_SHADOW_MAX_PIXELS);
   if (reach < 1.0) { return 1.0; }
+  // Penumbra: an angular fraction of the light elevation, so the softness
+  // does not change with the shadow length. Visibility crosses 1/2 where the
+  // ray grazes the occluder.
+  let penumbra = clamp(parameters.castShadowSoftness, 0.02, 1.0) * tanElevation;
+  // Per-pixel offset of the sample positions (interleaved gradient noise):
+  // thin occluders are no longer hit or missed in whole rows.
+  let jitter = fract(52.9829189 * fract(dot(castRasterPixel, vec2<f32>(0.06711056, 0.00583715))));
   var visibility = 1.0;
-  for (var i = 1; i <= CAST_SHADOW_STEPS; i = i + 1) {
+  for (var i = 0; i < CAST_SHADOW_STEPS; i = i + 1) {
     // Denser near the pixel, where contact shadows are sharp.
-    let f = f32(i) / f32(CAST_SHADOW_STEPS);
-    let t = max(1.0, reach * f * f);
-    let terrain = cast_shadow_height(vec2<i32>(floor(castRasterPixel + step * t)));
+    let f = (f32(i) + jitter) / f32(CAST_SHADOW_STEPS);
+    let t = max(0.75, reach * f * f);
+    let terrain = cast_shadow_height_smooth(castRasterPixel + step * t);
     if (terrain <= CAST_SHADOW_NO_SURFACE * 0.5) { continue; }
     let distance = t * unitsPerPixel;
     let clearance = h0 + distance * tanElevation - terrain;
-    visibility = min(visibility, clearance / (CAST_SHADOW_PENUMBRA * distance));
+    visibility = min(visibility, 0.5 + 0.5 * clearance / (penumbra * distance));
   }
-  return clamp(visibility, 0.0, 1.0);
+  return smoothstep(0.0, 1.0, clamp(visibility, 0.0, 1.0));
+}
+
+// Raster pixels per view half-height along a screen direction (y up).
+fn cast_raster_step(dir: vec2<f32>) -> vec2<f32> {
+  let uv = vec2<f32>(dir.x / (2.0 * parameters.aspect), dir.y / 2.0);
+  let det = castRasterUvX.x * castRasterUvY.y - castRasterUvY.x * castRasterUvX.y;
+  if (abs(det) < 1e-20) { return vec2<f32>(0.0); }
+  return vec2<f32>(
+    castRasterUvY.y * uv.x - castRasterUvY.x * uv.y,
+    -castRasterUvX.y * uv.x + castRasterUvX.x * uv.y,
+  ) / det;
+}
+
+// Horizon-based ambient occlusion on the same height raster: in each of a
+// few directions, the highest elevation angle of the terrain within the
+// radius (relief exaggerated like the cast shadows), weighted down with
+// distance; the visible sky is what the horizons leave. Direction-free, so
+// it deepens crevices and wall feet without any light orientation.
+const HORIZON_DIRECTIONS: i32 = 8;
+const HORIZON_SAMPLES: i32 = 6;
+fn horizon_visibility() -> f32 {
+  let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
+  if (h0 <= CAST_SHADOW_NO_SURFACE * 0.5) { return 1.0; }
+  let radius = clamp(parameters.horizonOcclusionRadius, 0.01, 0.5);
+  let exaggeration = clamp(parameters.castShadowLength, 1.0, 20.0);
+  let noise = fract(52.9829189 * fract(dot(castRasterPixel, vec2<f32>(0.06711056, 0.00583715))));
+  var occlusion = 0.0;
+  for (var k = 0; k < HORIZON_DIRECTIONS; k = k + 1) {
+    let angle = TWO_PI * (f32(k) + noise) / f32(HORIZON_DIRECTIONS);
+    let perUnit = cast_raster_step(vec2<f32>(cos(angle), sin(angle)));
+    var horizon = 0.0;
+    for (var j = 0; j < HORIZON_SAMPLES; j = j + 1) {
+      let f = (f32(j) + fract(noise * 7.0 + f32(k) * 0.618034)) / f32(HORIZON_SAMPLES);
+      let r = radius * max(f * f, 1e-3);
+      if (length(perUnit * r) < 0.75) { continue; }
+      let terrain = cast_shadow_height_smooth(castRasterPixel + perUnit * r);
+      if (terrain <= CAST_SHADOW_NO_SURFACE * 0.5) { continue; }
+      let rise = (terrain - h0) * exaggeration;
+      let sinElevation = rise / sqrt(rise * rise + r * r);
+      horizon = max(horizon, sinElevation * (1.0 - f * f));
+    }
+    occlusion = occlusion + horizon;
+  }
+  return clamp(1.0 - occlusion / f32(HORIZON_DIRECTIONS), 0.0, 1.0);
 }
 
 fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3<f32> {
@@ -1406,7 +1482,10 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   let vDotH = max(dot(viewDir, halfDir), 0.0);
   // The magnified bilinear path has no extra curvature fetch: AO fades out
   // during reprojection instead of adding four more texture reads per pixel.
-  let ao = curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength);
+  var ao = curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength);
+  if (castShadowActive && parameters.horizonOcclusionStrength > 0.0) {
+    ao = ao * mix(1.0, horizon_visibility(), clamp(parameters.horizonOcclusionStrength, 0.0, 1.0));
+  }
   let metallic = clamp(fx.metallic, 0.0, 1.0);
   let roughness = clamp(fx.roughness, 0.02, 1.0);
   // Gamma-era gain retuned down: in linear light the GGX peak already reads
@@ -1439,7 +1518,7 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
   let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
   var localShadow = local_height_shadow(heightGradient, lightDir, localShadowControl);
-  if (castShadowActive) {
+  if (castShadowActive && parameters.castShadowStrength > 0.0) {
     localShadow = localShadow
       * mix(1.0, cast_shadow_visibility(lightDir), clamp(parameters.castShadowStrength, 0.0, 1.0));
   }
@@ -2531,7 +2610,7 @@ fn begin_cast_shadow(fragCoord: vec2<f32>, pos: vec4<f32>) {
   castRasterPixel = pos.xy;
   castRasterUvX = dpdx(fragCoord);
   castRasterUvY = dpdy(fragCoord);
-  castShadowActive = baseParameters.castShadowStrength > 0.0;
+  castShadowActive = baseParameters.castShadowStrength > 0.0 || baseParameters.horizonOcclusionStrength > 0.0;
 }
 
 // Height raster for cast shadows: h / T of the pixel the colour pass will

@@ -19,7 +19,10 @@ export type AnimationTrackId =
   | 'orbitTrapStrength'
   | 'gradeSaturation'
   | 'gradeContrast'
-  | 'palettePathOffset';
+  | 'palettePathOffset'
+  | 'tiltViewTilt'
+  | 'tiltViewHeading'
+  | 'tiltViewRelief';
 
 export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'paletteOffset',
@@ -39,6 +42,9 @@ export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'gradeSaturation',
   'gradeContrast',
   'palettePathOffset',
+  'tiltViewTilt',
+  'tiltViewHeading',
+  'tiltViewRelief',
 ];
 
 export interface AnimationTrackConfig {
@@ -88,6 +94,10 @@ export const ANIMATION_TRACK_DEFINITIONS: readonly AnimationTrackDefinition[] = 
   // Palette path only: slides the depth the path is read at, wrapped over the
   // path's span. Amplitude 1 = one full traversal of the path per loop cycle.
   { id: 'palettePathOffset', label: 'Palette Path Offset', defaultType: 'loop', defaultSpeed: 0.05, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 4, amplitudeStep: 0.01, unit: 'parcours' },
+  // Tilted 3D view (tiltView.ts): added to the static tilt / heading / relief.
+  { id: 'tiltViewTilt', label: '3D View Tilt', defaultType: 'sine', defaultSpeed: 0.1, defaultAmplitude: 15, minAmplitude: 0, maxAmplitude: 50, amplitudeStep: 0.5, unit: '°' },
+  { id: 'tiltViewHeading', label: '3D View Heading', defaultType: 'loop', defaultSpeed: 0.05, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 4, amplitudeStep: 0.01, unit: 'turn' },
+  { id: 'tiltViewRelief', label: '3D View Relief', defaultType: 'sine', defaultSpeed: 0.15, defaultAmplitude: 5, minAmplitude: 0, maxAmplitude: 40, amplitudeStep: 0.5, unit: '' },
 ];
 
 const TRACK_DEFINITION_BY_ID = new Map(ANIMATION_TRACK_DEFINITIONS.map(definition => [definition.id, definition]));

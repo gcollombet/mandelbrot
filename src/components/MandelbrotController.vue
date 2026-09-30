@@ -63,6 +63,12 @@ const props = defineProps<{
   localShadowStrength?: number,
   castShadowStrength?: number,
   castShadowLength?: number,
+  castShadowSoftness?: number,
+  horizonOcclusionStrength?: number,
+  horizonOcclusionRadius?: number,
+  tiltViewTilt?: number,
+  tiltViewHeading?: number,
+  tiltViewRelief?: number,
   varnishStrength?: number,
   gradeContrast?: number,
   gradeSaturation?: number,
@@ -489,6 +495,12 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :localShadowStrength="props.localShadowStrength"
       :castShadowStrength="props.castShadowStrength"
       :castShadowLength="props.castShadowLength"
+      :castShadowSoftness="props.castShadowSoftness"
+      :horizonOcclusionStrength="props.horizonOcclusionStrength"
+      :horizonOcclusionRadius="props.horizonOcclusionRadius"
+      :tiltViewTilt="props.tiltViewTilt"
+      :tiltViewHeading="props.tiltViewHeading"
+      :tiltViewRelief="props.tiltViewRelief"
       :varnishStrength="props.varnishStrength"
       :gradeContrast="props.gradeContrast"
       :gradeSaturation="props.gradeSaturation"

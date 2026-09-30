@@ -755,6 +755,12 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   localShadowStrength: 0,
   castShadowStrength: 0,
   castShadowLength: 4,
+  castShadowSoftness: 0.35,
+  horizonOcclusionStrength: 0,
+  horizonOcclusionRadius: 0.1,
+  tiltViewTilt: 0,
+  tiltViewHeading: 0,
+  tiltViewRelief: 10,
   varnishStrength: 0,
   gradeContrast: 1.18,
   gradeSaturation: 1.12,
@@ -1957,6 +1963,9 @@ function tickTravelAnimation() {
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
     mandelbrotParams.value.castShadowStrength = target.castShadowStrength ?? 0;
     mandelbrotParams.value.castShadowLength = target.castShadowLength ?? 4;
+    mandelbrotParams.value.castShadowSoftness = target.castShadowSoftness ?? 0.35;
+    mandelbrotParams.value.horizonOcclusionStrength = target.horizonOcclusionStrength ?? 0;
+    mandelbrotParams.value.horizonOcclusionRadius = target.horizonOcclusionRadius ?? 0.1;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
     mandelbrotParams.value.gradeSaturation = target.gradeSaturation ?? 1.12;
@@ -2247,6 +2256,12 @@ async function startTravelToPreset(preset: PresetRecord) {
       :localShadowStrength="mandelbrotParams.localShadowStrength"
       :castShadowStrength="mandelbrotParams.castShadowStrength"
       :castShadowLength="mandelbrotParams.castShadowLength"
+      :castShadowSoftness="mandelbrotParams.castShadowSoftness"
+      :horizonOcclusionStrength="mandelbrotParams.horizonOcclusionStrength"
+      :horizonOcclusionRadius="mandelbrotParams.horizonOcclusionRadius"
+      :tiltViewTilt="mandelbrotParams.tiltViewTilt"
+      :tiltViewHeading="mandelbrotParams.tiltViewHeading"
+      :tiltViewRelief="mandelbrotParams.tiltViewRelief"
       :varnishStrength="mandelbrotParams.varnishStrength"
       :gradeContrast="mandelbrotParams.gradeContrast"
       :gradeSaturation="mandelbrotParams.gradeSaturation"

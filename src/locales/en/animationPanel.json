@@ -27,7 +27,10 @@
     "orbitTrapStrength": "Orbit trap strength",
     "gradeSaturation": "Saturation",
     "gradeContrast": "Contrast",
-    "palettePathOffset": "Path offset"
+    "palettePathOffset": "Path offset",
+    "tiltViewTilt": "3D view: tilt",
+    "tiltViewHeading": "3D view: heading",
+    "tiltViewRelief": "3D view: relief"
   },
   "mixer": {
     "title": "Mixer",

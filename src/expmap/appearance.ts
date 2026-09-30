@@ -43,9 +43,11 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
   // Animation tracks alter parameters, never the activation weights in stops.
   const materialTracks = new Set(['lightAngle', 'skyReflectionDrift', 'varnish', 'microBump', 'protrusionPhase', 'reliefDepth'])
   const textureTracks = new Set(['textureDrift', 'displacement', 'tessellation'])
+  // The tilted 3D view is not part of ExpMap rendering: its tracks change nothing there.
+  const viewTracks = new Set(['tiltViewTilt', 'tiltViewHeading', 'tiltViewRelief'])
   const animation = normalizeAnimationConfig(options.animation, options.animationSpeed)
   for (const [id, track] of Object.entries(animation.tracks)) {
-    const inactive = (!hasShading && materialTracks.has(id)) || (!hasTexture && textureTracks.has(id))
+    const inactive = viewTracks.has(id) || (!hasShading && materialTracks.has(id)) || (!hasTexture && textureTracks.has(id))
     const moving = options.activateAnimate !== false && track.speed !== 0 && animation.globalSpeed !== 0
     if (!inactive && track.enabled && track.amplitude !== 0 && (moving || id === 'heightPaletteShift')) {
       restrict(`animation.${id}`, id === 'heightPaletteShift' ? t('expmap.appearance.heightTrack') : t('expmap.appearance.disableAnimation'))

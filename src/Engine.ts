@@ -16,6 +16,8 @@ import rawPanClearShader from './assets/raw_pan_clear.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
+import tiltViewShader from './assets/tilt_view.wgsl?raw'
+import { normalizeTiltView, tiltViewUniforms } from './tiltView'
 import rotationPresentShader from './assets/rotation_present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
@@ -286,6 +288,12 @@ export type RenderOptions = {
     localShadowStrength: number,
     castShadowStrength: number,
     castShadowLength: number,
+    castShadowSoftness: number,
+    tiltViewTilt?: number,
+    tiltViewHeading?: number,
+    tiltViewRelief?: number,
+    horizonOcclusionStrength: number,
+    horizonOcclusionRadius: number,
     varnishStrength: number,
     gradeContrast?: number,
     gradeSaturation?: number,
@@ -551,6 +559,14 @@ export class Engine {
     // The height pass renders into the raster, so it binds a 1x1 stand-in at 21.
     private castShadowDummyView?: GPUTextureView
     private bindGroupColorCastHeight?: GPUBindGroup
+    // Tilted 3D view (tilt_view.wgsl): final linear colour + height raster → tilted image.
+    private pipelineTiltView?: GPURenderPipeline
+    private tiltViewSampler?: GPUSampler
+    private tiltViewUniformLive?: GPUBuffer
+    private tiltViewUniformExport?: GPUBuffer
+    private tiltSourceTexture?: GPUTexture
+    private tiltOutTexture?: GPUTexture
+    private tiltExportOutTexture?: GPUTexture
     /** Cheap screen pass that bilinearly reconstructs the final cached color. */
     private pipelineRotationPresent?: GPURenderPipeline
     private bindGroupRotationPresent?: GPUBindGroup
@@ -1484,6 +1500,20 @@ export class Engine {
             label: 'Engine RenderPipeline Present',
             module: present.module, layout: present.pipelineLayout, targets: [{ format: this.format }],
         }))
+
+        // Tilted 3D view: rgba16float linear image, then the ordinary present.
+        const tiltModule = device.createShaderModule({ code: tiltViewShader, label: 'Engine ShaderModule TiltView' })
+        this.pipelineTiltView = device.createRenderPipeline({
+            label: 'Engine RenderPipeline TiltView',
+            layout: 'auto',
+            vertex: { module: tiltModule, entryPoint: 'vs_main' },
+            fragment: { module: tiltModule, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+        })
+        this.tiltViewSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear', label: 'Engine TiltView Sampler' })
+        const tiltUniform = (label: string) => device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
+        this.tiltViewUniformLive = tiltUniform('Engine TiltView Uniform (live)')
+        this.tiltViewUniformExport = tiltUniform('Engine TiltView Uniform (export)')
 
         // Rotation present is a separate terminal branch from AA: it samples
         // only the final-colour cache and can therefore never become sample
@@ -3598,6 +3628,9 @@ export class Engine {
             stereoHeightPass: 0,
             castShadowStrength: this.castShadowSupported ? Math.max(0, Math.min(1, renderOptions.castShadowStrength ?? 0)) : 0,
             castShadowLength: Math.max(1, Math.min(20, renderOptions.castShadowLength ?? 4)),
+            castShadowSoftness: Math.max(0.02, Math.min(1, renderOptions.castShadowSoftness ?? 0.35)),
+            horizonOcclusionStrength: this.castShadowSupported ? Math.max(0, Math.min(1, renderOptions.horizonOcclusionStrength ?? 0)) : 0,
+            horizonOcclusionRadius: Math.max(0.01, Math.min(0.5, renderOptions.horizonOcclusionRadius ?? 0.1)),
         }
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
 
@@ -3811,6 +3844,7 @@ export class Engine {
         const hasLiveWebcam = this.webcamEnabled
             && (this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops).some(stop => (stop.webcam ?? 0) > 0)
         return rotationNeedsColorResolve(this.previousMandelbrot.angle)
+            && !this.tiltViewActive(renderOptions)
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             && !renderOptions.activateAnimate
@@ -4504,6 +4538,8 @@ export class Engine {
 
         // ── Terminal color branches: direct, AA, or settled rotation ──────
         const castShadows = this.castShadowsActive(renderOptions)
+        const tiltView = this.tiltViewActive(renderOptions)
+        let tiltPresent: GPUBindGroup | undefined
         if (castShadows) this.prepareCastShadowRaster(Math.max(this.width, this.neutralSize), Math.max(this.height, this.neutralSize))
         const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
@@ -4610,6 +4646,18 @@ export class Engine {
             rpassAccum.setBindGroup(0, colorBindGroup)
             rpassAccum.draw(6, 1, 0, 0)
             rpassAccum.end()
+        } else if (tiltView && !aaShowAccum && this.pipelineColorAccumClear) {
+            // Tilted view: linear colour into an intermediate, tilted below.
+            this.tiltSourceTexture = this.ensureTiltTexture(this.tiltSourceTexture, this.width, this.height, 'Engine TiltView Source')
+            this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
+            const rpassTiltSource = commandEncoder.beginRenderPass({
+                colorAttachments: [{ view: this.tiltSourceTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
+                timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.color),
+            })
+            rpassTiltSource.setPipeline(this.pipelineColorAccumClear)
+            rpassTiltSource.setBindGroup(0, colorBindGroup)
+            rpassTiltSource.draw(6, 1, 0, 0)
+            rpassTiltSource.end()
         } else if (rotationBakeThisFrame) {
             // Colorize each neutral texel once. The cache contains final linear
             // color, so its later bilinear filtering cannot invent semantic
@@ -4651,7 +4699,15 @@ export class Engine {
 
         // Present exactly one derived terminal result: AA average or filtered
         // rotation cache. Direct color already wrote the swapchain above.
-        if (aaShowAccum && this.pipelinePresent && this.bindGroupPresent) {
+        if (tiltView && this.pipelinePresent && this.layoutPresent) {
+            const source = aaShowAccum ? this.accumTextureView : this.tiltSourceTexture?.createView()
+            if (source) {
+                this.tiltOutTexture = this.ensureTiltTexture(this.tiltOutTexture, this.width, this.height, 'Engine TiltView Output')
+                this.encodeTiltView(commandEncoder, source, this.tiltOutTexture, this.tiltViewUniformLive!, renderOptions, aspect)
+                tiltPresent = this.presentBindGroupFor(this.tiltOutTexture)
+            }
+        }
+        if ((aaShowAccum || tiltPresent) && this.pipelinePresent && (tiltPresent || this.bindGroupPresent)) {
             const rpassPresent = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: swapView,
@@ -4662,7 +4718,7 @@ export class Engine {
                 timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.present),
             })
             rpassPresent.setPipeline(this.pipelinePresent)
-            rpassPresent.setBindGroup(0, this.bindGroupPresent)
+            rpassPresent.setBindGroup(0, tiltPresent ?? this.bindGroupPresent!)
             rpassPresent.draw(6, 1, 0, 0)
             rpassPresent.end()
         } else if (rotationShowCache && this.pipelineRotationPresent && this.bindGroupRotationPresent) {
@@ -4849,6 +4905,12 @@ export class Engine {
                 colorBindGroup,
                 linearPipeline: this.expmap ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!,
                 // The ExpMap block capture reads raw-grid coordinates: no height raster.
+                accumulatorSize: { width: this.width, height: this.height },
+                tiltView: tiltView && !this.expmap ? (encoder: GPUCommandEncoder, source: GPUTextureView, width: number, height: number) => {
+                    this.tiltExportOutTexture = this.ensureTiltTexture(this.tiltExportOutTexture, width, height, 'Engine TiltView Export Output')
+                    this.encodeTiltView(encoder, source, this.tiltExportOutTexture, this.tiltViewUniformExport!, renderOptions, aspect)
+                    return this.presentBindGroupFor(this.tiltExportOutTexture)
+                } : undefined,
                 castShadow: castShadows && !this.expmap ? {
                     prepare: (width: number, height: number) => this.prepareCastShadowRaster(width, height),
                     encode: (encoder: GPUCommandEncoder, width: number, height: number) => this.encodeCastShadowHeight(encoder, width, height),
@@ -5409,7 +5471,73 @@ export class Engine {
     /** True when the next colour pass should get a fresh height raster. */
     private castShadowsActive(renderOptions: RenderOptions): boolean {
         return this.castShadowSupported && !!this.pipelineCastHeight
-            && (renderOptions.castShadowStrength ?? 0) > 0
+            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0
+                || this.tiltViewActive(renderOptions))
+    }
+
+    /** Tilted 3D view: needs the height raster, so the same device support. */
+    private tiltViewActive(renderOptions: RenderOptions): boolean {
+        return this.castShadowSupported && !!this.pipelineCastHeight && !!this.pipelineTiltView
+            && normalizeTiltView(this.tiltViewSettings(renderOptions)).tilt > 0
+    }
+
+    /** Static 3D view settings plus their animation tracks. */
+    private tiltViewSettings(renderOptions: RenderOptions) {
+        const animation = normalizeAnimationConfig(renderOptions.animation, renderOptions.animationSpeed)
+        const globalSpeed = clamp(animation.globalSpeed, 0, 10)
+        const time = renderOptions.activateAnimate ? this.time : 0
+        const track = (id: 'tiltViewTilt' | 'tiltViewHeading' | 'tiltViewRelief') => animationContribution(animation.tracks[id], time, globalSpeed)
+        return {
+            tilt: (renderOptions.tiltViewTilt ?? 0) + track('tiltViewTilt'),
+            heading: (renderOptions.tiltViewHeading ?? 0) + 360 * track('tiltViewHeading'),
+            relief: (renderOptions.tiltViewRelief ?? 10) + track('tiltViewRelief'),
+        }
+    }
+
+    private ensureTiltTexture(current: GPUTexture | undefined, width: number, height: number, label: string): GPUTexture {
+        if (current && current.width === width && current.height === height) return current
+        current?.destroy()
+        return this.device.createTexture({
+            size: { width, height, depthOrArrayLayers: 1 },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label,
+        })
+    }
+
+    /**
+     * Encode the tilted view of `source` (linear rgb, sample count in alpha) on
+     * a width x height raster whose height raster is current, into `target`.
+     */
+    private encodeTiltView(encoder: GPUCommandEncoder, source: GPUTextureView, target: GPUTexture, uniform: GPUBuffer, renderOptions: RenderOptions, aspect: number): void {
+        if (!this.pipelineTiltView || !this.castShadowTextureView) return
+        this.device.queue.writeBuffer(uniform, 0, tiltViewUniforms(target.width, target.height, aspect, normalizeTiltView(this.tiltViewSettings(renderOptions))).buffer)
+        const bindGroup = this.device.createBindGroup({
+            layout: this.pipelineTiltView.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: source },
+                { binding: 1, resource: this.castShadowTextureView },
+                { binding: 2, resource: this.tiltViewSampler! },
+                { binding: 3, resource: { buffer: uniform } },
+            ],
+            label: 'Engine BindGroup TiltView',
+        })
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+            label: 'Engine TiltView',
+        })
+        pass.setPipeline(this.pipelineTiltView)
+        pass.setBindGroup(0, bindGroup)
+        pass.draw(3, 1, 0, 0)
+        pass.end()
+    }
+
+    private presentBindGroupFor(texture: GPUTexture): GPUBindGroup {
+        return this.device.createBindGroup({
+            layout: this.layoutPresent!,
+            entries: [{ binding: 0, resource: texture.createView() }],
+            label: 'Engine BindGroup Present (tilt)',
+        })
     }
 
     /**

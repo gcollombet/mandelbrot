@@ -211,6 +211,9 @@ function previewUniforms(): ColorUniforms {
     stereoHeightPass: 0,
     castShadowStrength: 0,
     castShadowLength: 4,
+    castShadowSoftness: 0.35,
+    horizonOcclusionStrength: 0,
+    horizonOcclusionRadius: 0.1,
   };
 }
 
