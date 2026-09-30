@@ -9,7 +9,8 @@ const DISPLAY_STORAGE_MAX: f32 = 65504.0;
 //   values[0..2] = iteration, z.x, z.y
 //   geometry      = analytic gradient.xy, Laplacian, distance height
 //   metadata      = provenance exponent (4) | stripe phase (10) | coherence (10)
-//                   | direction of grad(nu) (8); |grad(nu)| = sqrt(Laplacian)/ln2
+//                   | direction of grad(nu) relative to grad(H), companded (8);
+//                   |grad(nu)| = sqrt(Laplacian)/ln2
 //   orbitGradient = grad(stripe EMA).xy, grad(direction coherence).xy
 //
 // orbitGradient exists only while orbit metrics are tracked; the pipeline
@@ -117,17 +118,25 @@ fn provenance_exponent(step: u32) -> u32 {
   return exponent;
 }
 
-fn quantize_direction(direction: vec2<f32>) -> u32 {
-  if (!(dot(direction, direction) > 1e-24)) { return 0u; }
-  let turn = fract(atan2(direction.y, direction.x) / TWO_PI + 1.0);
-  return u32(round(turn * NU_ANGLE_STEPS)) & 255u;
+// The direction of grad(nu) is stored as its signed angle from grad(H),
+// companded q = sign(δ)·sqrt(|δ|/π) on 8 bits. Far from the set the two are
+// nearly parallel (z ≈ c^m makes both colinear with -z'/z), which is exactly
+// where the relief amplifies palette-weight slopes along grad(nu): there the
+// step is ~1e-5 rad instead of the 1.4° of an absolute 8-bit angle. Mirrored
+// in color.wgsl (decode_nu_direction) and displayGeometry.ts.
+fn quantize_direction(direction: vec2<f32>, reference: vec2<f32>) -> u32 {
+  if (!(dot(direction, direction) > 1e-24)) { return 128u; }
+  let axis = select(vec2<f32>(1.0, 0.0), reference, dot(reference, reference) > 1e-24);
+  let delta = atan2(axis.x * direction.y - axis.y * direction.x, dot(axis, direction));
+  let q = sign(delta) * sqrt(abs(delta) / 3.141592653589793);
+  return u32(clamp(round((q * 0.5 + 0.5) * 255.0), 0.0, 255.0));
 }
 
-fn pack_metadata(step: u32, stripePhase: f32, coherence: f32, nuDirection: vec2<f32>) -> u32 {
+fn pack_metadata(step: u32, stripePhase: f32, coherence: f32, nuDirection: vec2<f32>, heightGradient: vec2<f32>) -> u32 {
   let stripe = quantize_unit(fract(stripePhase + 1.0));
   let coherenceBits = quantize_unit(coherence);
   return provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 14u)
-    | (quantize_direction(nuDirection) << 24u);
+    | (quantize_direction(nuDirection, heightGradient) << 24u);
 }
 
 fn smooth_frac(zSquared: f32, logMu: f32) -> f32 {
@@ -242,7 +251,7 @@ fn load_finished(coord: vec2<i32>, outputCoord: vec2<i32>, step: u32, sample: Ra
   let stripe = select(0.0, decode_terminal_stripe(terminalMetrics), escaped);
   let coherence = select(0.0, decode_terminal_coherence(terminalMetrics), escaped);
   let nuDirection = select(vec2<f32>(0.0), load_terminal_nu_direction(coord), escaped);
-  out.metadata = pack_metadata(step, stripe, coherence, nuDirection);
+  out.metadata = pack_metadata(step, stripe, coherence, nuDirection, out.geometry.xy);
   store_trap_payload(outputCoord, load_trap_payload(coord));
   return out;
 }
@@ -399,7 +408,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           vec4<f32>(-DISPLAY_STORAGE_MAX, -DISPLAY_STORAGE_MAX, 0.0, -DISPLAY_STORAGE_MAX),
           vec4<f32>(DISPLAY_STORAGE_MAX),
         );
-        out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight, nuGradientSum);
+        out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight, nuGradientSum, out.geometry.xy);
         out.orbitGradient = clamp(
           orbitGradientSum * inverseWeight,
           vec4<f32>(-DISPLAY_STORAGE_MAX),

@@ -362,7 +362,7 @@ function buildSyntheticData(w: number, h: number, mu: number): {
       const coherencePhase = iterFloat * 0.065 + vFrac * Math.PI;
       const coherenceRaw = Math.sin(coherencePhase);
       const coherence = Math.abs(coherenceRaw);
-      metadata[idx] = packDisplayMetadata(1, stripePhase, coherence, dIterDx >= 0 ? 0 : Math.PI);
+      metadata[idx] = packDisplayMetadata(1, stripePhase, coherence, 0);
       // stripePhase = 0.5 + 0.5*S with S = sin(0.2*iterFloat) — the shader
       // wants grad S, not grad p. y grows down here, and the geometry block
       // below stores (up - down), so both keep the same upward-y sign.

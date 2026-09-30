@@ -2,8 +2,10 @@ export const DISPLAY_VALUE_LAYERS = 3
 export const DISPLAY_BYTES_PER_TEXEL = 24
 
 // Display metadata word: provenance (4) | stripe (10) | coherence (10) |
-// direction of grad(nu) (8). The magnitude of grad(nu) is sqrt(Laplacian)/ln2,
-// already carried by the geometry, so only its angle is stored.
+// direction of grad(nu) (8), stored as its signed angle δ from grad(H),
+// companded q = sign(δ)·sqrt(|δ|/π) (fine where the two are nearly parallel,
+// i.e. far from the set). The magnitude of grad(nu) is sqrt(Laplacian)/ln2,
+// already carried by the geometry, so only this angle is stored.
 export const PROVENANCE_BITS = 4
 export const QUANTIZED_FIELD_BITS = 10
 export const QUANTIZED_FIELD_MAX = (1 << QUANTIZED_FIELD_BITS) - 1
@@ -22,8 +24,8 @@ export interface DecodedDisplayMetadata {
     supportStep: number
     stripePhase: number
     coherence: number
-    /** Direction of grad(nu) in radians, [0, 2π). */
-    nuAngle: number
+    /** Angle of grad(nu) from grad(H), radians, (-π, π]. */
+    nuAngleOffset: number
 }
 
 export interface DisplayGeometry {
@@ -51,13 +53,24 @@ function quantizeUnit(value: number): number {
     return Math.round(clamp(finite, 0, 1) * QUANTIZED_FIELD_MAX)
 }
 
-export function packDisplayMetadata(step: number, stripePhase: number, coherence: number, nuAngle = 0): number {
+/** 8-bit companded code of the signed angle δ (radians) of grad(nu) from grad(H). */
+export function quantizeNuAngleOffset(delta: number): number {
+    const d = Math.max(-Math.PI, Math.min(Math.PI, Number.isFinite(delta) ? delta : 0))
+    const q = Math.sign(d) * Math.sqrt(Math.abs(d) / Math.PI)
+    return Math.max(0, Math.min(NU_ANGLE_STEPS - 1, Math.round((q * 0.5 + 0.5) * (NU_ANGLE_STEPS - 1))))
+}
+
+export function dequantizeNuAngleOffset(code: number): number {
+    const q = code / (NU_ANGLE_STEPS - 1) * 2 - 1
+    return Math.sign(q) * q * q * Math.PI
+}
+
+export function packDisplayMetadata(step: number, stripePhase: number, coherence: number, nuAngleOffset = 0): number {
     const exponent = provenanceExponentForStep(step)
     const wrappedStripe = ((Number.isFinite(stripePhase) ? stripePhase : 0) % 1 + 1) % 1
     const stripe = quantizeUnit(wrappedStripe)
     const coherent = quantizeUnit(coherence)
-    const turn = (Number.isFinite(nuAngle) ? nuAngle : 0) / (2 * Math.PI)
-    const angle = Math.round((turn % 1 + 1) % 1 * NU_ANGLE_STEPS) % NU_ANGLE_STEPS
+    const angle = quantizeNuAngleOffset(nuAngleOffset)
     return (
         exponent
         | (stripe << STRIPE_SHIFT)
@@ -74,7 +87,7 @@ export function unpackDisplayMetadata(word: number): DecodedDisplayMetadata {
         supportStep: supportStepForExponent(provenanceExponent),
         stripePhase: ((packed >>> STRIPE_SHIFT) & QUANTIZED_FIELD_MAX) / QUANTIZED_FIELD_MAX,
         coherence: ((packed >>> COHERENCE_SHIFT) & QUANTIZED_FIELD_MAX) / QUANTIZED_FIELD_MAX,
-        nuAngle: ((packed >>> NU_ANGLE_SHIFT) & (NU_ANGLE_STEPS - 1)) * (2 * Math.PI / NU_ANGLE_STEPS),
+        nuAngleOffset: dequantizeNuAngleOffset((packed >>> NU_ANGLE_SHIFT) & (NU_ANGLE_STEPS - 1)),
     }
 }
 

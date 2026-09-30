@@ -3112,6 +3112,22 @@ async function startVideoExport(payload: {
         </div>
       </DenseSection>
 
+      <!-- Tilted 3D view of the current frame (tilt_view.wgsl); 0° tilt = top-down. -->
+      <DenseSection
+        :title="t('settings.navigation.view3d.title')"
+        :scope="t('settings.navigation.view3d.scope')"
+        icon='<path d=&quot;M3 18l9-5 9 5-9 4z&quot;/><path d=&quot;M12 13V3M8 6l4-3 4 3&quot;/>'
+      >
+        <div class="grid">
+          <DenseField :label="t('settings.navigation.view3d.tilt')" :min="0" :max="50" :step="0.5" :default="0" f="p1"
+            :model-value="model.tiltViewTilt ?? 0" @update:model-value="(v: number) => model.tiltViewTilt = v" />
+          <DenseField :label="t('settings.navigation.view3d.heading')" :min="0" :max="360" :step="1" :default="0" f="p0"
+            :model-value="model.tiltViewHeading ?? 0" @update:model-value="(v: number) => model.tiltViewHeading = v" />
+          <DenseField :label="t('settings.navigation.view3d.relief')" :min="0" :max="40" :step="0.5" :default="10" f="p1"
+            :model-value="model.tiltViewRelief ?? 10" @update:model-value="(v: number) => model.tiltViewRelief = v" />
+        </div>
+      </DenseSection>
+
     </div>
 
     <!-- Presets tab -->
@@ -3548,12 +3564,6 @@ async function startVideoExport(payload: {
             :model-value="model.horizonOcclusionStrength ?? 0" @update:model-value="(v: number) => model.horizonOcclusionStrength = v" />
           <DenseField :label="t('settings.palettes.surface.horizonOcclusionRadius')" :min="0.01" :max="0.5" :step="0.005" :default="0.1" f="p3"
             :model-value="model.horizonOcclusionRadius ?? 0.1" @update:model-value="(v: number) => model.horizonOcclusionRadius = v" />
-          <DenseField :label="t('settings.palettes.surface.tiltViewTilt')" :min="0" :max="50" :step="0.5" :default="0" f="p1"
-            :model-value="model.tiltViewTilt ?? 0" @update:model-value="(v: number) => model.tiltViewTilt = v" />
-          <DenseField :label="t('settings.palettes.surface.tiltViewHeading')" :min="0" :max="360" :step="1" :default="0" f="p0"
-            :model-value="model.tiltViewHeading ?? 0" @update:model-value="(v: number) => model.tiltViewHeading = v" />
-          <DenseField :label="t('settings.palettes.surface.tiltViewRelief')" :min="0" :max="40" :step="0.5" :default="10" f="p1"
-            :model-value="model.tiltViewRelief ?? 10" @update:model-value="(v: number) => model.tiltViewRelief = v" />
           <DenseField :label="t('settings.palettes.surface.varnish')" :min="0" :max="100" :step="0.05" :default="0" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
           <DenseField :label="t('settings.palettes.surface.contrast')" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"

@@ -102,9 +102,56 @@ fn cast_ray(pixel: vec2<f32>) -> vec3<f32> {
   return vec3<f32>(g0 + depth * tanTilt * e, depth);
 }
 
-fn shade_hit(hit: vec3<f32>) -> vec3<f32> {
-  let c = textureSampleLevel(sourceTex, linearSampler, ground_to_pixel(hit.xy) / params.raster, 0.0);
+fn source_color(g: vec2<f32>) -> vec3<f32> {
+  let c = textureSampleLevel(sourceTex, linearSampler, ground_to_pixel(g) / params.raster, 0.0);
   return c.rgb / max(c.a, 1e-6);
+}
+
+// Walls: a vertical face (the drop into the interior, terrace walls) holds no
+// colour of its own in the top-down image; every column would take the
+// colour of the single rim pixel above it, i.e. vertical streaks. The faces
+// the camera sees drop away from it, so a hit is on a wall when the terrain
+// just beyond it (along the ray) stands well above the ray; there the colour
+// is averaged along that rim (across the heading) and darkens with depth,
+// like a face falling into shade.
+const WALL_RISE_START: f32 = 0.005;   // terrain above the ray, in z (half-heights)
+const WALL_RISE_FULL: f32 = 0.03;
+const WALL_TINT_GRID: i32 = 5;
+const WALL_TINT_RADIUS_PIXELS: f32 = 48.0;
+const WALL_DEPTH_SHADE: f32 = 0.8;
+
+fn shade_hit(hit: vec3<f32>) -> vec3<f32> {
+  let color = source_color(hit.xy);
+  let e = params.heading;
+  let pixel = 2.0 / params.raster.y; // one raster pixel, in half-heights
+  // The ray sits at z = -hit.z; the rim topping the face lies beyond it.
+  var beyond = -1.0;
+  for (var k = 1; k <= 4; k = k + 1) {
+    beyond = max(beyond, surface_z(hit.xy + f32(k) * e * pixel));
+  }
+  let wall = smoothstep(WALL_RISE_START, WALL_RISE_FULL, beyond + hit.z);
+  if (wall <= 0.0) { return color; }
+  // Rim colour: the top of the face, averaged along it.
+  let r = vec2<f32>(e.y, -e.x);
+  let rim = hit.xy + 2.0 * e * pixel;
+  // The rim is fractal, so a 1D average along it still jumps from column to
+  // column. The wall takes the local surface tint instead: a 5x5 tent-weighted
+  // grid around the rim, skipping taps that fall into the hole (floor).
+  var rimColor = vec3<f32>(0.0);
+  var rimWeight = 0.0;
+  for (var j = 0; j < WALL_TINT_GRID; j = j + 1) {
+    for (var k = 0; k < WALL_TINT_GRID; k = k + 1) {
+      let o = (vec2<f32>(f32(k), f32(j)) / f32(WALL_TINT_GRID - 1) - vec2<f32>(0.5)) * 2.0;
+      let tap = rim + (r * o.x + e * o.y) * (WALL_TINT_RADIUS_PIXELS * pixel);
+      let w = select(0.0, 1.0, surface_z(tap) > -0.9) * (1.0 - 0.5 * length(o));
+      rimColor = rimColor + w * source_color(tap);
+      rimWeight = rimWeight + w;
+    }
+  }
+  rimColor = select(color, rimColor / max(rimWeight, 1e-6), rimWeight > 1e-3);
+  // Deeper is darker: hit.z is the depth below the top plane, in [0, 1].
+  let shade = 1.0 - WALL_DEPTH_SHADE * smoothstep(0.0, 1.0, hit.z);
+  return mix(color, rimColor * shade, wall);
 }
 
 @fragment

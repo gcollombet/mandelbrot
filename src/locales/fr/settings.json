@@ -59,7 +59,14 @@
     "zeroRotation": "Rotation nulle",
     "quarterTurnCw": "Quart de tour horaire",
     "bailout": "Bailout",
-    "bailout4": "Bailout = 4"
+    "bailout4": "Bailout = 4",
+    "view3d": {
+      "title": "Vue 3D",
+      "scope": "Inclinaison de la caméra sur le relief",
+      "tilt": "Inclinaison (°)",
+      "heading": "Orientation (°)",
+      "relief": "Relief"
+    }
   },
   "presets": {
     "shareHelp": "Les scènes synchronisées sont accessibles à toute personne disposant de leur lien.",
@@ -216,9 +223,6 @@
       "ambientOcclusion": "Occlusion ambiante",
       "horizonOcclusion": "Occlusion d’horizon",
       "horizonOcclusionRadius": "Rayon d’occlusion",
-      "tiltViewTilt": "Vue 3D : inclinaison (°)",
-      "tiltViewHeading": "Vue 3D : orientation (°)",
-      "tiltViewRelief": "Vue 3D : relief",
       "varnish": "Vernis",
       "contrast": "Contraste",
       "saturation": "Saturation"

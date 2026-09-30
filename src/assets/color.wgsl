@@ -979,7 +979,9 @@ struct ReliefMaterial {
 };
 
 fn relief_material_at(phase: f32) -> ReliefMaterial {
-  let p = fract(phase);
+  // Phases stay inside [0, 1]: the palette is not periodic (stop 0 and stop 1
+  // may differ), so its end must not blend into its start.
+  let p = clamp(phase, 0.5 / 4096.0, 1.0 - 0.5 / 4096.0);
   let row1 = sample_palette(p, 1.0);
   let row5 = sample_palette(p, 5.0);
   let row6 = sample_palette(p, 6.0);
@@ -1005,27 +1007,6 @@ fn geometric_protrusion_profile(distanceHeight: f32) -> vec2<f32> {
   );
 }
 
-// Derivative of the raw palette coordinate with respect to nu and to H, signed
-// by the mirror fold, so grad(phase) = x·grad(nu) + y·grad(H). The screen
-// shift and phase coloring terms are not differentiated (see build_surface).
-fn palette_phase_derivatives(rawPhase: f32, v: f32, paletteRepeat: f32, wSmoothness: f32, distanceHeightStored: f32) -> vec2<f32> {
-  let u = max(2.0 * v / max(paletteRepeat, 0.0001), 0.0);
-  let mode = i32(round(parameters.iterationPaletteCurve));
-  var curveSlope = 1.0;
-  if (mode == 1) {
-    curveSlope = 0.5 / (sqrt(1.0 + u) * 0.4142135623730951);
-  } else if (mode == 2) {
-    curveSlope = 1.0 / ((1.0 + u) * 0.6931471805599453);
-  } else if (mode == 3) {
-    curveSlope = (2.0 * u + 2.0) / 3.0;
-  }
-  let dRawDnu = curveSlope * (2.0 / max(paletteRepeat, 0.0001)) * clamp(wSmoothness, 0.0, 1.0);
-  let dRawDh = select(0.0, clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0,
-    abs(distanceHeightStored) < 16.0);
-  let mirrored = parameters.paletteMirror >= 0.5 && (i32(floor(rawPhase)) % 2) != 0;
-  return select(1.0, -1.0, mirrored) * vec2<f32>(dRawDnu, dRawDh);
-}
-
 // The analytic relief at one pixel: h, grad h (neutral texel frame, before
 // the scene rotation) and the styled multiplier the lighting thresholds use.
 // Single source of truth for the normal (build_surface), the stereo depth and
@@ -1044,10 +1025,17 @@ struct ReliefField {
 };
 
 const ORBIT_RELIEF_HEIGHT_SCALE: f32 = 12.0;
+// Orbit-metric relief kept below the sampling limit: 1 at low frequency,
+// 1/sqrt(2) at the cutoff (cycles, or full-range changes, per texel), then a
+// steep fall (0.24 at twice the cutoff, 0.06 at four times).
+const ORBIT_RELIEF_CUTOFF: f32 = 0.25;
+fn orbit_relief_band_limit(frequency: f32) -> f32 {
+  let r = frequency / ORBIT_RELIEF_CUTOFF;
+  return inverseSqrt(1.0 + r * r * r * r);
+}
 
 fn relief_field(
   palettePhase: f32,
-  phaseDerivatives: vec2<f32>,
   nuSmooth: f32,
   distanceHeight: f32,
   cachedGradient: vec2<f32>,
@@ -1058,16 +1046,14 @@ fn relief_field(
   coherenceGradient: vec2<f32>
 ) -> ReliefField {
   var out: ReliefField;
-  // Material and its derivative along the 1D palette (a symmetric difference
-  // on a known function, not a screen-space difference).
-  let eps = 1.0 / 2048.0;
+  // Palette weights are taken as locally constant: their own slope along the
+  // palette phase (the product-rule term (F - Hc)·dM/dphase·grad(phase)) is
+  // left out. grad(nu) is noisy at depth and F - Hc is large away from the
+  // set, so that term turned every band into a ridge (fingerprint moiré at
+  // depth, dotted level sets at e0). The height keeps M, so a weight change
+  // reads as a step of h, not as a slope.
   let material = relief_material_at(palettePhase);
-  let above = relief_material_at(palettePhase + eps);
-  let below = relief_material_at(palettePhase - eps);
-  let phaseGradient = (phaseDerivatives.x * nuGradient + phaseDerivatives.y * cachedGradient) / (2.0 * eps);
   let scale = material.scale;
-  let scaleGradient = (above.scale - below.scale) * phaseGradient;
-  let protrusionGradient = (above.protrusion - below.protrusion) * phaseGradient;
 
   let iterationGain = iteration_protrusion_gain(material.protrusion, nuSmooth);
   let geometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
@@ -1075,7 +1061,7 @@ fn relief_field(
   let geometricGain = max(1.0 + material.protrusion * geometric.y, 0.0);
   out.styledRelief = scale * mix(iterationGain.x, geometricGain, geometryMix);
 
-  if (scale > 0.001 || max(above.scale, below.scale) > 0.001) {
+  if (scale > 0.001) {
     let heightProfile = relief_height_profile(distanceHeight);
     let offset = heightProfile.x;   // F(H) - Hc, <= 0
     let fade = heightProfile.y;     // F'(H) = sigmoid(Hc - H)
@@ -1084,15 +1070,11 @@ fn relief_field(
     // Geometric lobe: h = S·(F - Hc + P·R(H)·F').
     let ripple = material.protrusion * geometric.x * fade;
     let geometricHeight = scale * (offset + ripple);
-    let geometricGradient = scale * (fade + material.protrusion * (geometric.y * fade + geometric.x * fadeSlope)) * cachedGradient
-      + (offset + ripple) * scaleGradient
-      + scale * geometric.x * fade * protrusionGradient;
+    let geometricGradient = scale * (fade + material.protrusion * (geometric.y * fade + geometric.x * fadeSlope)) * cachedGradient;
 
     // Iteration lobe, S·g(nu) with g from the palette protrusion.
     let lobed = scale * iterationGain.x;
-    let lobedGradient = (above.scale * iteration_protrusion_gain(above.protrusion, nuSmooth).x
-      - below.scale * iteration_protrusion_gain(below.protrusion, nuSmooth).x) * phaseGradient
-      + scale * iterationGain.y * nuGradient;
+    let lobedGradient = scale * iterationGain.y * nuGradient;
     // Terraces: h = S·g·(F - Hc). The lobe scales the height itself, so each
     // band steps by S·Δg·(F - Hc): walls grow away from the set.
     let terraceHeight = lobed * offset;
@@ -1101,9 +1083,8 @@ fn relief_field(
     // faded with F' so it vanishes on the plateau next to the set.
     let bump = lobed - scale;
     let bumpHeight = scale * offset + PROTRUSION_BUMP_HEIGHT * bump * fade;
-    let bumpGradient = scale * fade * cachedGradient + offset * scaleGradient
-      + PROTRUSION_BUMP_HEIGHT * (fade * (lobedGradient - scaleGradient)
-        + bump * fadeSlope * cachedGradient);
+    let bumpGradient = scale * fade * cachedGradient
+      + PROTRUSION_BUMP_HEIGHT * (fade * lobedGradient + bump * fadeSlope * cachedGradient);
     let terrace = clamp(parameters.protrusionTerrace, 0.0, 1.0);
     let iterationHeight = mix(bumpHeight, terraceHeight, terrace);
     let iterationGradient = mix(bumpGradient, terraceGradient, terrace);
@@ -1114,15 +1095,22 @@ fn relief_field(
 
   // Orbit-metric reliefs. The cached stripe slope is grad of the stripe EMA
   // S, with p = 0.5 + 0.5·S; coherence slopes are grad of the coherence.
+  // Band limiting: at depth both metrics can vary faster than the pixel grid
+  // samples them, and their (possibly very strong) relief then aliases into
+  // moiré. Their analytic gradients give the local frequency, so each relief
+  // fades out smoothly above ~1/4 cycle per texel, like a mip level would.
+  // The fade multiplies height and slope alike; its own gradient (a Hessian
+  // term) is left out, so above the cutoff the relief is filtered, not exact.
+  let stripeFilter = orbit_relief_band_limit(0.5 * length(stripeGradient));
+  let coherenceFilter = orbit_relief_band_limit(length(coherenceGradient));
+  let stripeWeight = material.stripe * stripeFilter;
+  let coherenceWeight = material.coherence * coherenceFilter;
   let stripeProfile = -0.5 - 0.5 * cos(TWO_PI * stripePhase);
   let stripeProfileGradient = (3.141592653589793 * sin(TWO_PI * stripePhase) * 0.5) * stripeGradient;
-  let stripeWeightGradient = (above.stripe - below.stripe) * phaseGradient;
-  let coherenceWeightGradient = (above.coherence - below.coherence) * phaseGradient;
   out.height = out.height + ORBIT_RELIEF_HEIGHT_SCALE
-    * (material.stripe * stripeProfile + material.coherence * (coherence - 1.0));
+    * (stripeWeight * stripeProfile + coherenceWeight * (coherence - 1.0));
   out.gradient = out.gradient + ORBIT_RELIEF_HEIGHT_SCALE * (
-    material.stripe * stripeProfileGradient + stripeProfile * stripeWeightGradient
-    + material.coherence * coherenceGradient + (coherence - 1.0) * coherenceWeightGradient);
+    stripeWeight * stripeProfileGradient + coherenceWeight * coherenceGradient);
   return out;
 }
 
@@ -1172,7 +1160,6 @@ fn build_surface(
   cachedCoherenceGradient: vec2<f32>,
   tessCoord: vec2<f32>,
   nuGradient: vec2<f32>,
-  phaseDerivatives: vec2<f32>,
   directionCoherence: f32
 ) -> Surface {
   let effShading = fx.wShading;
@@ -1186,7 +1173,7 @@ fn build_surface(
   // Cached geometry stores the analytic derivative per source texel and the
   // branch-local analytic Laplacian, already normalized to display scale.
   let relief = relief_field(
-    palettePhase, phaseDerivatives, v_smooth,
+    palettePhase, v_smooth,
     distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored),
     cachedGradient, nuGradient,
     stripeAverage, cachedStripeGradient, directionCoherence, cachedCoherenceGradient
@@ -1746,7 +1733,6 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       cachedGradient, cachedCurvature, geometryAngle,
       stripeAverage, cachedStripeGradient, cachedCoherenceGradient,
       tessCoord, nuGradient,
-      palette_phase_derivatives(rawPalettePhase, v, paletteRepeat, fx.wSmoothness, distanceHeightStored),
       directionCoherence
     );
     color = mix(color, shade_surface(surface, fx, uv_screen), effShading);
@@ -1776,7 +1762,8 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
 
 
 
-// Display metadata: provenance (4) | stripe (10) | coherence (10) | grad(nu) angle (8).
+// Display metadata: provenance (4) | stripe (10) | coherence (10) | grad(nu) angle
+// relative to grad(H), companded (8) — see quantize_direction in resolve.wgsl.
 const QUANTIZED_FIELD_MAX: f32 = 1023.0;
 const NU_GRADIENT_LN2: f32 = 0.6931471805599453;
 
@@ -1793,15 +1780,17 @@ fn decode_direction_coherence(metadata: u32) -> f32 {
 }
 
 // Unit direction of grad(nu) in the neutral texel frame of the cached gradient.
-fn decode_nu_direction(metadata: u32) -> vec2<f32> {
-  let angle = f32(metadata >> 24u) * (6.283185307179586 / 256.0);
-  return vec2<f32>(cos(angle), sin(angle));
+fn decode_nu_direction(metadata: u32, heightGradient: vec2<f32>) -> vec2<f32> {
+  let q = f32(metadata >> 24u) / 255.0 * 2.0 - 1.0;
+  let delta = sign(q) * q * q * 3.141592653589793;
+  let base = select(0.0, atan2(heightGradient.y, heightGradient.x), dot(heightGradient, heightGradient) > 1e-24);
+  return vec2<f32>(cos(base + delta), sin(base + delta));
 }
 
-// grad(nu) per display texel: the direction is stored, the magnitude is
-// sqrt(Laplacian of H)/ln2 (see Surface).
-fn nu_gradient(metadata: u32, curvature: f32) -> vec2<f32> {
-  return decode_nu_direction(metadata) * (sqrt(max(curvature, 0.0)) / NU_GRADIENT_LN2);
+// grad(nu) per display texel: the direction is stored relative to grad(H), the
+// magnitude is sqrt(Laplacian of H)/ln2 (see Surface).
+fn nu_gradient(metadata: u32, heightGradient: vec2<f32>, curvature: f32) -> vec2<f32> {
+  return decode_nu_direction(metadata, heightGradient) * (sqrt(max(curvature, 0.0)) / NU_GRADIENT_LN2);
 }
 
 struct PixelExtras {
@@ -1859,7 +1848,7 @@ fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d
   extras.curvature = geometry.z;
   extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
   let metadata = textureLoad(sourceMetadata, coord, 0).r;
-  extras.nuGradient = nu_gradient(metadata, geometry.z);
+  extras.nuGradient = nu_gradient(metadata, geometry.xy, geometry.z);
   if (ENABLE_SURFACE_EFFECTS && parameters.orbitMetricsEnabled > 0.5) {
     extras.stripePhase = decode_stripe_phase(metadata);
     extras.directionCoherence = decode_direction_coherence(metadata);
@@ -2160,7 +2149,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
     if (needs_cached_geometry()) {
       let cornerGeometry = normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
       geometrySum = geometrySum + w * cornerGeometry;
-      nuGradientSum = nuGradientSum + w * nu_gradient(metadata, cornerGeometry.z);
+      nuGradientSum = nuGradientSum + w * nu_gradient(metadata, cornerGeometry.xy, cornerGeometry.z);
     }
 
     let zLen = max(sqrt(z_sq), 1e-12);
@@ -2236,9 +2225,8 @@ fn relief_at_pixel(iterVal: f32, z: vec2<f32>, extras: PixelExtras, uvScreen: ve
   let phaseColoringShift = (1.0 - abs(fract(extras.geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
   let rawPhase = iteration_palette_coordinate(v, paletteRepeat) + animatedPaletteOffset() + screenPaletteShift(uvScreen) + heightPhaseShift + phaseColoringShift;
   let phase = palettePhaseFromRaw(rawPhase);
-  let row2 = sample_palette(phase, 2.0);
   return relief_field(
-    phase, palette_phase_derivatives(rawPhase, v, paletteRepeat, row2.g, extras.height), nu,
+    phase, nu,
     distance_height_from_values(iterVal, z.x, z.y, extras.height),
     extras.gradient, extras.nuGradient,
     extras.stripePhase, extras.stripeGradient, extras.directionCoherence, extras.coherenceGradient

@@ -25,9 +25,9 @@ describe('packed geometry display ABI', () => {
 
   it('packs provenance, stripe phase, and coherence without a display reference index', () => {
     expect(resolve).toContain('provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 14u)')
-    expect(resolve).toContain('| (quantize_direction(nuDirection) << 24u)')
+    expect(resolve).toContain('| (quantize_direction(nuDirection, heightGradient) << 24u)')
+    expect(color).toContain('fn decode_nu_direction(metadata: u32, heightGradient: vec2<f32>) -> vec2<f32>')
     expect(resolve).toContain('fn load_terminal_nu_direction(coord: vec2<i32>) -> vec2<f32>')
-    expect(color).toContain('fn decode_nu_direction(metadata: u32) -> vec2<f32>')
     expect(brush).toContain('0x30000000u | stripe | (coherence << 14u)')
     expect(color).toContain('fn decode_support_step(metadata: u32) -> f32')
     expect(color).toContain('fn decode_stripe_phase(metadata: u32) -> f32')
@@ -80,7 +80,9 @@ describe('typed display consumers', () => {
     expect(merge).toContain('@location(5) orbitGradient: vec4<f32>')
     // Stripe and coherence are heights: 12·Ws·(-0.5 - 0.5 cos 2πp) and 12·Wc·(coherence - 1).
     expect(color).toContain('let stripeProfileGradient = (3.141592653589793 * sin(TWO_PI * stripePhase) * 0.5) * stripeGradient;')
-    expect(color).toContain('+ material.coherence * coherenceGradient + (coherence - 1.0) * coherenceWeightGradient);')
+    expect(color).toContain('stripeWeight * stripeProfileGradient + coherenceWeight * coherenceGradient);')
+    // Band limited above ~1/4 cycle per texel (moiré at depth).
+    expect(color).toContain('let coherenceFilter = orbit_relief_band_limit(length(coherenceGradient));')
     expect(color).toContain('fn normalize_orbit_gradient(')
     expect(engine).toContain('const RAW_ORBIT_GRADIENT_LAYERS = 18')
     // The deep kernel tracks the same metrics from the same w = z'/z.

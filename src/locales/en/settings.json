@@ -59,7 +59,14 @@
     "zeroRotation": "No rotation",
     "quarterTurnCw": "Quarter turn clockwise",
     "bailout": "Bailout",
-    "bailout4": "Bailout = 4"
+    "bailout4": "Bailout = 4",
+    "view3d": {
+      "title": "3D view",
+      "scope": "Camera tilt over the relief",
+      "tilt": "Tilt (°)",
+      "heading": "Heading (°)",
+      "relief": "Relief"
+    }
   },
   "presets": {
     "shareHelp": "Synced scenes are accessible to anyone with their link.",
@@ -216,9 +223,6 @@
       "ambientOcclusion": "Ambient occlusion",
       "horizonOcclusion": "Horizon occlusion",
       "horizonOcclusionRadius": "Occlusion radius",
-      "tiltViewTilt": "3D view: tilt (°)",
-      "tiltViewHeading": "3D view: heading (°)",
-      "tiltViewRelief": "3D view: relief",
       "varnish": "Varnish",
       "contrast": "Contrast",
       "saturation": "Saturation"
