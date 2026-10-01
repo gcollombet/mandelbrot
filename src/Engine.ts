@@ -1,6 +1,6 @@
 import type { HdrGpuOptions } from './hdrGpuOutput'
 import { STEREO_RELIEF_DEFAULT, type StereoColorPass } from './stereoVideo'
-import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, withoutCastShadowBinding } from './castShadow'
+import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, LIGHT_OCCLUSION_FORMAT, withoutCastShadowBinding } from './castShadow'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
 import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
@@ -18,6 +18,7 @@ import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
 import tiltViewShader from './assets/tilt_view.wgsl?raw'
 import tiltDistanceShader from './assets/tilt_distance.wgsl?raw'
+import tiltMipsShader from './assets/tilt_mips.wgsl?raw'
 import { normalizeTiltView, tiltViewUniforms } from './tiltView'
 import rotationPresentShader from './assets/rotation_present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
@@ -128,6 +129,9 @@ interface ColorPipelines {
     /** Cast-shadow height raster (screen / rotation cache), full family only. */
     castHeight?: GPURenderPipeline
     castHeightRotation?: GPURenderPipeline
+    /** Half-resolution cast shadows + horizon occlusion (screen / rotation cache). */
+    lightOcclusion?: GPURenderPipeline
+    lightOcclusionRotation?: GPURenderPipeline
 }
 
 interface ColorPipelineFamily { full: ColorPipelines, simple: ColorPipelines }
@@ -248,6 +252,29 @@ function animationWave(track: AnimationTrackConfig, time: number, globalSpeed: n
 function animationContribution(track: AnimationTrackConfig, time: number, globalSpeed: number): number {
     if (!track.enabled) return 0
     return animationWave(track, time, globalSpeed) * track.amplitude
+}
+
+// Colour uniforms that do not change the relief height raster between frames:
+// the per-sample AA jitter (reusing sample 0's raster is sub-pixel) and the raw
+// clock (animated values reach h through their own, already-animated fields).
+// Pure lighting / grading / shadow controls are left out too: h never reads
+// them, so a light animation or a shadow tweak reuses the raster.
+const HEIGHT_RASTER_VOLATILE_UNIFORMS = new Set<string>([
+    'time', 'aaSampleIndex', 'aaJitterHatX', 'aaJitterHatY', 'aaJitterLogMag',
+    'aaAnalytic', 'aaLookupOffsetX', 'aaLookupOffsetY',
+    'lightAngle', 'lightDirX', 'lightDirY', 'lightDirZ', 'lightAngleAnimation',
+    'varnishStrength', 'varnishAnimation', 'localShadowStrength', 'ambientOcclusionStrength',
+    'castShadowStrength', 'castShadowLength', 'castShadowSoftness',
+    'horizonOcclusionStrength', 'horizonOcclusionRadius',
+    'gradeContrast', 'gradeSaturation', 'skyDriftX', 'skyDriftY', 'skyReflectionDriftAnimation',
+])
+
+function heightUniformSignature(uniforms: ColorUniforms): string {
+    let signature = ''
+    for (const [field, value] of Object.entries(uniforms)) {
+        if (!HEIGHT_RASTER_VOLATILE_UNIFORMS.has(field)) signature += value + ','
+    }
+    return signature
 }
 
 function shiftedAnimationContribution(track: AnimationTrackConfig, time: number, globalSpeed: number, phaseShift: number): number {
@@ -560,6 +587,24 @@ export class Engine {
     private castShadowTextureView?: GPUTextureView
     // The height pass renders into the raster, so it binds a 1x1 stand-in at 21.
     private castShadowDummyView?: GPUTextureView
+    // Half-resolution light occlusion (cast shadows + horizon), read by colour.
+    private pipelineLightOcclusion?: GPURenderPipeline
+    private pipelineLightOcclusionRotation?: GPURenderPipeline
+    private lightOcclusionTexture?: GPUTexture
+    private lightOcclusionTextureView?: GPUTextureView
+    private lightOcclusionDummyView?: GPUTextureView
+    private bindGroupColorLightOcclusion?: GPUBindGroup
+    private lightOcclusionActive = false
+    // Height raster reuse: it is re-encoded only when its inputs change (not per
+    // AA sample, not on a still view). castHeightKey names what the raster holds.
+    private heightInputsVersion = 0
+    private heightUniformSignature = ''
+    private castHeightKey = ''
+    private tiltSeedsKey = ''
+    private tiltSeedsResult?: GPUTexture
+    private heightPathSignature = ''
+    /** Dev: re-encode the height raster every time (A/B of the reuse). */
+    disableHeightReuse = false
     private bindGroupColorCastHeight?: GPUBindGroup
     // Tilted 3D view (tilt_view.wgsl): final linear colour + height raster → tilted image.
     private pipelineTiltView?: GPURenderPipeline
@@ -573,6 +618,14 @@ export class Engine {
     private pipelineTiltSeed?: GPURenderPipeline
     private pipelineTiltJump?: GPURenderPipeline
     private tiltSeedTextures: GPUTexture[] = []
+    // March height (surface z + maximum pyramid) and colour mips (tilt_mips.wgsl).
+    private pipelineTiltMarchHeight?: GPURenderPipeline
+    private pipelineTiltMaxDown?: GPURenderPipeline
+    private pipelineTiltColorBase?: GPURenderPipeline
+    private pipelineTiltColorDown?: GPURenderPipeline
+    private tiltMarchTexture?: GPUTexture
+    private tiltColorMipTexture?: GPUTexture
+    private tiltMarchKey = ''
     /** Cheap screen pass that bilinearly reconstructs the final cached color. */
     private pipelineRotationPresent?: GPURenderPipeline
     private bindGroupRotationPresent?: GPUBindGroup
@@ -1410,7 +1463,7 @@ export class Engine {
             bind.data(),                     // frozenTrapPayloadTex
             bind.readOnlyStorage(),          // palettePath
             bind.sampler(),                  // tileSampler
-            ...(this.castShadowSupported ? [bind.data()] : []), // castShadowHeightTex
+            ...(this.castShadowSupported ? [bind.data(), bind.data()] : []), // castShadowHeightTex, lightOcclusionTex
         ])
         this.colorPipelineSource = { device, module: color.module, layout: color.pipelineLayout }
         const [full, simple, hdrFull, hdrSimple] = await Promise.all([
@@ -1527,6 +1580,18 @@ export class Engine {
         })
         this.pipelineTiltSeed = distancePipeline('fs_seed')
         this.pipelineTiltJump = distancePipeline('fs_jump')
+        const mipsModule = device.createShaderModule({ code: tiltMipsShader, label: 'Engine ShaderModule TiltMips' })
+        const mipsPipeline = (entryPoint: string, format: GPUTextureFormat) => device.createRenderPipeline({
+            label: `Engine RenderPipeline TiltMips (${entryPoint})`,
+            layout: 'auto',
+            vertex: { module: mipsModule, entryPoint: 'vs_main' },
+            fragment: { module: mipsModule, entryPoint, targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        })
+        this.pipelineTiltMarchHeight = mipsPipeline('fs_march_height', 'r16float')
+        this.pipelineTiltMaxDown = mipsPipeline('fs_max_down', 'r16float')
+        this.pipelineTiltColorBase = mipsPipeline('fs_color_base', 'rgba16float')
+        this.pipelineTiltColorDown = mipsPipeline('fs_color_down', 'rgba16float')
         const tiltUniform = (label: string) => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
         this.tiltViewUniformLive = tiltUniform('Engine TiltView Uniform (live)')
         this.tiltViewUniformExport = tiltUniform('Engine TiltView Uniform (export)')
@@ -1712,7 +1777,7 @@ export class Engine {
                 fragmentEntry: entryPoint,
             }))
         const castShadows = surfaceEffects && this.castShadowSupported
-        const [direct, rotation, clear, accum, castHeight, castHeightRotation] = await Promise.all([
+        const [direct, rotation, clear, accum, castHeight, castHeightRotation, lightOcclusion, lightOcclusionRotation] = await Promise.all([
             create('fs_main_direct', { format: hdr ? 'rgba16float' : this.format }),
             create('fs_rotation_cache', { format: 'rgba16float' }, true),
             create('fs_main', { format: 'rgba16float' }),
@@ -1725,8 +1790,12 @@ export class Engine {
             }),
             castShadows ? create('fs_cast_height', { format: CAST_SHADOW_HEIGHT_FORMAT }) : undefined,
             castShadows ? create('fs_cast_height_rotation', { format: CAST_SHADOW_HEIGHT_FORMAT }, true) : undefined,
+            castShadows ? create('fs_light_occlusion', { format: LIGHT_OCCLUSION_FORMAT }) : undefined,
+            castShadows ? create('fs_light_occlusion_rotation', { format: LIGHT_OCCLUSION_FORMAT }, true) : undefined,
         ])
-        return { direct, rotation, clear, accum, ...(castHeight && castHeightRotation ? { castHeight, castHeightRotation } : {}) }
+        return { direct, rotation, clear, accum,
+            ...(castHeight && castHeightRotation ? { castHeight, castHeightRotation } : {}),
+            ...(lightOcclusion && lightOcclusionRotation ? { lightOcclusion, lightOcclusionRotation } : {}) }
     }
 
     /**
@@ -1769,6 +1838,8 @@ export class Engine {
         this.pipelineColorAccum = pipelines.accum
         this.pipelineCastHeight = pipelines.castHeight
         this.pipelineCastHeightRotation = pipelines.castHeightRotation
+        this.pipelineLightOcclusion = pipelines.lightOcclusion
+        this.pipelineLightOcclusionRotation = pipelines.lightOcclusionRotation
     }
 
     private rebuildInplaceBindGroup() {
@@ -3199,8 +3270,10 @@ export class Engine {
             const pathWrapOffset = pathOffsetTrack.enabled
                 ? animationContribution(pathOffsetTrack, renderOptions.activateAnimate ? this.time : 0, clamp(pathAnimation.globalSpeed, 0, 10)) * this.palettePathGpu.span
                 : null
-            this.palettePathGpu.update(this.device, -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale)),
+            const pathDepth = -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale))
+            this.palettePathGpu.update(this.device, pathDepth,
                 this.expmap?.projection, this.expmap ? -log10FromDecimalString(this.expmap.projection.scale) : undefined, pathWrapOffset)
+            this.heightPathSignature = `${pathDepth}:${pathWrapOffset}`
         }
         this.selectColorPipelines(needsSurfaceColorPipeline(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
@@ -3481,6 +3554,7 @@ export class Engine {
                 { bytesPerRow: paletteTex.width * 8 },  // 4 channels × 2 bytes (float16)
                 [paletteTex.width, paletteTex.height]
             )
+            this.heightInputsVersion++
             this.needRender = true
         }
 
@@ -3649,6 +3723,7 @@ export class Engine {
             horizonOcclusionRadius: Math.max(0.01, Math.min(0.5, renderOptions.horizonOcclusionRadius ?? 0.1)),
         }
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
+        this.heightUniformSignature = heightUniformSignature(colorUniforms)
 
         if (!this.needsMoreFrames()) {
             return
@@ -4554,6 +4629,8 @@ export class Engine {
 
         // ── Terminal color branches: direct, AA, or settled rotation ──────
         const castShadows = this.castShadowsActive(renderOptions)
+        this.lightOcclusionActive = this.castShadowSupported
+            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0)
         const tiltView = this.tiltViewActive(renderOptions)
         let tiltPresent: GPUBindGroup | undefined
         if (castShadows) this.prepareCastShadowRaster(Math.max(this.width, this.neutralSize), Math.max(this.height, this.neutralSize))
@@ -4645,7 +4722,7 @@ export class Engine {
 
         if (aaCompositeThisFrame) {
             const firstSample = this.aaSampleIndex === 0
-            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
+            if (castShadows) this.encodeReliefRasters(commandEncoder, this.width, this.height)
             const rpassAccum = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: this.accumTextureView!,
@@ -4665,7 +4742,7 @@ export class Engine {
         } else if (tiltView && !aaShowAccum && this.pipelineColorAccumClear) {
             // Tilted view: linear colour into an intermediate, tilted below.
             this.tiltSourceTexture = this.ensureTiltTexture(this.tiltSourceTexture, this.width, this.height, 'Engine TiltView Source')
-            this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
+            this.encodeReliefRasters(commandEncoder, this.width, this.height)
             const rpassTiltSource = commandEncoder.beginRenderPass({
                 colorAttachments: [{ view: this.tiltSourceTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
                 timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.color),
@@ -4678,7 +4755,7 @@ export class Engine {
             // Colorize each neutral texel once. The cache contains final linear
             // color, so its later bilinear filtering cannot invent semantic
             // iteration/geometry/orbit-trap states.
-            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.neutralSize, this.neutralSize, true)
+            if (castShadows) this.encodeReliefRasters(commandEncoder, this.neutralSize, this.neutralSize, true)
             const rpassRotationCache = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: this.rotationColorTextureView!,
@@ -4697,7 +4774,7 @@ export class Engine {
         } else if (!aaShowAccum && !rotationShowCache) {
             // Direct path: color straight to the swapchain (AA off, or sample 0 not
             // yet converged). Byte-identical to the historical behaviour.
-            if (castShadows) this.encodeCastShadowHeight(commandEncoder, this.width, this.height)
+            if (castShadows) this.encodeReliefRasters(commandEncoder, this.width, this.height)
             const rpassColor = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: swapView,
@@ -4929,7 +5006,7 @@ export class Engine {
                 } : undefined,
                 castShadow: castShadows && !this.expmap ? {
                     prepare: (width: number, height: number) => this.prepareCastShadowRaster(width, height),
-                    encode: (encoder: GPUCommandEncoder, width: number, height: number) => this.encodeCastShadowHeight(encoder, width, height),
+                    encode: (encoder: GPUCommandEncoder, width: number, height: number) => this.encodeReliefRasters(encoder, width, height),
                 } : undefined,
                 accumulator: this.exportAaSamples > 1 && this.aaAccumulatedSamples > 0 && this.accumTextureView
                     ? this.accumTextureView
@@ -4953,7 +5030,7 @@ export class Engine {
                   let snapshotBindGroup = colorBindGroup!;
                   if (castShadows) {
                     snapshotBindGroup = this.prepareCastShadowRaster(targetWidth, targetHeight);
-                    this.encodeCastShadowHeight(encoder, targetWidth, targetHeight);
+                    this.encodeReliefRasters(encoder, targetWidth, targetHeight);
                   }
                   const renderPass = encoder.beginRenderPass({
                     colorAttachments: [{
@@ -5484,6 +5561,57 @@ export class Engine {
         return true
     }
 
+    /** Half-resolution occlusion texture, at least width x height. Grows only. */
+    private ensureLightOcclusionTexture(width: number, height: number): boolean {
+        const current = this.lightOcclusionTexture
+        if (current && current.width >= width && current.height >= height) return false
+        const w = Math.max(1, Math.ceil(width), current?.width ?? 1)
+        const h = Math.max(1, Math.ceil(height), current?.height ?? 1)
+        current?.destroy()
+        this.lightOcclusionTexture = this.device.createTexture({
+            size: { width: w, height: h, depthOrArrayLayers: 1 },
+            format: LIGHT_OCCLUSION_FORMAT,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine LightOcclusion',
+        })
+        this.lightOcclusionTextureView = this.lightOcclusionTexture.createView({ label: 'Engine LightOcclusion View' })
+        return true
+    }
+
+    /**
+     * Cast shadows + horizon occlusion at half resolution for a colour pass of
+     * width x height (the height raster must be current). Always re-encoded:
+     * it follows the light, and its noise turns with every AA sample.
+     */
+    private encodeLightOcclusion(encoder: GPUCommandEncoder, width: number, height: number, rotation = false): void {
+        const pipeline = rotation ? this.pipelineLightOcclusionRotation : this.pipelineLightOcclusion
+        if (!this.lightOcclusionActive || !pipeline || !this.lightOcclusionTextureView || !this.bindGroupColorLightOcclusion) return
+        const halfWidth = Math.ceil(width / 2)
+        const halfHeight = Math.ceil(height / 2)
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{
+                view: this.lightOcclusionTextureView,
+                clearValue: { r: 1, g: 1, b: CAST_SHADOW_NO_SURFACE, a: 1 },
+                loadOp: 'clear',
+                storeOp: 'store',
+            }],
+            label: 'Engine LightOcclusion',
+            timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.lightOcclusion),
+        })
+        pass.setViewport(0, 0, halfWidth, halfHeight, 0, 1)
+        pass.setScissorRect(0, 0, halfWidth, halfHeight)
+        pass.setPipeline(pipeline)
+        pass.setBindGroup(0, this.bindGroupColorLightOcclusion)
+        pass.draw(6, 1, 0, 0)
+        pass.end()
+    }
+
+    /** Height raster (cached) then light occlusion, for one colour raster. */
+    private encodeReliefRasters(encoder: GPUCommandEncoder, width: number, height: number, rotation = false): void {
+        this.encodeCastShadowHeight(encoder, width, height, rotation)
+        this.encodeLightOcclusion(encoder, width, height, rotation)
+    }
+
     /** True when the next colour pass should get a fresh height raster. */
     private castShadowsActive(renderOptions: RenderOptions): boolean {
         return this.castShadowSupported && !!this.pipelineCastHeight
@@ -5532,6 +5660,10 @@ export class Engine {
      */
     private encodeTiltSeeds(encoder: GPUCommandEncoder, width: number, height: number): GPUTexture | undefined {
         if (!this.pipelineTiltSeed || !this.pipelineTiltJump || !this.castShadowTextureView) return undefined
+        // The seeds depend only on the height raster: reuse them with it.
+        const key = `${this.castHeightKey}#${width}x${height}`
+        if (key === this.tiltSeedsKey && this.tiltSeedsResult
+            && this.tiltSeedsResult.width === width && this.tiltSeedsResult.height === height) return this.tiltSeedsResult
         for (let i = 0; i < 2; i++) {
             const t = this.tiltSeedTextures[i]
             if (!t || t.width !== width || t.height !== height) {
@@ -5564,28 +5696,91 @@ export class Engine {
             run(this.pipelineTiltJump, this.tiltSeedTextures[current].createView(), this.tiltSeedTextures[1 - current], step)
             current = 1 - current
         }
-        return this.tiltSeedTextures[current]
+        this.tiltSeedsKey = key
+        this.tiltSeedsResult = this.tiltSeedTextures[current]
+        return this.tiltSeedsResult
+    }
+
+    /** A mipmapped width x height texture, reallocated only when the size changes. */
+    private ensureTiltMipTexture(current: GPUTexture | undefined, width: number, height: number, format: GPUTextureFormat, label: string): GPUTexture {
+        if (current && current.width === width && current.height === height) return current
+        current?.destroy()
+        return this.device.createTexture({
+            size: { width, height, depthOrArrayLayers: 1 },
+            format,
+            mipLevelCount: Math.floor(Math.log2(Math.max(width, height))) + 1,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label,
+        })
+    }
+
+    /** One full-screen draw of `pipeline` into mip `level` of `target`. */
+    private encodeTiltMipPass(encoder: GPUCommandEncoder, pipeline: GPURenderPipeline, target: GPUTexture, level: number, entries: GPUBindGroupEntry[]): void {
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [{ view: target.createView({ baseMipLevel: level, mipLevelCount: 1 }), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }],
+            label: `Engine TiltView Mips ${target.label} ${level}`,
+        })
+        pass.setPipeline(pipeline)
+        pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }))
+        pass.draw(3, 1, 0, 0)
+        pass.end()
     }
 
     private encodeTiltView(encoder: GPUCommandEncoder, source: GPUTextureView, target: GPUTexture, uniform: GPUBuffer, renderOptions: RenderOptions, aspect: number): void {
-        if (!this.pipelineTiltView || !this.castShadowTextureView) return
-        const seeds = this.encodeTiltSeeds(encoder, target.width, target.height)
+        if (!this.pipelineTiltView || !this.castShadowTextureView || !this.pipelineTiltMarchHeight
+            || !this.pipelineTiltMaxDown || !this.pipelineTiltColorBase || !this.pipelineTiltColorDown) return
+        const width = target.width
+        const height = target.height
+        const settings = normalizeTiltView(this.tiltViewSettings(renderOptions))
+        this.device.queue.writeBuffer(uniform, 0, tiltViewUniforms(width, height, aspect, settings).buffer)
+        const seeds = this.encodeTiltSeeds(encoder, width, height)
         if (!seeds) return
-        this.device.queue.writeBuffer(uniform, 0, tiltViewUniforms(target.width, target.height, aspect, normalizeTiltView(this.tiltViewSettings(renderOptions))).buffer)
+
+        // March height + maximum pyramid: follows the height raster (seeds key)
+        // and the relief / basin settings, not the camera.
+        const marchKey = `${this.tiltSeedsKey}#${settings.relief}#${settings.interiorDepth}`
+        const march = this.ensureTiltMipTexture(this.tiltMarchTexture, width, height, 'r16float', 'Engine TiltView March')
+        if (march !== this.tiltMarchTexture || marchKey !== this.tiltMarchKey) {
+            this.tiltMarchTexture = march
+            this.tiltMarchKey = marchKey
+            this.encodeTiltMipPass(encoder, this.pipelineTiltMarchHeight, march, 0, [
+                { binding: 0, resource: this.castShadowTextureView },
+                { binding: 1, resource: seeds.createView() },
+                { binding: 2, resource: { buffer: uniform } },
+            ])
+            for (let level = 1; level < march.mipLevelCount; level++) {
+                this.encodeTiltMipPass(encoder, this.pipelineTiltMaxDown, march, level, [
+                    { binding: 0, resource: march.createView({ baseMipLevel: level - 1, mipLevelCount: 1 }) },
+                ])
+            }
+        }
+
+        // Colour mips: every frame (the colour follows light and animation).
+        const colorMips = this.ensureTiltMipTexture(this.tiltColorMipTexture, width, height, 'rgba16float', 'Engine TiltView Colour')
+        this.tiltColorMipTexture = colorMips
+        this.encodeTiltMipPass(encoder, this.pipelineTiltColorBase, colorMips, 0, [{ binding: 0, resource: source }])
+        for (let level = 1; level < colorMips.mipLevelCount; level++) {
+            this.encodeTiltMipPass(encoder, this.pipelineTiltColorDown, colorMips, level, [
+                { binding: 0, resource: colorMips.createView({ baseMipLevel: level - 1, mipLevelCount: 1 }) },
+                { binding: 3, resource: this.tiltViewSampler! },
+            ])
+        }
+
         const bindGroup = this.device.createBindGroup({
             layout: this.pipelineTiltView.getBindGroupLayout(0),
             entries: [
-                { binding: 0, resource: source },
-                { binding: 1, resource: this.castShadowTextureView },
+                { binding: 0, resource: colorMips.createView() },
+                { binding: 1, resource: march.createView() },
                 { binding: 2, resource: this.tiltViewSampler! },
                 { binding: 3, resource: { buffer: uniform } },
-                { binding: 4, resource: seeds.createView() },
             ],
             label: 'Engine BindGroup TiltView',
         })
         const pass = encoder.beginRenderPass({
             colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
             label: 'Engine TiltView',
+            // End-gap timing: covers the seed and mip passes encoded just before.
+            timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.tiltView),
         })
         pass.setPipeline(this.pipelineTiltView)
         pass.setBindGroup(0, bindGroup)
@@ -5606,9 +5801,15 @@ export class Engine {
      * (screen raster, or the neutral square when `rotation`). It must share the
      * colour pass's raster exactly: same vertex shader, same viewport origin.
      */
-    private encodeCastShadowHeight(encoder: GPUCommandEncoder, width: number, height: number, rotation = false): void {
+    private encodeCastShadowHeight(encoder: GPUCommandEncoder, width: number, height: number, rotation = false, reuse = true): void {
         const pipeline = rotation ? this.pipelineCastHeightRotation : this.pipelineCastHeight
         if (!pipeline || !this.castShadowTextureView || !this.bindGroupColorCastHeight) return
+        // Everything the raster depends on: raster, field content, palette /
+        // bindings, and the non-volatile colour uniforms.
+        const key = [width, height, rotation ? 1 : 0, this.rawFieldVersion, this.resolvedDisplayVersion,
+            this.frozenDisplayVersion, this.heightInputsVersion, this.heightPathSignature, this.heightUniformSignature].join('|')
+        if (reuse && !this.disableHeightReuse && key === this.castHeightKey) return
+        this.castHeightKey = key
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: this.castShadowTextureView,
@@ -5617,6 +5818,7 @@ export class Engine {
                 storeOp: 'store',
             }],
             label: 'Engine CastShadow Height',
+            timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.reliefHeight),
         })
         pass.setViewport(0, 0, width, height, 0, 1)
         pass.setScissorRect(0, 0, width, height)
@@ -5631,11 +5833,16 @@ export class Engine {
      * colour bind group is used; returns the (possibly rebuilt) group.
      */
     prepareCastShadowRaster(width: number, height: number): GPUBindGroup {
-        if (this.castShadowSupported && this.ensureCastShadowTexture(width, height)) this.rebuildColorBindGroup()
+        if (this.castShadowSupported) {
+            const grewHeight = this.ensureCastShadowTexture(width, height)
+            const grewOcclusion = this.ensureLightOcclusionTexture(Math.ceil(width / 2), Math.ceil(height / 2))
+            if (grewHeight || grewOcclusion) this.rebuildColorBindGroup()
+        }
         return this.bindGroupColor!
     }
 
     private rebuildColorBindGroup() {
+        this.heightInputsVersion++
         const liveDisplay = this.tiled ? this.tiledLiveDisplay : this.resolvedDisplay
         if (this.pipelineColor && liveDisplay && this.frozenDisplay && this.rawArrayView) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
@@ -5670,12 +5877,31 @@ export class Engine {
                     usage: GPUTextureUsage.TEXTURE_BINDING,
                     label: 'Engine CastShadow Dummy',
                 }).createView()
+                this.ensureLightOcclusionTexture(1, 1)
+                this.lightOcclusionDummyView ??= this.device.createTexture({
+                    size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+                    format: LIGHT_OCCLUSION_FORMAT,
+                    usage: GPUTextureUsage.TEXTURE_BINDING,
+                    label: 'Engine LightOcclusion Dummy',
+                }).createView()
+                // A pass never binds the raster it renders into: the height
+                // pass gets a stand-in at 21, the occlusion pass one at 22.
                 this.bindGroupColorCastHeight = this.device.createBindGroup({
                     layout,
-                    entries: [...entries, { binding: 21, resource: this.castShadowDummyView }],
+                    entries: [...entries,
+                        { binding: 21, resource: this.castShadowDummyView },
+                        { binding: 22, resource: this.lightOcclusionTextureView! }],
                     label: 'Engine BindGroup Color (cast height)',
                 })
+                this.bindGroupColorLightOcclusion = this.device.createBindGroup({
+                    layout,
+                    entries: [...entries,
+                        { binding: 21, resource: this.castShadowTextureView! },
+                        { binding: 22, resource: this.lightOcclusionDummyView }],
+                    label: 'Engine BindGroup Color (light occlusion)',
+                })
                 entries.push({ binding: 21, resource: this.castShadowTextureView! })
+                entries.push({ binding: 22, resource: this.lightOcclusionTextureView! })
             }
             this.bindGroupColor = this.device.createBindGroup({
                 layout,

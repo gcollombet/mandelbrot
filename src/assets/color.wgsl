@@ -178,6 +178,14 @@ fn cast_shadow_height(p: vec2<i32>) -> f32 {
   if (any(p < vec2<i32>(0)) || any(p >= dims)) { return CAST_SHADOW_NO_SURFACE; }
   return textureLoad(castShadowHeightTex, p, 0).r;
 }
+// Half-resolution light occlusion: (cast-shadow visibility, horizon
+// visibility, h / T of the texel, 1), written by fs_light_occlusion.
+@group(0) @binding(22) var lightOcclusionTex: texture_2d<f32>;
+fn light_occlusion_load(p: vec2<i32>) -> vec4<f32> {
+  let dims = vec2<i32>(textureDimensions(lightOcclusionTex));
+  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return vec4<f32>(1.0, 1.0, CAST_SHADOW_NO_SURFACE, 0.0); }
+  return textureLoad(lightOcclusionTex, p, 0);
+}
 //#END_CAST_SHADOW_BINDING
 const CAST_SHADOW_NO_SURFACE: f32 = -1e4;
 // Height pass: colorize_pixel only stores h / T here (fs_cast_height).
@@ -1333,7 +1341,7 @@ fn diffraction_response(s: Surface, lightDir: vec3<f32>, viewDir: vec3<f32>, rou
 // 2·aspect view half-heights and uv y spans 2. The raster step toward the light
 // inverts d(uv)/d(pixel), so the same code serves the screen raster and the
 // neutral-square rotation cache.
-const CAST_SHADOW_STEPS: i32 = 40;
+const CAST_SHADOW_STEPS: i32 = 24;
 const CAST_SHADOW_MAX_PIXELS: f32 = 1024.0;
 
 // Bilinear height between raster pixel centres, ignoring taps with no surface.
@@ -1382,7 +1390,7 @@ fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
   let penumbra = clamp(parameters.castShadowSoftness, 0.02, 1.0) * tanElevation;
   // Per-pixel offset of the sample positions (interleaved gradient noise):
   // thin occluders are no longer hit or missed in whole rows.
-  let jitter = fract(52.9829189 * fract(dot(castRasterPixel, vec2<f32>(0.06711056, 0.00583715))));
+  let jitter = light_occlusion_noise();
   var visibility = 1.0;
   for (var i = 0; i < CAST_SHADOW_STEPS; i = i + 1) {
     // Denser near the pixel, where contact shadows are sharp.
@@ -1395,6 +1403,42 @@ fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
     visibility = min(visibility, 0.5 + 0.5 * clearance / (penumbra * distance));
   }
   return smoothstep(0.0, 1.0, clamp(visibility, 0.0, 1.0));
+}
+
+// Per-pixel sample offset (interleaved gradient noise), rotated by the golden
+// ratio at every AA sample so the accumulation averages the sampling pattern.
+fn light_occlusion_noise() -> f32 {
+  let ign = fract(52.9829189 * fract(dot(castRasterPixel, vec2<f32>(0.06711056, 0.00583715))));
+  return fract(ign + parameters.aaSampleIndex * 0.6180339887);
+}
+
+// Edge-aware upsampling of the half-resolution light occlusion: the four
+// nearest texels, bilinear weights times the similarity of their height to
+// this pixel's, so a shadow does not bleed across a crest. Returns
+// (cast-shadow visibility, horizon visibility).
+const LIGHT_OCCLUSION_HEIGHT_SIGMA: f32 = 0.01;
+fn sample_light_occlusion() -> vec2<f32> {
+  let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
+  // Half-res texel i covers full-res pixels 2i and 2i+1 (centre at 2i + 1).
+  let q = (castRasterPixel - vec2<f32>(1.0)) * 0.5;
+  let base = floor(q);
+  let f = q - base;
+  let i = vec2<i32>(base);
+  var sum = vec2<f32>(0.0);
+  var weight = 0.0;
+  var nearest = vec2<f32>(1.0);
+  var nearestGap = 3.4e38;
+  for (var k = 0; k < 4; k = k + 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let t = light_occlusion_load(i + o);
+    let gap = abs(t.z - h0);
+    let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1)
+      * exp(-gap / LIGHT_OCCLUSION_HEIGHT_SIGMA);
+    sum = sum + w * t.xy;
+    weight = weight + w;
+    if (gap < nearestGap) { nearestGap = gap; nearest = t.xy; }
+  }
+  return select(nearest, sum / max(weight, 1e-12), weight > 1e-6);
 }
 
 // Raster pixels per view half-height along a screen direction (y up).
@@ -1413,14 +1457,14 @@ fn cast_raster_step(dir: vec2<f32>) -> vec2<f32> {
 // radius (relief exaggerated like the cast shadows), weighted down with
 // distance; the visible sky is what the horizons leave. Direction-free, so
 // it deepens crevices and wall feet without any light orientation.
-const HORIZON_DIRECTIONS: i32 = 8;
-const HORIZON_SAMPLES: i32 = 6;
+const HORIZON_DIRECTIONS: i32 = 6;
+const HORIZON_SAMPLES: i32 = 5;
 fn horizon_visibility() -> f32 {
   let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
   if (h0 <= CAST_SHADOW_NO_SURFACE * 0.5) { return 1.0; }
   let radius = clamp(parameters.horizonOcclusionRadius, 0.01, 0.5);
   let exaggeration = clamp(parameters.castShadowLength, 1.0, 20.0);
-  let noise = fract(52.9829189 * fract(dot(castRasterPixel, vec2<f32>(0.06711056, 0.00583715))));
+  let noise = light_occlusion_noise();
   var occlusion = 0.0;
   for (var k = 0; k < HORIZON_DIRECTIONS; k = k + 1) {
     let angle = TWO_PI * (f32(k) + noise) / f32(HORIZON_DIRECTIONS);
@@ -1470,8 +1514,10 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   // The magnified bilinear path has no extra curvature fetch: AO fades out
   // during reprojection instead of adding four more texture reads per pixel.
   var ao = curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength);
+  var lightOcclusion = vec2<f32>(1.0);
+  if (castShadowActive) { lightOcclusion = sample_light_occlusion(); }
   if (castShadowActive && parameters.horizonOcclusionStrength > 0.0) {
-    ao = ao * mix(1.0, horizon_visibility(), clamp(parameters.horizonOcclusionStrength, 0.0, 1.0));
+    ao = ao * mix(1.0, lightOcclusion.y, clamp(parameters.horizonOcclusionStrength, 0.0, 1.0));
   }
   let metallic = clamp(fx.metallic, 0.0, 1.0);
   let roughness = clamp(fx.roughness, 0.02, 1.0);
@@ -1507,7 +1553,7 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   var localShadow = local_height_shadow(heightGradient, lightDir, localShadowControl);
   if (castShadowActive && parameters.castShadowStrength > 0.0) {
     localShadow = localShadow
-      * mix(1.0, cast_shadow_visibility(lightDir), clamp(parameters.castShadowStrength, 0.0, 1.0));
+      * mix(1.0, lightOcclusion.x, clamp(parameters.castShadowStrength, 0.0, 1.0));
   }
   let shadowedNDotL = nDotL * localShadow;
   let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
@@ -2327,12 +2373,18 @@ fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
 // Core shading, returns sRGB color (unchanged from the historical fs_main body).
 // Entry points below wrap this: fs_main (linear, for AA accumulation) and
 // fs_main_direct (sRGB, for direct-to-swapchain and PNG export).
-fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
+// Per-fragment parameters: the base uniforms, then the palette path at this
+// screen position (radial paths vary across the screen).
+fn prepare_parameters(fragCoord: vec2<f32>) {
   parameters = baseParameters;
   let screenLocal = vec2<f32>((fragCoord.x * 2.0 - 1.0) * parameters.aspect, fragCoord.y * 2.0 - 1.0);
   var depth = palettePath.geometry.x;
   if (ENABLE_PALETTE_PATH && palettePath.config.y > 1.5) { depth = path_radial_depth(depth, length(screenLocal)); }
   apply_palette_path(depth);
+}
+
+fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
+  prepare_parameters(fragCoord);
   let uv_screen = fragCoord;
 
   let xy_screen = vec2<f32>(uv_screen.x * 2.0 - 1.0, uv_screen.y * 2.0 - 1.0);
@@ -2618,6 +2670,41 @@ fn fs_cast_height_rotation(@location(0) screenUv: vec2<f32>) -> @location(0) vec
   castHeightPass = true;
   _ = shade_srgb(screenUv, false);
   return vec4<f32>(castHeightOut, 0.0, 0.0, 1.0);
+}
+
+// Half-resolution light occlusion: cast shadows and horizon occlusion,
+// marched on the full-resolution height raster, one texel per 2x2 pixels.
+fn light_occlusion_texel(fragCoord: vec2<f32>, pos: vec4<f32>) -> vec4<f32> {
+  prepare_parameters(fragCoord);
+  castRasterPixel = floor(pos.xy) * 2.0 + vec2<f32>(1.0);
+  let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
+  var shadow = 1.0;
+  var horizon = 1.0;
+  if (h0 > CAST_SHADOW_NO_SURFACE * 0.5) {
+    if (parameters.castShadowStrength > 0.0) {
+      shadow = cast_shadow_visibility(vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ));
+    }
+    if (parameters.horizonOcclusionStrength > 0.0) { horizon = horizon_visibility(); }
+  }
+  return vec4<f32>(shadow, horizon, h0, 1.0);
+}
+
+@fragment
+fn fs_light_occlusion(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  // UV per full-resolution pixel: half of this texel's footprint.
+  castRasterUvX = dpdx(fragCoord) * 0.5;
+  castRasterUvY = dpdy(fragCoord) * 0.5;
+  return light_occlusion_texel(fragCoord, pos);
+}
+
+@fragment
+fn fs_light_occlusion_rotation(@location(0) screenUv: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  castRasterUvX = dpdx(screenUv) * 0.5;
+  castRasterUvY = dpdy(screenUv) * 0.5;
+  if (any(screenUv < vec2<f32>(0.0)) || any(screenUv > vec2<f32>(1.0))) {
+    return vec4<f32>(1.0, 1.0, CAST_SHADOW_NO_SURFACE, 1.0);
+  }
+  return light_occlusion_texel(screenUv, pos);
 }
 
 @fragment

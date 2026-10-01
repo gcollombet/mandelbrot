@@ -97,7 +97,10 @@
     "resolve": "Temporary bilinear presentation of the exact pixels still incomplete.",
     "aaAccum": "Colour pass accumulated into the (linear) AA buffer during accumulation.",
     "color": "Direct colour pass to the screen, or linear bake of the final cache when a rotated view has just settled.",
-    "present": "Presentation of the AA accumulator, or bilinear reconstruction of the rotated colour cache, then sRGB conversion."
+    "present": "Presentation of the AA accumulator, or bilinear reconstruction of the rotated colour cache, then sRGB conversion.",
+    "reliefHeight": "Height map h / T in the colour pass raster, for cast shadows, horizon occlusion and the 3D view.",
+    "tiltView": "Rim distances (jump flooding), then the tilted ray cast of the 3D view.",
+    "lightOcclusion": "Cast shadows and horizon occlusion at half resolution, marched on the height map."
   },
   "passLabel": {
     "merge": "Merge (zoom)",
@@ -109,6 +112,9 @@
     "resolve": "Resolve",
     "aaAccum": "Colour (AA)",
     "color": "Colour / rotation cache",
-    "present": "Present (AA / rotation)"
+    "present": "Present (AA / rotation)",
+    "reliefHeight": "Relief height",
+    "tiltView": "3D view",
+    "lightOcclusion": "Light occlusion"
   }
 }

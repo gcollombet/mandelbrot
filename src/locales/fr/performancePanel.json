@@ -97,7 +97,10 @@
     "resolve": "Présentation bilinéaire temporaire des pixels exacts encore incomplets.",
     "aaAccum": "Passe couleur accumulée dans le buffer AA (linéaire) pendant l'accumulation.",
     "color": "Passe couleur directe vers l’écran, ou bake linéaire du cache final quand une vue tournée vient de se stabiliser.",
-    "present": "Présentation de l’accumulateur AA, ou reconstruction bilinéaire du cache couleur tourné, puis conversion sRGB."
+    "present": "Présentation de l’accumulateur AA, ou reconstruction bilinéaire du cache couleur tourné, puis conversion sRGB.",
+    "reliefHeight": "Carte de hauteur h / T dans la trame de la passe couleur, pour les ombres portées, l'occlusion d'horizon et la vue 3D.",
+    "tiltView": "Distances au bord (jump flooding) puis lancer de rayons incliné de la vue 3D.",
+    "lightOcclusion": "Ombres portées et occlusion d’horizon à demi-résolution, marchées sur la carte de hauteur."
   },
   "passLabel": {
     "merge": "Fusion (zoom)",
@@ -109,6 +112,9 @@
     "resolve": "Résolution",
     "aaAccum": "Couleur (AA)",
     "color": "Couleur / cache rotation",
-    "present": "Présentation (AA / rotation)"
+    "present": "Présentation (AA / rotation)",
+    "reliefHeight": "Hauteur (relief)",
+    "tiltView": "Vue 3D",
+    "lightOcclusion": "Occlusion lumière"
   }
 }

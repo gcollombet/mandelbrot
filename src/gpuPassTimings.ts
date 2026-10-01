@@ -8,8 +8,11 @@ export type GpuPassKey =
   | 'reseed'
   | 'compute'
   | 'resolve'
+  | 'reliefHeight'
+  | 'lightOcclusion'
   | 'aaAccum'
   | 'color'
+  | 'tiltView'
   | 'present'
 
 export interface GpuPassSlot {
@@ -75,6 +78,20 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
     timing: 'end-gap',
   },
   {
+    key: 'reliefHeight',
+    label: 'Relief height',
+    labelKey: 'performancePanel.passLabel.reliefHeight',
+    helpKey: 'performancePanel.passHelp.reliefHeight',
+    timing: 'end-gap',
+  },
+  {
+    key: 'lightOcclusion',
+    label: 'Light occlusion',
+    labelKey: 'performancePanel.passLabel.lightOcclusion',
+    helpKey: 'performancePanel.passHelp.lightOcclusion',
+    timing: 'end-gap',
+  },
+  {
     key: 'aaAccum',
     label: 'Couleur (AA)',
     labelKey: 'performancePanel.passLabel.aaAccum',
@@ -86,6 +103,13 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
     label: 'Couleur / cache rotation',
     labelKey: 'performancePanel.passLabel.color',
     helpKey: 'performancePanel.passHelp.color',
+    timing: 'end-gap',
+  },
+  {
+    key: 'tiltView',
+    label: '3D view',
+    labelKey: 'performancePanel.passLabel.tiltView',
+    helpKey: 'performancePanel.passHelp.tiltView',
     timing: 'end-gap',
   },
   {
