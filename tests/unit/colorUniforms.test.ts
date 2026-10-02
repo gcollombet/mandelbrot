@@ -32,13 +32,13 @@ describe('colour uniform layout', () => {
         const fields = wgslUniformFields()
         expect(fields.map(f => f.name)).toEqual([...COLOR_UNIFORM_FIELDS])
         expect(fields.every(f => f.type === 'f32')).toBe(true)
-        expect(COLOR_UNIFORM_FLOAT_COUNT).toBe(110)
+        expect(COLOR_UNIFORM_FLOAT_COUNT).toBe(111)
     })
 
     it('packs by name into the declared slots', () => {
         const values = Object.fromEntries(COLOR_UNIFORM_FIELDS.map((field, i) => [field, i + 0.5])) as ColorUniforms
         const data = packColorUniforms(values)
-        expect(data.length).toBe(110)
+        expect(data.length).toBe(111)
         expect(data[colorUniformByteOffset('rawOriginX') / 4]).toBe(96.5)
         expect(data[colorUniformByteOffset('liveShiftU') / 4]).toBe(65.5)
         expect(data[colorUniformByteOffset('liveShiftV') / 4]).toBe(67.5)

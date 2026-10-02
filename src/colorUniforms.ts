@@ -122,6 +122,7 @@ export const COLOR_UNIFORM_FIELDS = [
     'castShadowSoftness',         // penumbra width, as a fraction of the light elevation
     'horizonOcclusionStrength',   // horizon-based ambient occlusion on the relief height h, [0, 1]
     'horizonOcclusionRadius',     // its search radius in view half-heights, [0.01, 0.5]
+    'indirectLightStrength',      // indirect diffuse (sky irradiance + one relief bounce), [0, 2]
 ] as const
 
 export type ColorUniformField = typeof COLOR_UNIFORM_FIELDS[number]

@@ -9,7 +9,7 @@ export const TRANSITION_DEFAULTS = {
     tessellationLevel: 0, displacementAmount: 0, ambientOcclusionStrength: 0,
     microBumpStrength: 0, reliefDepth: 1, protrusionPhase: 0,
     protrusionSharpness: 2, protrusionStrength: 1, protrusionGeometryMix: 0,
-    protrusionPeriod: 1, protrusionTerrace: 0, localShadowStrength: 0, castShadowStrength: 0, castShadowLength: 4, castShadowSoftness: 0.35, horizonOcclusionStrength: 0, horizonOcclusionRadius: 0.1, lightAngle: 0,
+    protrusionPeriod: 1, protrusionTerrace: 0, localShadowStrength: 0, castShadowStrength: 0, castShadowLength: 4, castShadowSoftness: 0.35, horizonOcclusionStrength: 0, horizonOcclusionRadius: 0.1, indirectLightStrength: 0, lightAngle: 0,
     varnishStrength: 0, gradeContrast: 1.18, gradeSaturation: 1.12,
     phaseColoringStrength: 0, stripeFrequency: 8,
     paletteScreenShiftX: 0, paletteScreenShiftY: 0,

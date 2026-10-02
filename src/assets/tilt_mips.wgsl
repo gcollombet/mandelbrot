@@ -63,6 +63,22 @@ fn fs_max_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   return vec4<f32>(m, 0.0, 0.0, 0.0);
 }
 
+// Maximum pyramid of the colour pass height raster itself (rg32float, h / T
+// in .r): cast shadows and the horizon march read it so that a thin, tall
+// occluder between two samples still counts. Holes stay NO_SURFACE unless a
+// surface shares the cell.
+@fragment
+fn fs_height_max_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let dims = vec2<i32>(textureDimensions(sourceTex));
+  let base = vec2<i32>(pos.xy) * 2;
+  var m = NO_SURFACE;
+  for (var k = 0; k < 4; k = k + 1) {
+    let q = min(base + vec2<i32>(k & 1, k >> 1), dims - vec2<i32>(1));
+    m = max(m, textureLoad(sourceTex, q, 0).r);
+  }
+  return vec4<f32>(m, 0.0, 0.0, 0.0);
+}
+
 // sourceTex = linear colour, sample count in alpha (AA accumulator or a
 // single-sample render).
 @fragment

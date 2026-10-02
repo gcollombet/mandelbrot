@@ -1,6 +1,6 @@
 import type { HdrGpuOptions } from './hdrGpuOutput'
 import { STEREO_RELIEF_DEFAULT, type StereoColorPass } from './stereoVideo'
-import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, LIGHT_OCCLUSION_FORMAT, withoutCastShadowBinding } from './castShadow'
+import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, LIGHT_OCCLUSION_FORMAT, LIGHT_OCCLUSION_LAYERS, withoutCastShadowBinding } from './castShadow'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
 import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
@@ -266,6 +266,7 @@ const HEIGHT_RASTER_VOLATILE_UNIFORMS = new Set<string>([
     'varnishStrength', 'varnishAnimation', 'localShadowStrength', 'ambientOcclusionStrength',
     'castShadowStrength', 'castShadowLength', 'castShadowSoftness',
     'horizonOcclusionStrength', 'horizonOcclusionRadius',
+    'indirectLightStrength',
     'gradeContrast', 'gradeSaturation', 'skyDriftX', 'skyDriftY', 'skyReflectionDriftAnimation',
 ])
 
@@ -323,6 +324,7 @@ export type RenderOptions = {
     tiltViewInteriorDepth?: number,
     horizonOcclusionStrength: number,
     horizonOcclusionRadius: number,
+    indirectLightStrength?: number,
     varnishStrength: number,
     gradeContrast?: number,
     gradeSaturation?: number,
@@ -587,11 +589,15 @@ export class Engine {
     private castShadowTextureView?: GPUTextureView
     // The height pass renders into the raster, so it binds a 1x1 stand-in at 21.
     private castShadowDummyView?: GPUTextureView
+    /** One view per mip level of the height raster (level 0 = render target). */
+    private castShadowLevelViews: GPUTextureView[] = []
     // Half-resolution light occlusion (cast shadows + horizon), read by colour.
     private pipelineLightOcclusion?: GPURenderPipeline
     private pipelineLightOcclusionRotation?: GPURenderPipeline
     private lightOcclusionTexture?: GPUTexture
     private lightOcclusionTextureView?: GPUTextureView
+    /** One render-target view per layer of the occlusion texture. */
+    private lightOcclusionLayerViews: GPUTextureView[] = []
     private lightOcclusionDummyView?: GPUTextureView
     private bindGroupColorLightOcclusion?: GPUBindGroup
     private lightOcclusionActive = false
@@ -621,6 +627,7 @@ export class Engine {
     // March height (surface z + maximum pyramid) and colour mips (tilt_mips.wgsl).
     private pipelineTiltMarchHeight?: GPURenderPipeline
     private pipelineTiltMaxDown?: GPURenderPipeline
+    private pipelineCastHeightMaxDown?: GPURenderPipeline
     private pipelineTiltColorBase?: GPURenderPipeline
     private pipelineTiltColorDown?: GPURenderPipeline
     private tiltMarchTexture?: GPUTexture
@@ -1463,7 +1470,7 @@ export class Engine {
             bind.data(),                     // frozenTrapPayloadTex
             bind.readOnlyStorage(),          // palettePath
             bind.sampler(),                  // tileSampler
-            ...(this.castShadowSupported ? [bind.data(), bind.data()] : []), // castShadowHeightTex, lightOcclusionTex
+            ...(this.castShadowSupported ? [bind.data(), bind.data('2d-array')] : []), // castShadowHeightTex, lightOcclusionTex
         ])
         this.colorPipelineSource = { device, module: color.module, layout: color.pipelineLayout }
         const [full, simple, hdrFull, hdrSimple] = await Promise.all([
@@ -1590,6 +1597,7 @@ export class Engine {
         })
         this.pipelineTiltMarchHeight = mipsPipeline('fs_march_height', 'r16float')
         this.pipelineTiltMaxDown = mipsPipeline('fs_max_down', 'r16float')
+        this.pipelineCastHeightMaxDown = mipsPipeline('fs_height_max_down', CAST_SHADOW_HEIGHT_FORMAT)
         this.pipelineTiltColorBase = mipsPipeline('fs_color_base', 'rgba16float')
         this.pipelineTiltColorDown = mipsPipeline('fs_color_down', 'rgba16float')
         const tiltUniform = (label: string) => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
@@ -1766,12 +1774,12 @@ export class Engine {
             HDR_OUTPUT: hdr ? 1 : 0,
             ENABLE_PALETTE_PATH: palettePath ? 1 : 0,
         }
-        const create = (entryPoint: string, target: GPUColorTargetState, rotation = false) =>
+        const create = (entryPoint: string, target: GPUColorTargetState, rotation = false, layers = 1) =>
             device.createRenderPipelineAsync(fullscreenPipelineDescriptor({
                 label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}${palettePath ? ', path' : ''}, ${entryPoint}${target.blend ? ', accum' : ''})`,
                 module,
                 layout,
-                targets: [target],
+                targets: Array.from({ length: layers }, () => target),
                 constants,
                 vertexEntry: rotation ? 'vs_rotation_cache' : 'vs_main',
                 fragmentEntry: entryPoint,
@@ -1790,8 +1798,8 @@ export class Engine {
             }),
             castShadows ? create('fs_cast_height', { format: CAST_SHADOW_HEIGHT_FORMAT }) : undefined,
             castShadows ? create('fs_cast_height_rotation', { format: CAST_SHADOW_HEIGHT_FORMAT }, true) : undefined,
-            castShadows ? create('fs_light_occlusion', { format: LIGHT_OCCLUSION_FORMAT }) : undefined,
-            castShadows ? create('fs_light_occlusion_rotation', { format: LIGHT_OCCLUSION_FORMAT }, true) : undefined,
+            castShadows ? create('fs_light_occlusion', { format: LIGHT_OCCLUSION_FORMAT }, false, LIGHT_OCCLUSION_LAYERS) : undefined,
+            castShadows ? create('fs_light_occlusion_rotation', { format: LIGHT_OCCLUSION_FORMAT }, true, LIGHT_OCCLUSION_LAYERS) : undefined,
         ])
         return { direct, rotation, clear, accum,
             ...(castHeight && castHeightRotation ? { castHeight, castHeightRotation } : {}),
@@ -3721,6 +3729,7 @@ export class Engine {
             castShadowSoftness: Math.max(0.02, Math.min(1, renderOptions.castShadowSoftness ?? 0.35)),
             horizonOcclusionStrength: this.castShadowSupported ? Math.max(0, Math.min(1, renderOptions.horizonOcclusionStrength ?? 0)) : 0,
             horizonOcclusionRadius: Math.max(0.01, Math.min(0.5, renderOptions.horizonOcclusionRadius ?? 0.1)),
+            indirectLightStrength: this.castShadowSupported ? Math.max(0, Math.min(2, renderOptions.indirectLightStrength ?? 0)) : 0,
         }
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
         this.heightUniformSignature = heightUniformSignature(colorUniforms)
@@ -4630,7 +4639,8 @@ export class Engine {
         // ── Terminal color branches: direct, AA, or settled rotation ──────
         const castShadows = this.castShadowsActive(renderOptions)
         this.lightOcclusionActive = this.castShadowSupported
-            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0)
+            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0
+                || (renderOptions.indirectLightStrength ?? 0) > 0)
         const tiltView = this.tiltViewActive(renderOptions)
         let tiltPresent: GPUBindGroup | undefined
         if (castShadows) this.prepareCastShadowRaster(Math.max(this.width, this.neutralSize), Math.max(this.height, this.neutralSize))
@@ -5551,13 +5561,20 @@ export class Engine {
         const w = Math.max(1, Math.ceil(width), current?.width ?? 1)
         const h = Math.max(1, Math.ceil(height), current?.height ?? 1)
         current?.destroy()
-        this.castShadowTexture = this.device.createTexture({
+        const texture = this.device.createTexture({
             size: { width: w, height: h, depthOrArrayLayers: 1 },
             format: CAST_SHADOW_HEIGHT_FORMAT,
+            // Maximum pyramid of h (fs_height_max_down): the shadow and horizon
+            // marches read a level matched to their step.
+            mipLevelCount: Math.floor(Math.log2(Math.max(w, h))) + 1,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine CastShadow Height',
         })
-        this.castShadowTextureView = this.castShadowTexture.createView({ label: 'Engine CastShadow Height View' })
+        this.castShadowTexture = texture
+        this.castShadowTextureView = texture.createView({ label: 'Engine CastShadow Height View' })
+        this.castShadowLevelViews = Array.from({ length: texture.mipLevelCount }, (_, level) => texture.createView({
+            baseMipLevel: level, mipLevelCount: 1, label: `Engine CastShadow Height Level ${level}`,
+        }))
         return true
     }
 
@@ -5568,13 +5585,17 @@ export class Engine {
         const w = Math.max(1, Math.ceil(width), current?.width ?? 1)
         const h = Math.max(1, Math.ceil(height), current?.height ?? 1)
         current?.destroy()
-        this.lightOcclusionTexture = this.device.createTexture({
-            size: { width: w, height: h, depthOrArrayLayers: 1 },
+        const texture = this.device.createTexture({
+            size: { width: w, height: h, depthOrArrayLayers: LIGHT_OCCLUSION_LAYERS },
             format: LIGHT_OCCLUSION_FORMAT,
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine LightOcclusion',
         })
-        this.lightOcclusionTextureView = this.lightOcclusionTexture.createView({ label: 'Engine LightOcclusion View' })
+        this.lightOcclusionTexture = texture
+        this.lightOcclusionTextureView = texture.createView({ dimension: '2d-array', label: 'Engine LightOcclusion View' })
+        this.lightOcclusionLayerViews = Array.from({ length: LIGHT_OCCLUSION_LAYERS }, (_, layer) => texture.createView({
+            dimension: '2d', baseArrayLayer: layer, arrayLayerCount: 1, label: `Engine LightOcclusion Layer ${layer}`,
+        }))
         return true
     }
 
@@ -5589,12 +5610,12 @@ export class Engine {
         const halfWidth = Math.ceil(width / 2)
         const halfHeight = Math.ceil(height / 2)
         const pass = encoder.beginRenderPass({
-            colorAttachments: [{
-                view: this.lightOcclusionTextureView,
-                clearValue: { r: 1, g: 1, b: CAST_SHADOW_NO_SURFACE, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
+            colorAttachments: this.lightOcclusionLayerViews.map((view, layer) => ({
+                view,
+                clearValue: layer === 0 ? { r: 1, g: 1, b: 0, a: 0 } : { r: 0, g: 0, b: 0, a: 1 },
+                loadOp: 'clear' as const,
+                storeOp: 'store' as const,
+            })),
             label: 'Engine LightOcclusion',
             timestampWrites: this.passTimer.writes(PASS_SLOT_INDEX.lightOcclusion),
         })
@@ -5616,7 +5637,7 @@ export class Engine {
     private castShadowsActive(renderOptions: RenderOptions): boolean {
         return this.castShadowSupported && !!this.pipelineCastHeight
             && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0
-                || this.tiltViewActive(renderOptions))
+                || (renderOptions.indirectLightStrength ?? 0) > 0 || this.tiltViewActive(renderOptions))
     }
 
     /** Tilted 3D view: needs the height raster, so the same device support. */
@@ -5812,7 +5833,7 @@ export class Engine {
         this.castHeightKey = key
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: this.castShadowTextureView,
+                view: this.castShadowLevelViews[0],
                 clearValue: { r: CAST_SHADOW_NO_SURFACE, g: 0, b: 0, a: 1 },
                 loadOp: 'clear',
                 storeOp: 'store',
@@ -5826,6 +5847,31 @@ export class Engine {
         pass.setBindGroup(0, this.bindGroupColorCastHeight)
         pass.draw(6, 1, 0, 0)
         pass.end()
+        this.encodeCastShadowMaxPyramid(encoder)
+    }
+
+    /** Maximum pyramid of the height raster, rebuilt with it (whole texture: the clear covers it all). */
+    private encodeCastShadowMaxPyramid(encoder: GPUCommandEncoder): void {
+        const pipeline = this.pipelineCastHeightMaxDown
+        if (!pipeline) return
+        for (let level = 1; level < this.castShadowLevelViews.length; level++) {
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{
+                    view: this.castShadowLevelViews[level],
+                    clearValue: { r: CAST_SHADOW_NO_SURFACE, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+                label: `Engine CastShadow Height Max ${level}`,
+            })
+            pass.setPipeline(pipeline)
+            pass.setBindGroup(0, this.device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: this.castShadowLevelViews[level - 1] }],
+            }))
+            pass.draw(3, 1, 0, 0)
+            pass.end()
+        }
     }
 
     /**
@@ -5879,11 +5925,11 @@ export class Engine {
                 }).createView()
                 this.ensureLightOcclusionTexture(1, 1)
                 this.lightOcclusionDummyView ??= this.device.createTexture({
-                    size: { width: 1, height: 1, depthOrArrayLayers: 1 },
+                    size: { width: 1, height: 1, depthOrArrayLayers: LIGHT_OCCLUSION_LAYERS },
                     format: LIGHT_OCCLUSION_FORMAT,
                     usage: GPUTextureUsage.TEXTURE_BINDING,
                     label: 'Engine LightOcclusion Dummy',
-                }).createView()
+                }).createView({ dimension: '2d-array' })
                 // A pass never binds the raster it renders into: the height
                 // pass gets a stand-in at 21, the occlusion pass one at 22.
                 this.bindGroupColorCastHeight = this.device.createBindGroup({

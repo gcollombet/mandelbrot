@@ -130,6 +130,7 @@ struct Uniforms {
   castShadowSoftness: f32, // 107: penumbra width as a fraction of the light elevation, [0.02, 1]
   horizonOcclusionStrength: f32, // 108: horizon-based ambient occlusion on h, [0, 1]
   horizonOcclusionRadius: f32, // 109: its radius in view half-heights, [0.01, 0.5]
+  indirectLightStrength: f32, // 110: indirect diffuse (sky irradiance + one relief bounce), [0, 2]
 };
 @group(0) @binding(0) var<uniform> baseParameters: Uniforms;
 var<private> parameters: Uniforms;
@@ -168,7 +169,8 @@ struct PalettePathData { config: vec4<f32>, geometry: vec4<f32>, extra: vec4<f32
 @group(0) @binding(19) var<storage, read> palettePath: PalettePathData;
 @group(0) @binding(20) var tileSampler: sampler;  // anisotropic trilinear, repeat: tiles and webcam
 // Cast shadows: h / T (view half-heights) per pixel of the colour raster,
-// written by fs_cast_height just before the colour pass. The block between
+// written by fs_cast_height just before the colour pass, with the pixel's base
+// palette albedo packed in .g (pack_albedo) for the indirect bounce. The block between
 // the markers is replaced by a stub where a 17th texture is unavailable
 // (castShadow.ts, withoutCastShadowBinding).
 //#CAST_SHADOW_BINDING
@@ -178,19 +180,89 @@ fn cast_shadow_height(p: vec2<i32>) -> f32 {
   if (any(p < vec2<i32>(0)) || any(p >= dims)) { return CAST_SHADOW_NO_SURFACE; }
   return textureLoad(castShadowHeightTex, p, 0).r;
 }
-// Half-resolution light occlusion: (cast-shadow visibility, horizon
-// visibility, h / T of the texel, 1), written by fs_light_occlusion.
-@group(0) @binding(22) var lightOcclusionTex: texture_2d<f32>;
-fn light_occlusion_load(p: vec2<i32>) -> vec4<f32> {
+// Bilinear h in mip `level` of the maximum pyramid (fs_height_max_down),
+// between texel centres, ignoring taps with no surface.
+fn cast_shadow_height_level(p: vec2<f32>, level: i32) -> f32 {
+  let dims = vec2<i32>(textureDimensions(castShadowHeightTex, level));
+  let q = p / f32(1 << u32(level)) - vec2<f32>(0.5);
+  let base = floor(q);
+  let f = q - base;
+  let i = vec2<i32>(base);
+  var sum = 0.0;
+  var weight = 0.0;
+  for (var k = 0; k < 4; k = k + 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let c = i + o;
+    if (any(c < vec2<i32>(0)) || any(c >= dims)) { continue; }
+    let h = textureLoad(castShadowHeightTex, c, level).r;
+    let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
+    if (h > CAST_SHADOW_NO_SURFACE * 0.5 && w > 0.0) {
+      sum = sum + w * h;
+      weight = weight + w;
+    }
+  }
+  return select(CAST_SHADOW_NO_SURFACE, sum / max(weight, 1e-6), weight > 1e-3);
+}
+// h seen by a march step spanning `pixels` raster pixels: the maximum
+// pyramid at the level whose texels match that span, interpolated
+// bilinearly within a level and linearly across levels, so a thin, tall
+// occluder between two samples still counts and the result stays continuous
+// in both the position and the span (no blocks or moiré on hard shadows).
+fn cast_shadow_height_footprint(p: vec2<f32>, pixels: f32) -> f32 {
+  let lod = clamp(log2(max(pixels, 1.0)), 0.0, f32(textureNumLevels(castShadowHeightTex) - 1u));
+  let level = i32(floor(lod));
+  let lower = cast_shadow_height_level(p, level);
+  if (lod - f32(level) < 1e-3 || level + 1 >= i32(textureNumLevels(castShadowHeightTex))) { return lower; }
+  let upper = cast_shadow_height_level(p, level + 1);
+  if (lower <= CAST_SHADOW_NO_SURFACE * 0.5) { return upper; }
+  if (upper <= CAST_SHADOW_NO_SURFACE * 0.5) { return lower; }
+  return mix(lower, upper, lod - f32(level));
+}
+// Receiver height of a half-res occlusion texel: the maximum of the 2x2
+// pixels it covers (pyramid level 1, sampled at the texel centre 2i + 1). h
+// is noisy from pixel to pixel near the boundary; a receiver sitting in a
+// one-pixel dip was shadowed by its own neighbour, a dither of dots along
+// the shadows. Occluders are maxima too (cast_shadow_height_footprint).
+fn cast_shadow_receiver_height() -> f32 {
+  if (textureNumLevels(castShadowHeightTex) < 2u) { return cast_shadow_height(vec2<i32>(castRasterPixel)); }
+  return cast_shadow_height_level(castRasterPixel, 1);
+}
+
+fn cast_shadow_albedo(p: vec2<i32>) -> vec3<f32> {
+  let dims = vec2<i32>(textureDimensions(castShadowHeightTex));
+  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return vec3<f32>(0.0); }
+  return unpack_albedo(textureLoad(castShadowHeightTex, p, 0).g);
+}
+// Half-resolution light occlusion, two layers written by fs_light_occlusion:
+// 0 = (cast-shadow visibility, horizon visibility, bent normal xy),
+// 1 = (one-bounce indirect radiance rgb, 1).
+@group(0) @binding(22) var lightOcclusionTex: texture_2d_array<f32>;
+fn light_occlusion_load(p: vec2<i32>, layer: i32) -> vec4<f32> {
   let dims = vec2<i32>(textureDimensions(lightOcclusionTex));
-  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return vec4<f32>(1.0, 1.0, CAST_SHADOW_NO_SURFACE, 0.0); }
-  return textureLoad(lightOcclusionTex, p, 0);
+  if (any(p < vec2<i32>(0)) || any(p >= dims)) { return select(vec4<f32>(1.0, 1.0, 0.0, 0.0), vec4<f32>(0.0), layer == 1); }
+  return textureLoad(lightOcclusionTex, p, layer, 0);
 }
 //#END_CAST_SHADOW_BINDING
 const CAST_SHADOW_NO_SURFACE: f32 = -1e4;
-// Height pass: colorize_pixel only stores h / T here (fs_cast_height).
+// Height pass: colorize_pixel only stores h / T and the base albedo here
+// (fs_cast_height).
 var<private> castHeightPass: bool = false;
 var<private> castHeightOut: f32 = CAST_SHADOW_NO_SURFACE;
+var<private> castAlbedoOut: vec3<f32> = vec3<f32>(0.0);
+
+// sRGB albedo in the 23 mantissa bits of a normal f32 in [0.5, 1) (8/8/7
+// bits): bit-exact through an rg32float target, never a NaN or a denormal.
+// The cleared raster (0.0) decodes to black.
+const ALBEDO_PACK_TAG: u32 = 0x3F000000u;
+fn pack_albedo(c: vec3<f32>) -> f32 {
+  let q = vec3<u32>(round(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * vec3<f32>(255.0, 255.0, 127.0)));
+  return bitcast<f32>(ALBEDO_PACK_TAG | (q.x << 15u) | (q.y << 7u) | q.z);
+}
+fn unpack_albedo(v: f32) -> vec3<f32> {
+  let b = bitcast<u32>(v);
+  if ((b & 0xFF800000u) != ALBEDO_PACK_TAG) { return vec3<f32>(0.0); }
+  return vec3<f32>(f32((b >> 15u) & 0xFFu) / 255.0, f32((b >> 7u) & 0xFFu) / 255.0, f32(b & 0x7Fu) / 127.0);
+}
 // Colour pass with a fresh height raster: raster pixel and d(uv_screen)/d(pixel).
 var<private> castShadowActive: bool = false;
 var<private> castRasterPixel: vec2<f32> = vec2<f32>(0.0);
@@ -703,6 +775,40 @@ fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>
   let b = srgb_to_linear(textureSampleGrad(skyboxTex, mirrorSampler, uv, layerB,
     footprint_with_lod_floor(ddx, size, lodB), footprint_with_lod_floor(ddy, size, lodB)).rgb);
   return mix(a, b, blend);
+}
+
+// The skybox at a fixed distance from its last mip, no screen derivatives: an
+// irradiance lookup must stay smooth when the direction varies fast from one
+// pixel to the next, where the reflection footprint would jump between its
+// LOD floor and maximal blur. Same layer / level selection as sample_skybox.
+fn sample_skybox_blurred(uv: vec2<f32>, levelsFromTop: f32) -> vec3<f32> {
+  var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
+  var levelsA = f32(textureNumLevels(skyboxTex));
+  var levelsB = levelsA;
+  if (textureNumLayers(skyboxTex) > 1u && (!ENABLE_PALETTE_PATH || palettePath.config.x < 2.0)) {
+    levelsA = floor(parameters.skyboxTransitionLevels / 32.0);
+    levelsB = parameters.skyboxTransitionLevels - levelsA * 32.0;
+  }
+  if (ENABLE_PALETTE_PATH && palettePath.config.x >= 2.0) {
+    layerA = i32(path_value(pathA, 3u)); layerB = i32(path_value(pathB, 3u)); blend = pathT;
+    levelsA = path_value(pathA, 32u); levelsB = path_value(pathB, 32u);
+  }
+  let a = srgb_to_linear(textureSampleLevel(skyboxTex, mirrorSampler, uv, layerA, max(levelsA - 1.0 - levelsFromTop, 0.0)).rgb);
+  if (textureNumLayers(skyboxTex) < 2u || blend <= 0.0 || layerA == layerB) { return a; }
+  let b = srgb_to_linear(textureSampleLevel(skyboxTex, mirrorSampler, uv, layerB, max(levelsB - 1.0 - levelsFromTop, 0.0)).rgb);
+  return mix(a, b, blend);
+}
+
+// Diffuse irradiance from the skybox around `dir`, relative to the sky's mean:
+// the reflection mapping read a few mips under the last one (a cosine lobe is
+// wide), divided by the luminance of the last mip. Bounded so a bright window
+// cannot blow the ambient up.
+const INDIRECT_BOUNCE_GAIN: f32 = 2.0;
+const SKY_IRRADIANCE_LEVELS_FROM_TOP: f32 = 3.0;
+fn sky_irradiance(screenUv: vec2<f32>, dir: vec3<f32>, drift: vec2<f32>) -> vec3<f32> {
+  let irradiance = sample_skybox_blurred(skybox_reflection_coord(screenUv, dir, drift), SKY_IRRADIANCE_LEVELS_FROM_TOP);
+  let mean = sample_skybox_blurred(vec2<f32>(0.5), 0.0);
+  return min(irradiance / max(luminance(mean), 1e-3), vec3<f32>(3.0));
 }
 
 fn rough_skybox_reflection(screenUv: vec2<f32>, reflectionDir: vec3<f32>, roughness: f32, drift: vec2<f32>) -> vec3<f32> {
@@ -1365,7 +1471,7 @@ fn cast_shadow_height_smooth(p: vec2<f32>) -> f32 {
 }
 
 fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
-  let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
+  let h0 = cast_shadow_receiver_height();
   let lightPlane = length(lightDir.xy);
   if (h0 <= CAST_SHADOW_NO_SURFACE * 0.5 || lightPlane < 1e-4 || lightDir.z <= 0.0) { return 1.0; }
   // Exaggerating the relief by G for shadows is lowering the light by G.
@@ -1388,15 +1494,21 @@ fn cast_shadow_visibility(lightDir: vec3<f32>) -> f32 {
   // does not change with the shadow length. Visibility crosses 1/2 where the
   // ray grazes the occluder.
   let penumbra = clamp(parameters.castShadowSoftness, 0.02, 1.0) * tanElevation;
-  // Per-pixel offset of the sample positions (interleaved gradient noise):
-  // thin occluders are no longer hit or missed in whole rows.
-  let jitter = light_occlusion_noise();
+  // Sample offset shared by every pixel, turned by the golden ratio at each
+  // AA sample: thin occluders are caught by the maximum pyramid, not by a
+  // per-pixel dither, which a single sample (or a hard penumbra) would leave
+  // as a visible halftone along the shadow edges.
+  let jitter = fract(0.5 + parameters.aaSampleIndex * 0.6180339887);
   var visibility = 1.0;
   for (var i = 0; i < CAST_SHADOW_STEPS; i = i + 1) {
     // Denser near the pixel, where contact shadows are sharp.
     let f = (f32(i) + jitter) / f32(CAST_SHADOW_STEPS);
     let t = max(0.75, reach * f * f);
-    let terrain = cast_shadow_height_smooth(castRasterPixel + step * t);
+    // The occluder test covers the whole stretch up to the next sample
+    // (dt/di = 2·reach·f / N): conservative, so thin spikes cast continuous
+    // shadows instead of a dither of hits and misses.
+    let spacing = 2.0 * reach * f / f32(CAST_SHADOW_STEPS);
+    let terrain = cast_shadow_height_footprint(castRasterPixel + step * t, spacing);
     if (terrain <= CAST_SHADOW_NO_SURFACE * 0.5) { continue; }
     let distance = t * unitsPerPixel;
     let clearance = h0 + distance * tanElevation - terrain;
@@ -1414,31 +1526,53 @@ fn light_occlusion_noise() -> f32 {
 
 // Edge-aware upsampling of the half-resolution light occlusion: the four
 // nearest texels, bilinear weights times the similarity of their height to
-// this pixel's, so a shadow does not bleed across a crest. Returns
-// (cast-shadow visibility, horizon visibility).
+// this pixel's, so a shadow does not bleed across a crest. The texel height is
+// read back from the full-resolution raster at the texel centre (2i + 1).
+// Layer 1 (indirect bounce) is only fetched when asked for.
 const LIGHT_OCCLUSION_HEIGHT_SIGMA: f32 = 0.01;
-fn sample_light_occlusion() -> vec2<f32> {
+struct LightOcclusion {
+  shadow: f32,
+  horizon: f32,
+  bent: vec2<f32>,      // xy of the bent normal (lighting frame, y down)
+  bounce: vec3<f32>,    // one-bounce indirect radiance, linear
+};
+fn sample_light_occlusion(withBounce: bool) -> LightOcclusion {
   let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
   // Half-res texel i covers full-res pixels 2i and 2i+1 (centre at 2i + 1).
   let q = (castRasterPixel - vec2<f32>(1.0)) * 0.5;
   let base = floor(q);
   let f = q - base;
   let i = vec2<i32>(base);
-  var sum = vec2<f32>(0.0);
+  var sum = vec4<f32>(0.0);
+  var bounceSum = vec3<f32>(0.0);
   var weight = 0.0;
-  var nearest = vec2<f32>(1.0);
+  var nearest = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+  var nearestBounce = vec3<f32>(0.0);
   var nearestGap = 3.4e38;
   for (var k = 0; k < 4; k = k + 1) {
     let o = vec2<i32>(k & 1, k >> 1);
-    let t = light_occlusion_load(i + o);
-    let gap = abs(t.z - h0);
+    let t = light_occlusion_load(i + o, 0);
+    var b = vec3<f32>(0.0);
+    if (withBounce) { b = light_occlusion_load(i + o, 1).rgb; }
+    let gap = abs(cast_shadow_height((i + o) * 2 + vec2<i32>(1)) - h0);
     let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1)
       * exp(-gap / LIGHT_OCCLUSION_HEIGHT_SIGMA);
-    sum = sum + w * t.xy;
+    sum = sum + w * t;
+    bounceSum = bounceSum + w * b;
     weight = weight + w;
-    if (gap < nearestGap) { nearestGap = gap; nearest = t.xy; }
+    if (gap < nearestGap) { nearestGap = gap; nearest = t; nearestBounce = b; }
   }
-  return select(nearest, sum / max(weight, 1e-12), weight > 1e-6);
+  var r: LightOcclusion;
+  var t = nearest;
+  r.bounce = nearestBounce;
+  if (weight > 1e-6) {
+    t = sum / weight;
+    r.bounce = bounceSum / weight;
+  }
+  r.shadow = t.x;
+  r.horizon = t.y;
+  r.bent = t.zw;
+  return r;
 }
 
 // Raster pixels per view half-height along a screen direction (y up).
@@ -1457,32 +1591,86 @@ fn cast_raster_step(dir: vec2<f32>) -> vec2<f32> {
 // radius (relief exaggerated like the cast shadows), weighted down with
 // distance; the visible sky is what the horizons leave. Direction-free, so
 // it deepens crevices and wall feet without any light orientation.
+//
+// The same march yields the indirect light. Bent normal: the mean visible
+// direction, each slice contributing the arc above its horizon h,
+// ∫_h^{π/2} (cos e·dir, sin e) de = ((1 − sin h)·dir, cos h). One bounce
+// (withBounce): every sample that raises the slice horizon is seen by this
+// pixel over the solid-angle slab (sin e − sin e_prev), and re-emits its base
+// albedo under the direct light (Lambert, its normal from the raster, no
+// shadow of its own), toward this pixel only on its facing side.
 const HORIZON_DIRECTIONS: i32 = 6;
 const HORIZON_SAMPLES: i32 = 5;
-fn horizon_visibility() -> f32 {
-  let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
-  if (h0 <= CAST_SHADOW_NO_SURFACE * 0.5) { return 1.0; }
+struct HorizonGather {
+  visibility: f32,
+  bent: vec2<f32>,
+  bounce: vec3<f32>,
+};
+fn horizon_gather(withBounce: bool) -> HorizonGather {
+  var g: HorizonGather;
+  g.visibility = 1.0;
+  g.bent = vec2<f32>(0.0);
+  g.bounce = vec3<f32>(0.0);
+  if (cast_shadow_height(vec2<i32>(castRasterPixel)) <= CAST_SHADOW_NO_SURFACE * 0.5) { return g; }
+  let h0 = cast_shadow_receiver_height();
   let radius = clamp(parameters.horizonOcclusionRadius, 0.01, 0.5);
   let exaggeration = clamp(parameters.castShadowLength, 1.0, 20.0);
   let noise = light_occlusion_noise();
+  let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
+  // One raster pixel along the screen axes (y up), for the emitter normals.
+  let stepRight = cast_raster_step(vec2<f32>(1.0, 0.0));
+  let stepUp = cast_raster_step(vec2<f32>(0.0, 1.0));
+  let pixelRight = 1.0 / max(length(stepRight), 1e-12);
+  let pixelUp = 1.0 / max(length(stepUp), 1e-12);
   var occlusion = 0.0;
+  var bent = vec3<f32>(0.0);
   for (var k = 0; k < HORIZON_DIRECTIONS; k = k + 1) {
     let angle = TWO_PI * (f32(k) + noise) / f32(HORIZON_DIRECTIONS);
     let perUnit = cast_raster_step(vec2<f32>(cos(angle), sin(angle)));
+    // The slice direction in the lighting frame (y down).
+    let dirLight = vec2<f32>(cos(angle), -sin(angle));
     var horizon = 0.0;
+    var bounceHorizon = 0.0;
     for (var j = 0; j < HORIZON_SAMPLES; j = j + 1) {
       let f = (f32(j) + fract(noise * 7.0 + f32(k) * 0.618034)) / f32(HORIZON_SAMPLES);
       let r = radius * max(f * f, 1e-3);
       if (length(perUnit * r) < 0.75) { continue; }
-      let terrain = cast_shadow_height_smooth(castRasterPixel + perUnit * r);
+      let p = castRasterPixel + perUnit * r;
+      // Same conservative footprint as the cast shadows: the stretch up to
+      // the next sample (dr/dj = 2·radius·f / N).
+      let terrain = cast_shadow_height_footprint(p, 2.0 * radius * f / f32(HORIZON_SAMPLES) * length(perUnit));
       if (terrain <= CAST_SHADOW_NO_SURFACE * 0.5) { continue; }
       let rise = (terrain - h0) * exaggeration;
       let sinElevation = rise / sqrt(rise * rise + r * r);
       horizon = max(horizon, sinElevation * (1.0 - f * f));
+      if (withBounce && sinElevation > bounceHorizon) {
+        let ip = vec2<i32>(p);
+        let hR = cast_shadow_height(vec2<i32>(p + stepRight * pixelRight));
+        let hL = cast_shadow_height(vec2<i32>(p - stepRight * pixelRight));
+        let hU = cast_shadow_height(vec2<i32>(p + stepUp * pixelUp));
+        let hD = cast_shadow_height(vec2<i32>(p - stepUp * pixelUp));
+        if (min(min(hR, hL), min(hU, hD)) > CAST_SHADOW_NO_SURFACE * 0.5) {
+          // Raster slope in the lighting frame (y down), as the shading normal.
+          let slope = vec2<f32>((hR - hL) / (2.0 * pixelRight), -(hU - hD) / (2.0 * pixelUp));
+          let emitterNormal = surface_normal_from_gradient(slope);
+          let emitted = srgb_to_linear(cast_shadow_albedo(ip))
+            * (0.14 + 0.86 * max(dot(emitterNormal, lightDir), 0.0));
+          // Facing: the exaggerated emitter normal against the way back to
+          // this pixel, in the same exaggerated geometry as the horizon.
+          let towardReceiver = normalize(vec3<f32>(-dirLight * r, -rise));
+          let facing = max(dot(surface_normal_from_gradient(slope * exaggeration), towardReceiver), 0.0);
+          g.bounce = g.bounce + emitted * (facing * (sinElevation - bounceHorizon) * (1.0 - f * f));
+        }
+        bounceHorizon = sinElevation;
+      }
     }
     occlusion = occlusion + horizon;
+    bent = bent + vec3<f32>(dirLight * (1.0 - horizon), sqrt(max(1.0 - horizon * horizon, 0.0)));
   }
-  return clamp(1.0 - occlusion / f32(HORIZON_DIRECTIONS), 0.0, 1.0);
+  g.visibility = clamp(1.0 - occlusion / f32(HORIZON_DIRECTIONS), 0.0, 1.0);
+  g.bent = normalize(bent).xy;
+  g.bounce = g.bounce / f32(HORIZON_DIRECTIONS);
+  return g;
 }
 
 fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3<f32> {
@@ -1514,10 +1702,16 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   // The magnified bilinear path has no extra curvature fetch: AO fades out
   // during reprojection instead of adding four more texture reads per pixel.
   var ao = curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength);
-  var lightOcclusion = vec2<f32>(1.0);
-  if (castShadowActive) { lightOcclusion = sample_light_occlusion(); }
+  let indirectStrength = clamp(parameters.indirectLightStrength, 0.0, 2.0);
+  let indirectActive = castShadowActive && indirectStrength > 0.0;
+  var lightOcclusion: LightOcclusion;
+  lightOcclusion.shadow = 1.0;
+  lightOcclusion.horizon = 1.0;
+  lightOcclusion.bent = vec2<f32>(0.0);
+  lightOcclusion.bounce = vec3<f32>(0.0);
+  if (castShadowActive) { lightOcclusion = sample_light_occlusion(indirectActive); }
   if (castShadowActive && parameters.horizonOcclusionStrength > 0.0) {
-    ao = ao * mix(1.0, lightOcclusion.y, clamp(parameters.horizonOcclusionStrength, 0.0, 1.0));
+    ao = ao * mix(1.0, lightOcclusion.horizon, clamp(parameters.horizonOcclusionStrength, 0.0, 1.0));
   }
   let metallic = clamp(fx.metallic, 0.0, 1.0);
   let roughness = clamp(fx.roughness, 0.02, 1.0);
@@ -1553,12 +1747,23 @@ fn shade_surface(sIn: Surface, fxIn: EffectParams, uv_screen: vec2<f32>) -> vec3
   var localShadow = local_height_shadow(heightGradient, lightDir, localShadowControl);
   if (castShadowActive && parameters.castShadowStrength > 0.0) {
     localShadow = localShadow
-      * mix(1.0, lightOcclusion.x, clamp(parameters.castShadowStrength, 0.0, 1.0));
+      * mix(1.0, lightOcclusion.shadow, clamp(parameters.castShadowStrength, 0.0, 1.0));
   }
   let shadowedNDotL = nDotL * localShadow;
   let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
   let reflectionSide = mix(0.08, 1.0, litSide);
-  let ambientDiffuse = diffuseColor * 0.14 * ao;
+  // Ambient: a uniform white sky by default. Indirect light makes it the
+  // skybox irradiance around the bent normal (normalized by the sky's mean, so
+  // only the direction tints and modulates it) plus one bounce off the relief.
+  var ambientLight = vec3<f32>(0.14 * ao);
+  if (indirectActive) {
+    let bentNormal = vec3<f32>(lightOcclusion.bent, sqrt(max(1.0 - dot(lightOcclusion.bent, lightOcclusion.bent), 0.0)));
+    let skyDrift = vec2<f32>(parameters.skyDriftX, parameters.skyDriftY);
+    let skyTint = sky_irradiance(uv_screen, normalize(normal + bentNormal), skyDrift);
+    ambientLight = 0.14 * ao * mix(vec3<f32>(1.0), skyTint, min(indirectStrength, 1.0))
+      + lightOcclusion.bounce * (INDIRECT_BOUNCE_GAIN * indirectStrength);
+  }
+  let ambientDiffuse = diffuseColor * ambientLight;
   let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
   let brightness = max(fx.shadingLevel, 0.0);
   var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
@@ -1946,6 +2151,15 @@ fn colorize_pixel(
     // neither casts a shadow. h <= 0 peaks at the set boundary.
     if (iter_val > 0.0 && zx_val*zx_val + zy_val*zy_val >= parameters.mu) {
       castHeightOut = relief_at_pixel(iter_val, vec2<f32>(zx_val, zy_val), extras, uv_screen).height / reliefTexelsPerUnit;
+      // Base palette colour at the same phase as palette() (overlays left
+      // out): what this pixel re-emits in the indirect bounce.
+      let nuH = iter_val + smooth_escape_fraction(zx_val * zx_val + zy_val * zy_val);
+      let heightShift = clamp(extras.height, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
+      let phaseShift = (1.0 - abs(fract(extras.geometryAngle / TWO_PI) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
+      let phase = palettePhaseFromRaw(iteration_palette_coordinate(nuH, max(parameters.palettePeriod, 0.0001))
+        + animatedPaletteOffset() + screenPaletteShift(uv_screen) + heightShift + phaseShift);
+      let base = sample_palette(phase, 0.0);
+      castAlbedoOut = base.rgb * base.a;
     }
     return vec4<f32>(0.0);
   }
@@ -2650,7 +2864,8 @@ fn begin_cast_shadow(fragCoord: vec2<f32>, pos: vec4<f32>) {
   castRasterPixel = pos.xy;
   castRasterUvX = dpdx(fragCoord);
   castRasterUvY = dpdy(fragCoord);
-  castShadowActive = baseParameters.castShadowStrength > 0.0 || baseParameters.horizonOcclusionStrength > 0.0;
+  castShadowActive = baseParameters.castShadowStrength > 0.0 || baseParameters.horizonOcclusionStrength > 0.0
+    || baseParameters.indirectLightStrength > 0.0;
 }
 
 // Height raster for cast shadows: h / T of the pixel the colour pass will
@@ -2659,7 +2874,7 @@ fn begin_cast_shadow(fragCoord: vec2<f32>, pos: vec4<f32>) {
 fn fs_cast_height(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   castHeightPass = true;
   _ = shade_srgb(fragCoord, false);
-  return vec4<f32>(castHeightOut, 0.0, 0.0, 1.0);
+  return vec4<f32>(castHeightOut, pack_albedo(castAlbedoOut), 0.0, 1.0);
 }
 
 @fragment
@@ -2669,28 +2884,40 @@ fn fs_cast_height_rotation(@location(0) screenUv: vec2<f32>) -> @location(0) vec
   }
   castHeightPass = true;
   _ = shade_srgb(screenUv, false);
-  return vec4<f32>(castHeightOut, 0.0, 0.0, 1.0);
+  return vec4<f32>(castHeightOut, pack_albedo(castAlbedoOut), 0.0, 1.0);
 }
 
-// Half-resolution light occlusion: cast shadows and horizon occlusion,
-// marched on the full-resolution height raster, one texel per 2x2 pixels.
-fn light_occlusion_texel(fragCoord: vec2<f32>, pos: vec4<f32>) -> vec4<f32> {
+// Half-resolution light occlusion: cast shadows, horizon occlusion and the
+// indirect light, marched on the full-resolution height raster, one texel per
+// 2x2 pixels, into the two layers of the occlusion texture.
+struct LightOcclusionTexel {
+  @location(0) occlusion: vec4<f32>,
+  @location(1) indirect: vec4<f32>,
+};
+fn light_occlusion_texel(fragCoord: vec2<f32>, pos: vec4<f32>) -> LightOcclusionTexel {
   prepare_parameters(fragCoord);
   castRasterPixel = floor(pos.xy) * 2.0 + vec2<f32>(1.0);
   let h0 = cast_shadow_height(vec2<i32>(castRasterPixel));
   var shadow = 1.0;
-  var horizon = 1.0;
+  var gather: HorizonGather;
+  gather.visibility = 1.0;
+  gather.bent = vec2<f32>(0.0);
+  gather.bounce = vec3<f32>(0.0);
   if (h0 > CAST_SHADOW_NO_SURFACE * 0.5) {
     if (parameters.castShadowStrength > 0.0) {
       shadow = cast_shadow_visibility(vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ));
     }
-    if (parameters.horizonOcclusionStrength > 0.0) { horizon = horizon_visibility(); }
+    let indirect = parameters.indirectLightStrength > 0.0;
+    if (parameters.horizonOcclusionStrength > 0.0 || indirect) { gather = horizon_gather(indirect); }
   }
-  return vec4<f32>(shadow, horizon, h0, 1.0);
+  var out: LightOcclusionTexel;
+  out.occlusion = vec4<f32>(shadow, gather.visibility, gather.bent);
+  out.indirect = vec4<f32>(gather.bounce, 1.0);
+  return out;
 }
 
 @fragment
-fn fs_light_occlusion(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_light_occlusion(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> LightOcclusionTexel {
   // UV per full-resolution pixel: half of this texel's footprint.
   castRasterUvX = dpdx(fragCoord) * 0.5;
   castRasterUvY = dpdy(fragCoord) * 0.5;
@@ -2698,11 +2925,14 @@ fn fs_light_occlusion(@location(0) fragCoord: vec2<f32>, @builtin(position) pos:
 }
 
 @fragment
-fn fs_light_occlusion_rotation(@location(0) screenUv: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs_light_occlusion_rotation(@location(0) screenUv: vec2<f32>, @builtin(position) pos: vec4<f32>) -> LightOcclusionTexel {
   castRasterUvX = dpdx(screenUv) * 0.5;
   castRasterUvY = dpdy(screenUv) * 0.5;
   if (any(screenUv < vec2<f32>(0.0)) || any(screenUv > vec2<f32>(1.0))) {
-    return vec4<f32>(1.0, 1.0, CAST_SHADOW_NO_SURFACE, 1.0);
+    var out: LightOcclusionTexel;
+    out.occlusion = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    out.indirect = vec4<f32>(0.0);
+    return out;
   }
   return light_occlusion_texel(screenUv, pos);
 }

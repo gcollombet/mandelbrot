@@ -268,6 +268,7 @@ const model =  defineModel<MandelbrotParams>({
      castShadowSoftness: 0.35,
      horizonOcclusionStrength: 0,
      horizonOcclusionRadius: 0.1,
+     indirectLightStrength: 0,
      varnishStrength: 0,
      gradeContrast: 1.18,
      gradeSaturation: 1.12,
@@ -1398,6 +1399,7 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     castShadowSoftness: model.value.castShadowSoftness,
     horizonOcclusionStrength: model.value.horizonOcclusionStrength,
     horizonOcclusionRadius: model.value.horizonOcclusionRadius,
+    indirectLightStrength: model.value.indirectLightStrength,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
@@ -1510,6 +1512,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.castShadowSoftness = source.castShadowSoftness ?? 0.35;
   model.value.horizonOcclusionStrength = source.horizonOcclusionStrength ?? 0;
   model.value.horizonOcclusionRadius = source.horizonOcclusionRadius ?? 0.1;
+  model.value.indirectLightStrength = source.indirectLightStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
@@ -3371,6 +3374,7 @@ async function startVideoExport(payload: {
           :castShadowSoftness="model.castShadowSoftness"
           :horizonOcclusionStrength="model.horizonOcclusionStrength"
           :horizonOcclusionRadius="model.horizonOcclusionRadius"
+          :indirectLightStrength="model.indirectLightStrength"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
           :gradeSaturation="model.gradeSaturation"
@@ -3566,6 +3570,8 @@ async function startVideoExport(payload: {
             :model-value="model.horizonOcclusionStrength ?? 0" @update:model-value="(v: number) => model.horizonOcclusionStrength = v" />
           <DenseField :label="t('settings.palettes.surface.horizonOcclusionRadius')" :min="0.01" :max="0.5" :step="0.005" :default="0.1" f="p3"
             :model-value="model.horizonOcclusionRadius ?? 0.1" @update:model-value="(v: number) => model.horizonOcclusionRadius = v" />
+          <DenseField :label="t('settings.palettes.surface.indirectLight')" :min="0" :max="2" :step="0.01" :default="0" f="p2"
+            :model-value="model.indirectLightStrength ?? 0" @update:model-value="(v: number) => model.indirectLightStrength = v" />
           <DenseField :label="t('settings.palettes.surface.varnish')" :min="0" :max="100" :step="0.05" :default="0" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
           <DenseField :label="t('settings.palettes.surface.contrast')" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"

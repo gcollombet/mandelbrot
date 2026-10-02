@@ -214,6 +214,7 @@ function previewUniforms(): ColorUniforms {
     castShadowSoftness: 0.35,
     horizonOcclusionStrength: 0,
     horizonOcclusionRadius: 0.1,
+    indirectLightStrength: 0,
   };
 }
 

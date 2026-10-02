@@ -66,6 +66,7 @@ const props = defineProps<{
   castShadowSoftness?: number,
   horizonOcclusionStrength?: number,
   horizonOcclusionRadius?: number,
+  indirectLightStrength?: number,
   tiltViewTilt?: number,
   tiltViewHeading?: number,
   tiltViewRelief?: number,
@@ -499,6 +500,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :castShadowSoftness="props.castShadowSoftness"
       :horizonOcclusionStrength="props.horizonOcclusionStrength"
       :horizonOcclusionRadius="props.horizonOcclusionRadius"
+      :indirectLightStrength="props.indirectLightStrength"
       :tiltViewTilt="props.tiltViewTilt"
       :tiltViewHeading="props.tiltViewHeading"
       :tiltViewRelief="props.tiltViewRelief"

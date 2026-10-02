@@ -224,6 +224,7 @@
       "ambientOcclusion": "Occlusion ambiante",
       "horizonOcclusion": "Occlusion d’horizon",
       "horizonOcclusionRadius": "Rayon d’occlusion",
+      "indirectLight": "Lumière indirecte",
       "varnish": "Vernis",
       "contrast": "Contraste",
       "saturation": "Saturation"
