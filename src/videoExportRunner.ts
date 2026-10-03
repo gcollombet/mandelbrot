@@ -6,6 +6,8 @@ import { hdrInputFrame } from './hdrVideo'
 // or codecs; this module supplies its driver.
 
 import { motionProgress, motionSettings, validateMotion, type ExpmapMotion } from './expmap/motion'
+import type { StudioFrameDriver } from './studioPlayer'
+import { trimAudioBuffer } from './videoAudioTrack'
 import { createVideoSink, type Mp4Codec, type VideoDestination } from './videoEncoderSink'
 import { runVideoExport, elapsedForFrame, totalFramesFor } from './videoExportSession'
 import {
@@ -94,6 +96,13 @@ export type VideoExportRequest = {
   to: VideoPathLocation
   durationSeconds: number
   motion?: Partial<ExpmapMotion>
+  /** Studio parcours source: the driver places camera AND look at every
+   *  absolute frame time; `from` / `to` are its first and last camera
+   *  keyframes (validation, diagnostics) and `motion` is ignored, the
+   *  parcours carries its own ramps. Monolithic rendering only. */
+  studio?: StudioFrameDriver
+  /** Soundtrack to mux, trimmed to the film by the runner. */
+  audio?: AudioBuffer
   output: VideoOutputSpec
   codec: Mp4Codec
   /** Jittered AA samples per emitted frame. 1 = off. */
@@ -147,6 +156,9 @@ export async function runVideoExportToWebm(
 
   validateMotion(request.motion ?? {}, request.durationSeconds)
   const renderMode = request.renderMode ?? 'monolithic'
+  if (request.studio && renderMode !== 'monolithic') {
+    throw new Error(t('video.runner.cannotExport', { problems: t('video.runner.studioMonolithicOnly') }))
+  }
   if (renderMode === 'tiled-keyframe') {
     const eligibility = evaluateTiledKeyframeEligibility({
       from: request.from,
@@ -211,11 +223,13 @@ export async function runVideoExportToWebm(
       hdrQuantizer: output.dynamicRange === 'hdr' ? output.hdrQuantizer : undefined,
       destination: request.destination,
       hardwareAcceleration: 'prefer-hardware',
+      audio: request.audio ? trimAudioBuffer(request.audio, request.durationSeconds) : undefined,
     })
   } catch (error) {
     deps.engine.endVideoExportSession()
     throw error
   }
+  if (request.audio && !sink.audioCodec) request.onWarning?.(t('video.runner.audioUnavailable'))
 
   try {
     // Place the camera explicitly rather than inheriting whatever the
@@ -224,22 +238,31 @@ export async function runVideoExportToWebm(
     // produces different trailing digits than a cold one. Far below pixel
     // scale, but it is the difference between "the same export twice" meaning
     // something and not.
-    navigator.cancel_transition()
-    navigator.origin(request.from.cx, request.from.cy)
-    navigator.scale(request.from.scale)
-    navigator.angle(request.from.angle)
-    navigator.start_export_transition(
-      request.to.cx,
-      request.to.cy,
-      request.to.scale,
-      request.to.angle,
-      request.durationSeconds,
-    )
+    const studio = request.studio
+    if (!studio) {
+      navigator.cancel_transition()
+      navigator.origin(request.from.cx, request.from.cy)
+      navigator.scale(request.from.scale)
+      navigator.angle(request.from.angle)
+      navigator.start_export_transition(
+        request.to.cx,
+        request.to.cy,
+        request.to.scale,
+        request.to.angle,
+        request.durationSeconds,
+      )
+    }
 
     const result = await runVideoExport(
       {
-        setExportTime: (elapsedSeconds) => {
-          deps.controller.setExportTime(elapsedSeconds === null ? null : motionProgress({ ...request.motion, durationSeconds: request.durationSeconds }, elapsedSeconds) * request.durationSeconds)
+        setExportTime: async (elapsedSeconds) => {
+          if (studio) {
+            // The parcours places camera, look and both clocks for this frame.
+            if (elapsedSeconds === null) { deps.controller.setExportTime(null); studio.finish() }
+            else await studio.placeFrame(elapsedSeconds)
+          } else {
+            deps.controller.setExportTime(elapsedSeconds === null ? null : motionProgress({ ...request.motion, durationSeconds: request.durationSeconds }, elapsedSeconds) * request.durationSeconds)
+          }
           // Each frame accumulates from scratch: carrying samples across frames
           // would average two different camera positions together.
           if (elapsedSeconds !== null) {
@@ -291,7 +314,7 @@ export async function runVideoExportToWebm(
       },
       {
         fps: output.fps,
-        durationSeconds: request.durationSeconds + motionSettings(request.motion ?? {}).holdSeconds,
+        durationSeconds: request.durationSeconds + (studio ? 0 : motionSettings(request.motion ?? {}).holdSeconds),
         maxPumpsPerFrame: request.maxPumpsPerFrame ?? DEFAULT_MAX_PUMPS_PER_FRAME,
       },
       { onProgress: request.onProgress, signal: request.signal },

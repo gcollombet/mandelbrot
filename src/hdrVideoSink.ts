@@ -2,6 +2,7 @@ import { AppendOnlyStreamTarget, BufferTarget, EncodedPacket, EncodedVideoPacket
 import { t } from './i18n'
 import { assertHdrDecoderConfig, hdrEncodeOptions, hdrEncoderConfig, hdrInputFrame, hasHdrColorSpace } from './hdrVideo'
 import type { EncoderPreference, VideoEncodeSettings, VideoEncoderSink } from './videoEncoderSink'
+import { attachAudioTrack } from './videoAudioTrack'
 
 /** Encode a real 10-bit input before rendering frames or opening the muxer. */
 async function verifyEncoder(settings: VideoEncodeSettings, preference: EncoderPreference, quantizer: number | undefined): Promise<VideoEncoderConfig> {
@@ -58,6 +59,7 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
       ? new AppendOnlyStreamTarget(settings.destination.writable) : new BufferTarget() })
   const source = new EncodedVideoPacketSource(settings.codec)
   output.addVideoTrack(source,{frameRate:settings.fps})
+  const audio = await attachAudioTrack(output, settings.audio)
   let frames = 0, finished = false, failure: unknown, validated = false
   let writes = Promise.resolve()
   let wakeQueue: (() => void) | undefined
@@ -72,7 +74,7 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
     } catch (error) { fail(error) }
   } })
   const close = () => { if (encoder.state !== 'closed') encoder.close(); wakeQueue?.() }
-  try { encoder.configure(config); await output.start() }
+  try { encoder.configure(config); await output.start(); if (audio) await audio.feed() }
   catch (error) { close(); await output.cancel().catch(() => {}); throw error }
   const check = () => {
     if (failure) throw failure
@@ -97,7 +99,7 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
     check()
   }
   return {
-    codec: settings.codec, streaming, fileExtension:'mp4', quantizer, get framesEncoded() { return frames },
+    codec: settings.codec, streaming, fileExtension:'mp4', quantizer, audioCodec: audio?.codec, get framesEncoded() { return frames },
     async addFrame(frame) {
       try {
         if (finished) throw new Error(t('video.hdr.encoderClosed'))

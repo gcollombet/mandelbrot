@@ -35,7 +35,8 @@
     "mandelbrot": "Vidéo depuis la fractale",
     "expmap": "Vidéo depuis une ExpMap cuite",
     "shader": "Vidéo depuis une ExpMap recolorable",
-    "sdrNote": "Cette source RGB exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale » ou une source recolorable, puis Dynamique → HDR."
+    "sdrNote": "Cette source RGB exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale » ou une source recolorable, puis Dynamique → HDR.",
+    "studio": "Vidéo depuis le parcours Studio"
   },
   "path": {
     "title": "Trajet",
@@ -98,5 +99,14 @@
     "interrupted": "Export interrompu",
     "framesUnit": "images encodées",
     "start": "Exporter en MP4"
+  },
+  "studio": {
+    "title": "Parcours Studio",
+    "scope": "caméra + look par keyframes",
+    "none": "Aucun parcours Studio : ouvrez le Studio et posez au moins un keyframe caméra.",
+    "summary": "{name} · {duration} · {keyframes} keyframes ({camera} caméra, {look} look)",
+    "rampsNote": "Les rampes et le re-timing du parcours s’appliquent ; les réglages de mouvement ci-dessous sont ignorés.",
+    "tiledUnsupported": "Le rendu par keyframes tuilés ne s’applique pas à un parcours Studio : choisissez le rendu monolithique.",
+    "noCamera": "Le parcours Studio n’a aucun keyframe caméra."
   }
 }

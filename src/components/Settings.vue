@@ -114,6 +114,9 @@ import VideoExportPanel from './VideoExportPanel.vue';
 import ExpmapPanel from './ExpmapPanel.vue';
 import { expmapBusy, expmapOpenDocument } from '../expmap/runtime';
 import {runVideoExportToWebm} from '../videoExportRunner';
+import {createStudioFrameDriver, type StudioController} from '../studioPlayer';
+import {resolveStudioTextures} from '../studioTextures';
+import type {StudioParcours} from '../studioParcours';
 import type {VideoOutputSpec, VideoPathLocation} from '../videoPath';
 import {
   DEFAULT_TILED_EXPORT_MEMORY_PROFILE,
@@ -2838,6 +2841,8 @@ async function startVideoExport(payload: {
   tiledMemoryBudgetMiB: number;
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
+  studio?: StudioParcours;
+  audio?: { buffer: AudioBuffer; bank: import('../studioAudio').ModulatorBank } | null;
 }) {
   if (videoExportRunning.value || expmapBusy.value || !props.engine || !props.mandelbrotCtrl) return;
   expmapOpenDocument.value = null;
@@ -2887,7 +2892,17 @@ async function startVideoExport(payload: {
         from: payload.startLocation,
         to: payload.endLocation,
         durationSeconds: payload.durationSeconds,
-        motion: payload.motion,
+        // A studio parcours carries its own ramps; the motion controls do not apply.
+        motion: payload.studio ? {} : payload.motion,
+        studio: payload.studio
+          ? createStudioFrameDriver({
+            getEngine: () => props.engine as any,
+            getController: () => props.mandelbrotCtrl as unknown as StudioController | null,
+            params: { get value() { return model.value; } },
+            resolveTextures: resolveStudioTextures,
+          }, payload.studio, payload.audio)
+          : undefined,
+        audio: payload.studio && payload.audio ? payload.audio.buffer : undefined,
         output: payload.output,
         codec: payload.codec,
         aaSamplesPerFrame: payload.aaSamplesPerFrame,

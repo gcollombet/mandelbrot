@@ -6,7 +6,8 @@ import {useRoute, useRouter} from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
-import { expmapOpenDocument, expmapBusy } from '../expmap/runtime';
+import { expmapOpenDocument, expmapBusy, expmapVideoSelected, shaderExpmapVideoSelected } from '../expmap/runtime';
+import { studioVideoSelected } from '../studioDraft';
 import Settings from './Settings.vue';
 import PalettePathPanel from './PalettePathPanel.vue';
 import RenderStats from './RenderStats.vue';
@@ -68,6 +69,11 @@ import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
 import AboutPanel from './AboutPanel.vue';
 import CloudAccountControl from './CloudAccountControl.vue';
 import LanguageSwitcher from './LanguageSwitcher.vue';
+import StudioPanel from './StudioPanel.vue';
+import {createStudioFrameDriver, type StudioController} from '../studioPlayer';
+import {validateStudioParcours, type StudioParcours} from '../studioParcours';
+import {runVideoExport} from '../videoExportSession';
+import {resolveStudioTextures} from '../studioTextures';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 import {centredCropForRatio, renderStill, stillAspectRatio, stillPresetDimensions, STILL_PRESET_WIDTHS, type StillAspect, type StillSize} from '../stillExport';
@@ -354,12 +360,52 @@ if (import.meta.env.DEV) {
     getView: () => { const p = mandelbrotParams.value; return { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle }; },
     getEps: () => clampBlaEpsilon(mandelbrotParams.value.blaEpsilon),
   });
-  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown };
+  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown; __studioExport?: unknown; __engineReady?: unknown };
+  w.__engineReady = () => !!mandelbrotEngine.value && !!mandelbrotCtrlRef.value;
   w.__capture = dev.capture;
   w.__compare = dev.compare;
   w.__bench = bench.bench;
   // Live-path tests: patch viewer settings without touching localStorage.
   w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
+  // Studio export dry run: the real export loop and frame driver, no encoder.
+  // Returns the camera and look placed for every frame, for determinism checks.
+  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number; width?: number; height?: number } = {}) => {
+    const ctrl = mandelbrotCtrlRef.value, engine = mandelbrotEngine.value;
+    if (!ctrl || !engine) throw new Error('engine not ready');
+    const valid = validateStudioParcours(parcours);
+    const driver = createStudioFrameDriver({
+      getEngine: () => engine, getController: () => ctrl as unknown as StudioController,
+      params: mandelbrotParams, resolveTextures: resolveStudioTextures,
+    }, valid);
+    const frames: Record<string, unknown>[] = [];
+    // Same session as a real export: output size, batch target and AA gate.
+    await engine.beginVideoExportSession({ magnificationThreshold: 4, outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1, batchTargetFps: 1 });
+    try {
+      const result = await runVideoExport({
+        setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else { await driver.placeFrame(t); engine.beginExportFrameAa(); } },
+        drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
+        isFrameReady: () => engine.videoFrameReady(),
+        emitFrame: async (frame) => {
+          // Same capture drive as the runner: the capture is fulfilled at the end
+          // of the next render, which is also where the camera steps.
+          const pending = engine.captureExportFrame({ outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1,
+            timestampMicros: Math.round(frame.index * 1e6 / (opts.fps ?? 10)), durationMicros: Math.round(1e6 / (opts.fps ?? 10)) });
+          let settled = false;
+          const done = pending.then((f) => { settled = true; return f; });
+          void done.catch(() => {});
+          for (let attempt = 0; attempt < 8 && !settled; attempt++) { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); }
+          (await done).close();
+          const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
+          frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
+            paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
+            stops: mandelbrotParams.value.colorStops.length, transition: engine.isPresetTransitionActive });
+        },
+      }, { fps: opts.fps ?? 10, durationSeconds: valid.durationSeconds, maxPumpsPerFrame: opts.maxPumpsPerFrame ?? 4000 });
+      return { result, frames };
+    } finally {
+      engine.endVideoExportSession();
+    }
+  };
 }
 
 // ── Minibrot shortcuts (same actions as the Navigation panel) ──
@@ -1236,6 +1282,11 @@ function handleOutsidePointerDown(e: PointerEvent) {
 
 // Gestion clavier globale (W pour settings, Escape pour fermer)
 function handleGlobalKeydown(e: KeyboardEvent) {
+  // The studio owns the transport keys (Space, K, J, L, Home, End, Delete) while docked.
+  if (e.key !== 'Escape' && openTabs.has('studio') && studioPanelRef.value?.handleKey(e)) {
+    e.preventDefault();
+    return;
+  }
   if (e.key === 'Escape') {
     // Restaurer l'UI masquée en priorité.
     if (!showUI.value) {
@@ -2090,6 +2141,20 @@ async function startTravelToPreset(preset: PresetRecord) {
   
   travelAnimationId = requestAnimationFrame(tickTravelAnimation);
 }
+
+// ── Studio mode (StudioPanel.vue): docked timeline under the live view ──
+const studioPanelRef = ref<InstanceType<typeof StudioPanel> | null>(null);
+const studioOpen = computed(() => openTabs.has('studio'));
+
+/** "Export…" in the studio: open the Video panel on the Studio parcours source. */
+function openStudioExport() {
+  studioVideoSelected.value = true;
+  expmapVideoSelected.value = false;
+  shaderExpmapVideoSelected.value = false;
+  if (!openTabs.has('video')) toggleTab('video');
+  bringToFront('video');
+}
+
 </script>
 
 <template>
@@ -2554,7 +2619,7 @@ async function startTravelToPreset(preset: PresetRecord) {
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
       <!-- Dense shell popup (ported panels) -->
       <div
-        v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key)"
+        v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key) && tab.key !== 'studio'"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="dense dense-popup"
         :class="{ 'sheet-expanded': expandedPanel }"
@@ -2628,7 +2693,7 @@ async function startTravelToPreset(preset: PresetRecord) {
 
       <!-- Legacy popup chrome (not-yet-ported panels) -->
 	      <div
-	        v-else-if="openTabs.has(tab.key) && !discoveryRadarActive"
+	        v-else-if="openTabs.has(tab.key) && !discoveryRadarActive && tab.key !== 'studio'"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="settings-popup"
         :style="popupStyle(tab.key)"
@@ -2666,6 +2731,26 @@ async function startTravelToPreset(preset: PresetRecord) {
         </div>
       </div>
     </template>
+
+    <!-- Studio: Resolve-style timeline docked under the live view (a mode of its own, beside the palette path) -->
+    <div
+      v-if="studioOpen && !discoveryRadarActive"
+      class="dense studio-dock"
+      v-bind="denseAttrs(denseView)"
+      role="region"
+      :aria-label="t('shortcuts.tabs.studio')"
+      @pointerdown.stop
+    >
+      <StudioPanel
+        ref="studioPanelRef"
+        :params="mandelbrotParams"
+        :engine="mandelbrotEngine"
+        :controller="(mandelbrotCtrlRef as unknown as StudioController | null)"
+        :resolve-textures="resolveStudioTextures"
+        @close="closeTab('studio')"
+        @export="openStudioExport"
+      />
+    </div>
 
     <div v-if="guestImportPlan" class="guest-import-backdrop" role="presentation">
       <section class="guest-import-dialog" role="dialog" aria-modal="true" aria-labelledby="guest-import-title">
@@ -2831,6 +2916,25 @@ async function startTravelToPreset(preset: PresetRecord) {
 .dense-popup {
   pointer-events: auto;
   max-width: 96vw;
+}
+
+/* Studio dock: full-width timeline over the bottom of the live view. */
+.studio-dock {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  height: min(340px, 48dvh);
+  z-index: 60;
+  pointer-events: auto;
+  background: var(--panel-bg);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .settings-popup {

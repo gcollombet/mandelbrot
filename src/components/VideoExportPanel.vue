@@ -17,6 +17,8 @@ import type { Engine } from '../Engine';
 import ExpmapVideoPanel from './ExpmapVideoPanel.vue';
 import ShaderExpmapPanel from './ShaderExpmapPanel.vue';
 import { expmapVideoSelected, shaderExpmapVideoSelected, expmapBusy } from '../expmap/runtime';
+import { studioExportAudio, studioExportParcours, studioVideoSelected } from '../studioDraft';
+import { cameraKeyframes, formatSeconds, type StudioParcours } from '../studioParcours';
 import {
   describeOutputWarnings,
   describeParcoursWarnings,
@@ -82,6 +84,9 @@ const emit = defineEmits<{
     renderMode: VideoExportRenderMode;
     tiledMemoryBudgetMiB: number;
     startLocation: VideoPathLocation;
+    /** Studio parcours source: camera and look driven by its keyframes. */
+    studio?: StudioParcours;
+    audio?: import('../studioPlayer').StudioAudioSource | null;
     endLocation: VideoPathLocation;
   }): void;
   (e: 'cancel'): void;
@@ -129,7 +134,21 @@ watch(dynamicRange, mode => { if (mode === 'hdr' && codec.value === 'avc') codec
 const motion = ref({ ...saved.motion });
 const filename = ref(saved.filename);
 const timingAuthority = ref(saved.timingAuthority);
-const totalDuration = computed(() => durationSeconds.value + motion.value.holdSeconds);
+// ── Studio parcours source (studioDraft.ts): the dock publishes its draft ──
+const studioParcours = computed(() => studioExportParcours.value);
+const studioCameras = computed(() => studioParcours.value ? cameraKeyframes(studioParcours.value) : []);
+const studioEndpoints = computed(() => studioCameras.value.length
+  ? { from: studioCameras.value[0].camera, to: studioCameras.value[studioCameras.value.length - 1].camera }
+  : null);
+const studioSummary = computed(() => {
+  const p = studioParcours.value;
+  if (!p) return '';
+  return t('videoExportPanel.studio.summary', { name: p.name, duration: formatSeconds(p.durationSeconds), keyframes: p.keyframes.length,
+    camera: studioCameras.value.length, look: p.keyframes.filter(k => k.look).length });
+});
+const totalDuration = computed(() => studioVideoSelected.value
+  ? (studioParcours.value?.durationSeconds ?? 0)
+  : durationSeconds.value + motion.value.holdSeconds);
 const aaSamplesPerFrame = ref<number>(saved.aaSamplesPerFrame);
 const renderMode = ref<VideoExportRenderMode>(saved.renderMode);
 const tiledMemoryBudgetMiB = ref(saved.tiledMemoryBudgetMiB);
@@ -239,6 +258,13 @@ const tiledPlan = computed(() => {
 });
 
 const problems = computed<VideoPathProblem[]>(() => {
+  if (studioVideoSelected.value) {
+    const studioProblems: VideoPathProblem[] = [...validateVideoOutput(output.value, props.maxTextureDimension)];
+    if (!studioParcours.value) studioProblems.push({ kind: 'palette', message: t('videoExportPanel.studio.none') });
+    else if (!studioEndpoints.value) studioProblems.push({ kind: 'divergent-parameter', message: t('videoExportPanel.studio.noCamera') });
+    if (renderMode.value === 'tiled-keyframe') studioProblems.push({ kind: 'output', message: t('videoExportPanel.studio.tiledUnsupported') });
+    return studioProblems;
+  }
   const result: VideoPathProblem[] = [
     ...validateVideoOutput(output.value, props.maxTextureDimension),
     ...validateVideoPath({
@@ -258,7 +284,7 @@ const problems = computed<VideoPathProblem[]>(() => {
 });
 
 const warnings = computed<ParcoursWarning[]>(() => [
-  ...describeParcoursWarnings(effectiveStart.value, effectiveEnd.value),
+  ...(studioVideoSelected.value ? [] : describeParcoursWarnings(effectiveStart.value, effectiveEnd.value)),
   ...describeOutputWarnings(output.value),
 ]);
 
@@ -340,8 +366,10 @@ watch(zoomDistance, distance => {
 
 function start() {
   if (!canStart.value) return;
+  const studio = studioVideoSelected.value ? studioParcours.value : null;
+  if (studioVideoSelected.value && (!studio || !studioEndpoints.value)) return;
   emit('start', {
-    durationSeconds: durationSeconds.value,
+    durationSeconds: studio ? studio.durationSeconds : durationSeconds.value,
     output: output.value,
     codec: effectiveCodec.value!,
     motion: { ...motion.value },
@@ -349,19 +377,26 @@ function start() {
     aaSamplesPerFrame: aaSamplesPerFrame.value,
     renderMode: renderMode.value,
     tiledMemoryBudgetMiB: tiledMemoryBudgetMiB.value,
-    startLocation: effectiveStart.value,
-    endLocation: effectiveEnd.value,
+    startLocation: studio ? studioEndpoints.value!.from : effectiveStart.value,
+    endLocation: studio ? studioEndpoints.value!.to : effectiveEnd.value,
+    ...(studio ? { studio, audio: studioExportAudio.value } : {}),
   });
 }
 </script>
 
 <template>
   <div class="video-export-panel sections">
-    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect :label="t('videoExportPanel.source.label')" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: t('videoExportPanel.source.mandelbrot') }, { value: 'expmap', label: t('videoExportPanel.source.expmap') }, { value: 'shader', label: t('videoExportPanel.source.shader') }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
+    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect :label="t('videoExportPanel.source.label')" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : studioVideoSelected ? 'studio' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: t('videoExportPanel.source.mandelbrot') }, { value: 'studio', label: t('videoExportPanel.source.studio') }, { value: 'expmap', label: t('videoExportPanel.source.expmap') }, { value: 'shader', label: t('videoExportPanel.source.shader') }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'; studioVideoSelected = $event === 'studio'"/></fieldset>
     <p v-if="expmapVideoSelected" class="ve-note">{{ t('videoExportPanel.source.sdrNote') }}</p>
     <ShaderExpmapPanel v-if="shaderExpmapVideoSelected" video-only :plan="null" name="" :appearance="current as unknown as import('../Engine').RenderOptions" :engine="engine ?? null" :controller="controller ?? null"/>
     <ExpmapVideoPanel v-else-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
     <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
+    <DenseSection v-if="studioVideoSelected" :title="t('videoExportPanel.studio.title')" :scope="t('videoExportPanel.studio.scope')">
+      <p v-if="studioParcours" class="ve-note">{{ studioSummary }}</p>
+      <p v-else class="ve-note">{{ t('videoExportPanel.studio.none') }}</p>
+      <p class="ve-note">{{ t('videoExportPanel.studio.rampsNote') }}</p>
+    </DenseSection>
+    <template v-else>
     <DenseSection :title="t('videoExportPanel.path.title')" :scope="t('videoExportPanel.path.scope')">
       <div class="ve-capture"><span>{{ t('videoExportPanel.path.fixedCenter') }}</span><button class="ve-pin" @click="centerCurrent()">{{ t('videoExportPanel.path.useCurrentCenter') }}</button></div>
       <details><summary>{{ t('videoExportPanel.path.distinctCenters') }}</summary>
@@ -379,6 +414,7 @@ function start() {
     </DenseSection>
     <VideoRotationControls :from-angle="effectiveStart.angle" :to-angle="effectiveEnd.angle" :current-angle="currentLocation().angle" @change="setRotation"/>
     <VideoMotionControls v-model="motion" :duration-seconds="durationSeconds"/>
+    </template>
 
     <DenseSection :title="t('videoExportPanel.output.title')">
       <DenseSelect :label="t('videoExportPanel.output.dynamicRange')" v-model="dynamicRange" :options="[{value:'sdr',label:t('videoExportPanel.output.sdr')},{value:'hdr',label:t('videoExportPanel.output.hdr')}]"/>

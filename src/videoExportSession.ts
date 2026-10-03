@@ -29,7 +29,7 @@ export type VideoExportDriver = {
    * rendering repeatedly, and the camera may not creep forward while pumping.
    * Null hands the clock back to wall time.
    */
-  setExportTime(elapsedSeconds: number | null): void
+  setExportTime(elapsedSeconds: number | null): void | Promise<void>
   /** Run one render pass. */
   drawOnce(): Promise<void>
   /** Export convergence gate — see fieldConvergence.isFieldConverged. */
@@ -157,7 +157,7 @@ export async function runVideoExport(
       }
 
       const elapsedSeconds = elapsedForFrame(index, totalFrames, settings.durationSeconds)
-      driver.setExportTime(elapsedSeconds)
+      await driver.setExportTime(elapsedSeconds)
 
       let pumps = 0
       while (!driver.isFrameReady()) {
@@ -194,7 +194,7 @@ export async function runVideoExport(
     // Hand the clock back on every exit path — success, cancellation, timeout
     // and any driver error alike. Leaving the engine pinned to an export time
     // would freeze the interactive view at the last rendered frame.
-    driver.setExportTime(null)
+    await driver.setExportTime(null)
   }
 
   return { totalFrames, framesEmitted, totalPumps, freeFrames, cancelled }

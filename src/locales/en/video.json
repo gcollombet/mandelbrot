@@ -24,7 +24,9 @@
     "navigatorUnavailable": "Navigator unavailable.",
     "hdrCaptureUnavailable": "HDR video capture unavailable.",
     "cancelled": "Export cancelled",
-    "interrupted": "Export interrupted"
+    "interrupted": "Export interrupted",
+    "studioMonolithicOnly": "A Studio parcours exports in monolithic rendering only.",
+    "audioUnavailable": "No audio encoder available: the film is exported without its music."
   },
   "session": {
     "frameTimeout": "Video export aborted: frame {frame} did not converge after {pumps} render pumps. No partially converged frame was emitted.",

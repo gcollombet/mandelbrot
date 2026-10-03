@@ -105,8 +105,8 @@ defineExpose({
     mandelbrotRef.value?.resetReferenceTo?.(cx, cy, scaleStr, angleVal);
   },
   drawOnce: () => mandelbrotRef.value?.drawOnce(),
-  setExportTime: (elapsedSeconds: number | null) => {
-    mandelbrotRef.value?.setExportTime?.(elapsedSeconds);
+  setExportTime: (elapsedSeconds: number | null, animationSeconds: number | null = elapsedSeconds) => {
+    mandelbrotRef.value?.setExportTime?.(elapsedSeconds, animationSeconds);
   },
   isExporting: () => mandelbrotRef.value?.isExporting?.() ?? false,
 } satisfies Pick<MandelbrotExposed,
