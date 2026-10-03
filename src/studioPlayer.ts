@@ -58,7 +58,9 @@ export interface StudioEngine {
   updateSkyboxTexture(url: string, sourceKey?: string): Promise<void>
 }
 
-export type StudioTextures = { tile: { url: string; key: string }; sky: { url: string; key: string }; release(): void }
+export type StudioTextureRef = { url: string; key: string }
+/** A null slot means the library has no such texture: keep the engine's. */
+export type StudioTextures = { tile: StudioTextureRef | null; sky: StudioTextureRef | null; release(): void }
 
 export type StudioPlayerDeps = {
   getEngine(): StudioEngine | null
@@ -86,6 +88,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   // Look segment the GPU transition is prepared for.
   let lookKey = ''
   let lookPrepared = false
+  let lookGpuBlend = true
   let lookGeneration = 0
   let heldTextures: StudioTextures | null = null
 
@@ -179,6 +182,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     if (key !== lookKey) {
       lookKey = key
       lookPrepared = false
+      lookGpuBlend = true
       ++lookGeneration
       releaseTextures()
       engine?.cancelPresetTransition()
@@ -194,7 +198,8 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
       return
     }
     // Mid-transition: the GPU blends the colour stops of a and b while the
-    // params keep a's discrete fields, as a preset travel does.
+    // params keep a's discrete fields, as a preset travel does. Without both
+    // textures in the library there is no GPU blend: the stops cut half-way.
     if (!lookPrepared && engine) {
       lookPrepared = true
       const generation = lookGeneration
@@ -202,6 +207,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
         try {
           const textures = await deps.resolveTextures(state.b)
           if (generation !== lookGeneration) { textures.release(); return }
+          if (!textures.tile || !textures.sky) { textures.release(); lookGpuBlend = false; return }
           heldTextures = textures
           const ok = await engine.preparePresetTransition(state.a as MandelbrotParams, state.b as MandelbrotParams, textures.tile, textures.sky)
           if (generation !== lookGeneration) { engine.cancelPresetTransition(); return }
@@ -213,6 +219,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
       })()
     }
     if (engine?.isPresetTransitionActive) engine.setPresetTransitionProgress(state.w)
+    else if (!lookGpuBlend) Object.assign(params, discreteLookFields(state.w >= 0.5 ? state.b : state.a))
   }
 
   // ── Clock ──
@@ -401,8 +408,8 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
   async function ensureTextures(look: StudioLook, engine: StudioEngine) {
     const textures = await deps.resolveTextures(look)
     try {
-      if (!engine.isTileTextureSourceCurrent(textures.tile.key)) await engine.updateTileTexture(textures.tile.url, textures.tile.key)
-      if (!engine.isSkyboxTextureSourceCurrent(textures.sky.key)) await engine.updateSkyboxTexture(textures.sky.url, textures.sky.key)
+      if (textures.tile && !engine.isTileTextureSourceCurrent(textures.tile.key)) await engine.updateTileTexture(textures.tile.url, textures.tile.key)
+      if (textures.sky && !engine.isSkyboxTextureSourceCurrent(textures.sky.key)) await engine.updateSkyboxTexture(textures.sky.url, textures.sky.key)
     } finally {
       textures.release()
     }
@@ -467,12 +474,19 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
       } else {
         if (lookPreparedKey !== key) {
           releaseTextures()
-          heldTextures = await deps.resolveTextures(state.b)
-          const ok = await engine.preparePresetTransition(state.a as MandelbrotParams, state.b as MandelbrotParams, heldTextures.tile, heldTextures.sky)
-          if (!ok) throw new Error('Studio export: look transition could not be prepared')
+          const textures = await deps.resolveTextures(state.b)
+          if (textures.tile && textures.sky) {
+            heldTextures = textures
+            const ok = await engine.preparePresetTransition(state.a as MandelbrotParams, state.b as MandelbrotParams, textures.tile, textures.sky)
+            if (!ok) throw new Error('Studio export: look transition could not be prepared')
+          } else {
+            // No GPU blend without both textures: the stops cut half-way.
+            textures.release()
+          }
           lookPreparedKey = key
         }
-        engine.setPresetTransitionProgress(state.w)
+        if (engine.isPresetTransitionActive) engine.setPresetTransitionProgress(state.w)
+        else Object.assign(params, discreteLookFields(state.w >= 0.5 ? state.b : state.a))
       }
     }
     // Let the params reach the renderer's props before the frame is drawn.
