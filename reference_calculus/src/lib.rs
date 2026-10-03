@@ -6,6 +6,9 @@ use dashu_int::UBig;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+mod camera_path;
+use camera_path::CameraPath;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub type JsValue = String;
 
@@ -290,7 +293,7 @@ fn dbig_pair_to_fexpc(zx: &DBig, zy: &DBig) -> FExpC {
 
 // −log10|v|, i.e. how many decimal digits below 1 the value sits. Used to size
 // the Newton precision ladder from a step magnitude or a tolerance.
-fn dbig_neg_log10(v: &DBig) -> f64 {
+pub(crate) fn dbig_neg_log10(v: &DBig) -> f64 {
     let (m, e) = dbig_frexp(v);
     if m == 0.0 {
         return f64::INFINITY;
@@ -332,7 +335,7 @@ pub(crate) fn dbig_i(value: i32) -> DBig {
 /// Exact-ish DBig from an f64 shape factor (aspect, fill, orientation cosines).
 /// Goes through the decimal string so the value keeps the f64's 17 significant
 /// digits — plenty for a framing coefficient, and it never panics.
-fn dbig_f64(value: f64) -> DBig {
+pub(crate) fn dbig_f64(value: f64) -> DBig {
     if !value.is_finite() {
         return dbig_i(0);
     }
@@ -544,6 +547,9 @@ pub struct MandelbrotNavigator {
     transition_duration: f64,
     transition_elapsed: f64,
     transition_export_linear: bool,
+    /// Studio camera path (camera_path.rs): placed at absolute camera times
+    /// through `step_at_transition_time`, like an export transition.
+    export_path: Option<CameraPath>,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -596,6 +602,7 @@ impl MandelbrotNavigator {
             transition_duration: 0.0,
             transition_elapsed: 0.0,
             transition_export_linear: false,
+            export_path: None,
         };
         // A fresh navigator implies its construction scale as a depth floor (a deep preset
         // reset arrives here at its deep scale); default to at least the 1e-30 budget.
@@ -852,6 +859,29 @@ impl MandelbrotNavigator {
         canvas_height: Option<f64>,
         elapsed_seconds: f64,
     ) -> Vec<String> {
+        if let Some(path) = self.export_path.as_ref() {
+            // A path is evaluated at the absolute camera time, clamped to its
+            // span; velocities stay zero so the manual branch below holds still.
+            let t = if elapsed_seconds.is_finite() {
+                elapsed_seconds
+            } else {
+                0.0
+            };
+            let point = path.eval(path.start_time() + t.max(0.0).min(path.duration()));
+            self.cx = point.cx.clone();
+            self.cy = point.cy;
+            self.cx_continuous = self.cx.clone();
+            self.cy_continuous = self.cy.clone();
+            self.scale = point.scale;
+            self.angle = point.angle;
+            self.vscale = DBig::try_from(1).unwrap();
+            self.vangle = 0.0;
+            self.vtx = DBig::try_from(0).unwrap();
+            self.vty = DBig::try_from(0).unwrap();
+            self.ensure_precision();
+            self.reset_step_clock();
+            return self.step_with_delta_time(canvas_width, canvas_height, 0.0);
+        }
         let elapsed = if elapsed_seconds.is_finite() && elapsed_seconds > 0.0 {
             elapsed_seconds.min(self.transition_duration)
         } else {
@@ -1110,7 +1140,9 @@ impl MandelbrotNavigator {
         }
 
         if let (Some(w), Some(h)) = (canvas_width, canvas_height) {
-            let is_zooming = if let (Some(start_scale), Some(target_scale)) =
+            let is_zooming = if self.export_path.is_some() {
+                true
+            } else if let (Some(start_scale), Some(target_scale)) =
                 (&self.transition_start_scale, &self.transition_target_scale)
             {
                 start_scale != target_scale
@@ -1918,7 +1950,40 @@ impl MandelbrotNavigator {
         self.transition_export_linear = true;
     }
 
+    /// Arm a studio camera path: `spec` is `cx|cy|scale|angle|time;...` with
+    /// strictly increasing times, `corner_seconds` the half-window over which
+    /// each interior corner is rounded. Replaces any transition. Returns false
+    /// and leaves the navigator untouched when the spec is malformed.
+    pub fn start_export_path(&mut self, spec: &str, corner_seconds: f64) -> bool {
+        // Precision follows the deepest key, never below the navigator's budget.
+        let probe = match CameraPath::parse(spec, corner_seconds, 64) {
+            Some(path) => path,
+            None => return false,
+        };
+        let prec = digits_for_bits(
+            precision_bits_for_scale(probe.deepest_scale())
+                .max(self.budget_prec)
+                .max(64),
+        );
+        let path = match CameraPath::parse(spec, corner_seconds, prec) {
+            Some(path) => path,
+            None => return false,
+        };
+        self.cancel_transition();
+        self.export_path = Some(path);
+        true
+    }
+
+    pub fn cancel_export_path(&mut self) {
+        self.export_path = None;
+    }
+
+    pub fn has_export_path(&self) -> bool {
+        self.export_path.is_some()
+    }
+
     pub fn cancel_transition(&mut self) {
+        self.export_path = None;
         self.transition_start_cx = None;
         self.transition_start_cy = None;
         self.transition_start_scale = None;
