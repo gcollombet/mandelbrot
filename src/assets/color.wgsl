@@ -265,6 +265,7 @@ fn unpack_albedo(v: f32) -> vec3<f32> {
 }
 // Colour pass with a fresh height raster: raster pixel and d(uv_screen)/d(pixel).
 var<private> castShadowActive: bool = false;
+var<private> castShadowBound: bool = false;
 var<private> castRasterPixel: vec2<f32> = vec2<f32>(0.0);
 var<private> castRasterUvX: vec2<f32> = vec2<f32>(0.0);
 var<private> castRasterUvY: vec2<f32> = vec2<f32>(0.0);
@@ -358,6 +359,18 @@ fn apply_palette_path(depthIn: f32) {
   parameters.textureMappingXScale = path_mix(29u);
   parameters.textureMappingYScale = path_mix(30u);
   parameters.textureMappingMirror = path_choice(31u);
+  parameters.protrusionTerrace = path_mix(33u);
+  parameters.castShadowStrength = path_mix(34u);
+  parameters.castShadowLength = path_mix(35u);
+  parameters.castShadowSoftness = path_mix(36u);
+  parameters.horizonOcclusionStrength = path_mix(37u);
+  parameters.horizonOcclusionRadius = path_mix(38u);
+  parameters.indirectLightStrength = path_mix(39u);
+  // A colour pass reads the occlusion texture only where this pixel's stops light it.
+  if (castShadowBound) {
+    castShadowActive = parameters.castShadowStrength > 0.0 || parameters.horizonOcclusionStrength > 0.0
+      || parameters.indirectLightStrength > 0.0;
+  }
   let light = normalize(vec3<f32>(cos(parameters.lightAngle), sin(parameters.lightAngle), 1.85));
   parameters.lightDirX = light.x; parameters.lightDirY = light.y; parameters.lightDirZ = light.z;
 }
@@ -2864,6 +2877,7 @@ fn begin_cast_shadow(fragCoord: vec2<f32>, pos: vec4<f32>) {
   castRasterPixel = pos.xy;
   castRasterUvX = dpdx(fragCoord);
   castRasterUvY = dpdy(fragCoord);
+  castShadowBound = true;
   castShadowActive = baseParameters.castShadowStrength > 0.0 || baseParameters.horizonOcclusionStrength > 0.0
     || baseParameters.indirectLightStrength > 0.0;
 }

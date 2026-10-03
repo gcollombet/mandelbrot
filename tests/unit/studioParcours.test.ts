@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  addStudioKeyframe, cameraClockAt, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
+  addStudioKeyframe, blendedLook, cameraClockAt, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, snapshotStudioLook, validateStudioParcours,
 } from '../../src/studioParcours'
 
@@ -48,5 +48,21 @@ describe('studio parcours: one track per keyframe', () => {
     addStudioKeyframe(p, 20, { camera: camera('1e-4') }, rampedTime(p, 20))
     expect(keyframeDisplayTime(p, cam)).toBeCloseTo(9, 3)
     expect(cameraClockAt(p, 9).time).toBeCloseTo(cam.time, 3)
+  })
+})
+
+describe('studio look: tilted 3D view', () => {
+  const stops = [{ position: 0, color: '#123456' }, { position: 1, color: '#abcdef' }]
+  it('is saved with the look and defaults to top-down for older looks', () => {
+    expect(snapshotStudioLook({ colorStops: stops } as never)).toMatchObject({ tiltViewTilt: 0, tiltViewHeading: 0, tiltViewRelief: 10, tiltViewInteriorDepth: 1 })
+    expect(snapshotStudioLook({ colorStops: stops, tiltViewTilt: 30, tiltViewHeading: 350 } as never)).toMatchObject({ tiltViewTilt: 30, tiltViewHeading: 350 })
+  })
+  it('mixes between two looks, the heading through the shortest arc', () => {
+    const a = snapshotStudioLook({ colorStops: stops, tiltViewTilt: 10, tiltViewHeading: 350 } as never)
+    const b = snapshotStudioLook({ colorStops: stops, tiltViewTilt: 30, tiltViewHeading: 10, tiltViewRelief: 20 } as never)
+    const mid = blendedLook({ a, b, w: 0.5, fromId: 'a', toId: 'b' })
+    expect(mid.tiltViewTilt).toBe(20)
+    expect(mid.tiltViewHeading).toBeCloseTo(0)
+    expect(mid.tiltViewRelief).toBe(15)
   })
 })

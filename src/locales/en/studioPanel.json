@@ -177,5 +177,15 @@
     "pasteTitle": "Paste the copied look onto this keyframe (Ctrl/Cmd+V)",
     "copied": "Look copied",
     "pasted": "Look pasted"
+  },
+  "view": {
+    "zoomOut": "Zoom the timeline out (-)",
+    "zoomIn": "Zoom the timeline in (+, or wheel)",
+    "fit": "Show the whole parcours (Shift+Z, or double-click the ruler)",
+    "follow": "Auto-scroll: keep the playhead centred during playback (F)"
+  },
+  "markers": {
+    "add": "Add a marker at the playhead (M). Double-click to rename, empty name to delete.",
+    "placeholder": "Marker name"
   }
 }

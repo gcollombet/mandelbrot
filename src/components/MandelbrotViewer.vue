@@ -37,8 +37,8 @@ import {Palette} from '../Palette';
 import {normalizeAnimationConfig} from '../AnimationConfig';
 import {normalizeIterationPaletteCurve} from '../IterationPaletteCurve';
 import {createInterpolatedColorStop, normalizeColorStops} from '../ColorStop';
-import {interpolatePresetAppearance} from '../presetTransition';
-import {snapshotPathAppearance, PATH_GLOBAL_FIELDS, type PathAppearance} from '../palettePath';
+import {interpolatePresetAppearance, TRANSITION_DEFAULTS} from '../presetTransition';
+import {snapshotPathAppearance, PATH_APPEARANCE_FIELDS, type PathAppearance} from '../palettePath';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
 import {kernelApproximationMode} from '../Engine';
@@ -122,11 +122,26 @@ const stillHdrWarning = ref('');
 const hdrSwitchBusy = ref(false);
 const outputDiagnostics = ref<ReturnType<typeof readOutputDiagnostics>>(null);
 function readOutputDiagnostics() { return mandelbrotEngine.value?.outputDiagnostics ?? null; }
+const HDR_DISPLAY_KEY = 'mandelbrot_hdr_display';
+/** Re-enable the HDR display chosen in a previous session. A screen that no
+ *  longer supports it keeps SDR silently; the stored choice is left as is. */
+async function restoreHdrDisplay(engine: Engine) {
+  let wanted = false;
+  try { wanted = localStorage.getItem(HDR_DISPLAY_KEY) === '1'; } catch { /* ignore */ }
+  if (!wanted || engine.outputDiagnostics.hdrRequested) return;
+  hdrSwitchBusy.value = true;
+  try { await engine.setHdrDisplay(true); }
+  catch { /* not available on this display */ }
+  finally { outputDiagnostics.value = readOutputDiagnostics(); hdrSwitchBusy.value = false; }
+}
 async function toggleHdrDisplay() {
   const engine = mandelbrotEngine.value;
   if (!engine || hdrSwitchBusy.value || stillExport.value.active) return;
   hdrSwitchBusy.value = true;
-  try { await engine.setHdrDisplay(!engine.outputDiagnostics.hdrRequested); }
+  try {
+    await engine.setHdrDisplay(!engine.outputDiagnostics.hdrRequested);
+    try { localStorage.setItem(HDR_DISPLAY_KEY, engine.outputDiagnostics.hdrRequested ? '1' : '0'); } catch { /* ignore */ }
+  }
   catch (error) { showHudStatus(error instanceof Error ? error.message : String(error), 8000); }
   finally { outputDiagnostics.value = readOutputDiagnostics(); hdrSwitchBusy.value = false; }
 }
@@ -877,6 +892,11 @@ function applyPresetRecord(record: PresetRecord): void {
   saved.iterationPaletteCurve = normalizeIterationPaletteCurve(saved.iterationPaletteCurve);
   saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
   delete (saved as Partial<MandelbrotParams>).textureMappingMode;
+  // Lighting added after a preset was saved stays off for that preset.
+  for (const field of ['castShadowStrength', 'castShadowLength', 'castShadowSoftness', 'horizonOcclusionStrength',
+    'horizonOcclusionRadius', 'indirectLightStrength', 'reliefClosing', 'protrusionTerrace'] as const) {
+    saved[field] ??= TRANSITION_DEFAULTS[field];
+  }
   saved.activateAnimate = mandelbrotParams.value.activateAnimate;
   mandelbrotParams.value = preserveSessionPerformanceFields(saved, mandelbrotParams.value);
 }
@@ -1018,6 +1038,7 @@ async function applySelectedTexturesToEngine() {
 
 function onEngineReady(engine: Engine) {
   mandelbrotEngine.value = engine;
+  void restoreHdrDisplay(engine);
   applyApproximationToEngine();
   applyBlaTuningToEngine();
   applyPrecisionBudgetToEngine();
@@ -1912,7 +1933,7 @@ function applyPathAppearance(source: PathAppearance): void {
   p.paletteMirror = !!appearance.paletteMirror;
   p.iterationPaletteCurve = normalizeIterationPaletteCurve(appearance.iterationPaletteCurve);
   p.textureMapping = normalizeTextureMappingFromLegacy(appearance);
-  for (const field of PATH_GLOBAL_FIELDS) {
+  for (const field of PATH_APPEARANCE_FIELDS) {
     if (appearance[field] != null) (p as any)[field] = appearance[field];
   }
   for (const field of ['textureGuid', 'textureName', 'skyboxGuid', 'skyboxName'] as const) {

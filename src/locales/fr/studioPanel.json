@@ -177,5 +177,15 @@
     "pasteTitle": "Coller le look copié sur ce keyframe (Ctrl/Cmd+V)",
     "copied": "Look copié",
     "pasted": "Look collé"
+  },
+  "view": {
+    "zoomOut": "Dézoomer la timeline (-)",
+    "zoomIn": "Zoomer la timeline (+, ou molette)",
+    "fit": "Voir tout le parcours (Maj+Z, ou double-clic sur la règle)",
+    "follow": "Défilement automatique : garder le curseur centré pendant la lecture (F)"
+  },
+  "markers": {
+    "add": "Poser un marqueur au curseur (M). Double-clic pour renommer, nom vide pour supprimer.",
+    "placeholder": "Nom du marqueur"
   }
 }

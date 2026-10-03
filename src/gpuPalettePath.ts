@@ -1,7 +1,7 @@
 import { t } from './i18n'
 import { packTextureLayers } from './mipmaps'
 import { PALETTE_TEXTURE_ROWS } from './Palette'
-import { PALETTE_PATH_TEXTURE_BUDGET, PATH_NODE_FLOATS, pathNodeValues, type PalettePath, type PathAppearance } from './palettePath'
+import { PALETTE_PATH_TEXTURE_BUDGET, PATH_NODE_FLOATS, pathNodeValues, pathAppearanceLit, type PalettePath, type PathAppearance } from './palettePath'
 
 export class GpuPalettePath {
     readonly palettes: GPUTexture
@@ -10,8 +10,11 @@ export class GpuPalettePath {
     readonly buffer: GPUBuffer
     readonly path: PalettePath
     readonly stops
-    constructor(privateDevice: GPUDevice, path: PalettePath, base: PathAppearance, data: Uint16Array[], images: GPUTexture[], indices: { tile: number; sky: number }[]) {
+    /** A stop (or the manual look) uses a light marched on the height raster. */
+    readonly lit: boolean
+    constructor(privateDevice: GPUDevice, path: PalettePath, base: PathAppearance, data: Uint16Array[], images: GPUTexture[], indices: { tile: number; sky: number }[], lights = true) {
         this.path = path
+        this.lit = lights && [base, ...path.stops.map(s => s.appearance)].some(pathAppearanceLit)
         const device = privateDevice
         this.stops = [base, ...path.stops.map(s => s.appearance)].flatMap(a => a.colorStops)
         const tileIds = [...new Set(indices.map(i => i.tile))], skyIds = [...new Set(indices.map(i => i.sky))]
@@ -25,7 +28,7 @@ export class GpuPalettePath {
         data.forEach((values, layer) => device.queue.writeTexture({ texture: this.palettes, origin: [0, 0, layer] }, values.buffer as ArrayBuffer, { bytesPerRow: 4096 * 8 }, [4096, PALETTE_TEXTURE_ROWS]))
         const metadata = new Float32Array(12 + PATH_NODE_FLOATS * data.length)
         const nodes = [{ id: 'manual', magnitude: 0, name: 'Manuelle', curve: 'linear' as const, appearance: base }, ...path.stops]
-        nodes.forEach((stop, i) => metadata.set(pathNodeValues({ ...stop, magnitude: stop.magnitude - path.stops[0].magnitude }, tileIds.indexOf(indices[i].tile), skyIds.indexOf(indices[i].sky), this.sky.mipLevelCount), 12 + i * PATH_NODE_FLOATS))
+        nodes.forEach((stop, i) => metadata.set(pathNodeValues({ ...stop, magnitude: stop.magnitude - path.stops[0].magnitude }, tileIds.indexOf(indices[i].tile), skyIds.indexOf(indices[i].sky), this.sky.mipLevelCount, lights), 12 + i * PATH_NODE_FLOATS))
         this.buffer = device.createBuffer({ label: 'Palette path stops', size: metadata.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST })
         device.queue.writeBuffer(this.buffer, 0, metadata)
         } catch (error) {

@@ -3,7 +3,7 @@ import { STEREO_RELIEF_DEFAULT, type StereoColorPass } from './stereoVideo'
 import { CAST_SHADOW_HEIGHT_FORMAT, CAST_SHADOW_NO_SURFACE, CAST_SHADOW_REQUIRED_SAMPLED_TEXTURES, LIGHT_OCCLUSION_FORMAT, LIGHT_OCCLUSION_LAYERS, withoutCastShadowBinding } from './castShadow'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
-import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
+import {validatePalettePath, snapshotPathAppearance, PATH_APPEARANCE_FIELDS, pathAppearanceLit, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
 import {GpuPaletteTransition} from './gpuPaletteTransition'
 import type { ExpmapKernelProjection } from './expmap/producerProjection'
 import type { MinibrotSearchRequest, MinibrotSearchResponse } from './minibrotWorker'
@@ -4690,9 +4690,7 @@ export class Engine {
 
         // ── Terminal color branches: direct, AA, or settled rotation ──────
         const castShadows = this.castShadowsActive(renderOptions)
-        this.lightOcclusionActive = this.castShadowSupported
-            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0
-                || (renderOptions.indirectLightStrength ?? 0) > 0)
+        this.lightOcclusionActive = this.castShadowSupported && this.reliefLightsRequested(renderOptions)
         const tiltView = this.tiltViewActive(renderOptions)
         let tiltPresent: GPUBindGroup | undefined
         if (castShadows) this.prepareCastShadowRaster(Math.max(this.width, this.neutralSize), Math.max(this.height, this.neutralSize))
@@ -5431,7 +5429,7 @@ export class Engine {
             this.palettePathStatus = ''
             return
         }
-        const globals = JSON.stringify([options.interpolationMode, ...PATH_GLOBAL_FIELDS.map(f => options[f]),
+        const globals = JSON.stringify([options.interpolationMode, ...PATH_APPEARANCE_FIELDS.map(f => options[f]),
             options.textureName, options.textureGuid, options.skyboxName, options.skyboxGuid,
             options.textureMapping, options.paletteMirror, options.iterationPaletteCurve])
         if (input === this.palettePathInput && options.colorStops === this.palettePathBaseStops && globals === this.palettePathBaseGlobals) return
@@ -5453,7 +5451,7 @@ export class Engine {
                     if (generation !== this.palettePathGeneration || this.destroyed) return
                 }
                 const data = [base, ...path.stops.map(s => s.appearance)].map(p => float32ArrayToFloat16(new Palette(p.colorStops, p.interpolationMode).generateTexture().data))
-                prepared = new GpuPalettePath(this.device, path, base, data, textures, assets.indices)
+                prepared = new GpuPalettePath(this.device, path, base, data, textures, assets.indices, this.castShadowSupported)
                 await this.ensurePathColorPipelines()
                 if (generation !== this.palettePathGeneration || this.destroyed) { prepared.destroy(); return }
             } finally { assets.dispose(); textures.forEach(t => t.destroy()) }
@@ -5688,8 +5686,13 @@ export class Engine {
     /** True when the next colour pass should get a fresh height raster. */
     private castShadowsActive(renderOptions: RenderOptions): boolean {
         return this.castShadowSupported && !!this.pipelineCastHeight
-            && ((renderOptions.castShadowStrength ?? 0) > 0 || (renderOptions.horizonOcclusionStrength ?? 0) > 0
-                || (renderOptions.indirectLightStrength ?? 0) > 0 || this.tiltViewActive(renderOptions))
+            && (this.reliefLightsRequested(renderOptions) || this.tiltViewActive(renderOptions))
+    }
+
+    /** Cast shadows, horizon occlusion or indirect light: asked by the current
+     *  settings or by a stop of the bound palette path. */
+    private reliefLightsRequested(renderOptions: RenderOptions): boolean {
+        return pathAppearanceLit(renderOptions) || !!this.palettePathGpu?.lit
     }
 
     /** Tilted 3D view: needs the height raster, so the same device support. */

@@ -3,7 +3,7 @@ import { Palette } from './Palette'
 import { applyStopTransferCurve, type ColorStop } from './ColorStop'
 import { EFFECT_FIELD_NAMES } from './effectFieldConfig'
 import type { MandelbrotParams } from './Mandelbrot'
-import { PATH_GLOBAL_FIELDS, pathSegment, snapshotPathAppearance, validatePalettePath, type PalettePath } from './palettePath'
+import { PATH_APPEARANCE_FIELDS, pathSegment, snapshotPathAppearance, validatePalettePath, type PalettePath } from './palettePath'
 import type { PaletteRecord } from './paletteStore'
 
 /** Editable approximation of the GPU's palette rows, including every material field. */
@@ -20,7 +20,7 @@ export function snapshotPalettePath(path: PalettePath, magnitude: number, manual
     // Discrete controls switch at 50%, just like path_choice in color.wgsl.
     const out: PaletteRecord = { ...shared, ...snapshotPathAppearance(t < 0.5 ? a : b), name, interpolationMode: 'rgb' }
     const lerp = (x: number, y: number) => x + (y - x) * t
-    for (const field of PATH_GLOBAL_FIELDS) out[field] = lerp(a[field]!, b[field]!)
+    for (const field of PATH_APPEARANCE_FIELDS) out[field] = lerp(a[field]!, b[field]!)
     out.textureMapping = { ...out.textureMapping!, xScale: lerp(a.textureMapping!.xScale, b.textureMapping!.xScale), yScale: lerp(a.textureMapping!.yScale, b.textureMapping!.yScale) }
     const pa = new Palette(a.colorStops, a.interpolationMode), pb = new Palette(b.colorStops, b.interpolationMode)
     const mixColor = (x: string, y: string) => {

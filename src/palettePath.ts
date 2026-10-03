@@ -17,6 +17,16 @@ export const PATH_GLOBAL_FIELDS = [
     'gradeContrast', 'gradeSaturation', 'phaseColoringStrength',
     'paletteScreenShiftX', 'paletteScreenShiftY',
 ] as const
+// Relief lighting carried by each stop. Packed after the other node scalars
+// (slots 33..39), so the fields above keep their shader indices.
+export const PATH_LIGHT_FIELDS = [
+    'protrusionTerrace', 'castShadowStrength', 'castShadowLength', 'castShadowSoftness',
+    'horizonOcclusionStrength', 'horizonOcclusionRadius', 'indirectLightStrength',
+] as const
+export const PATH_APPEARANCE_FIELDS = [...PATH_GLOBAL_FIELDS, ...PATH_LIGHT_FIELDS] as const
+/** True when a stop turns on a light that needs the relief height raster. */
+export const pathAppearanceLit = (a: Partial<MandelbrotParams>): boolean =>
+    (a.castShadowStrength ?? 0) > 0 || (a.horizonOcclusionStrength ?? 0) > 0 || (a.indirectLightStrength ?? 0) > 0
 export type PathAppearance = Pick<MandelbrotParams, 'colorStops' | 'interpolationMode'> & Partial<MandelbrotParams>
 export type PalettePathStop = { id: string; magnitude: number; name: string; appearance: PathAppearance; curve: StopTransferCurve }
 export type PalettePath = {
@@ -35,7 +45,7 @@ export function snapshotPathAppearance(source: Partial<MandelbrotParams>): PathA
         iterationPaletteCurve: normalizeIterationPaletteCurve(source.iterationPaletteCurve),
         textureMapping: normalizeTextureMappingFromLegacy(source),
     }
-    for (const field of PATH_GLOBAL_FIELDS) {
+    for (const field of PATH_APPEARANCE_FIELDS) {
         const value = source[field] ?? TRANSITION_DEFAULTS[field]
         if (!Number.isFinite(value)) throw new Error(t('palettes.invalidParam', { field }))
         out[field] = value
@@ -86,14 +96,16 @@ export function pathSegment(path: PalettePath, magnitude: number): { a: number; 
     return { a: stops.length - 1, b: stops.length - 1, t: 0 }
 }
 
-// GPU nodes: depth/curve/image layers followed by 32 appearance scalars.
+// GPU nodes: depth/curve/image layers followed by the appearance scalars.
+// `lights` false (device without the height raster) packs the cast lights off.
 export const PATH_NODE_FLOATS = 40
-export function pathNodeValues(stop: PalettePathStop, tileLayer: number, skyLayer: number, skyLevels: number): number[] {
+export function pathNodeValues(stop: PalettePathStop, tileLayer: number, skyLayer: number, skyLevels: number, lights = true): number[] {
     const a = stop.appearance, mapping = normalizeTextureMappingFromLegacy(a)
     const values = [stop.magnitude, ['linear', 'gaussian', 'square', 'exponential'].indexOf(stop.curve), tileLayer, skyLayer,
         ...PATH_GLOBAL_FIELDS.map(field => a[field] ?? TRANSITION_DEFAULTS[field]),
         a.paletteMirror ? 1 : 0, iterationPaletteCurveCode(normalizeIterationPaletteCurve(a.iterationPaletteCurve)),
-        TEXTURE_MAPPING_VARIABLE_IDS[mapping.xVariable], TEXTURE_MAPPING_VARIABLE_IDS[mapping.yVariable], mapping.xScale, mapping.yScale, mapping.mirrored ? 1 : 0, skyLevels]
+        TEXTURE_MAPPING_VARIABLE_IDS[mapping.xVariable], TEXTURE_MAPPING_VARIABLE_IDS[mapping.yVariable], mapping.xScale, mapping.yScale, mapping.mirrored ? 1 : 0, skyLevels,
+        ...PATH_LIGHT_FIELDS.map(field => lights || field === 'protrusionTerrace' ? a[field] ?? TRANSITION_DEFAULTS[field] : 0)]
     while (values.length < PATH_NODE_FLOATS) values.push(0)
     return values
 }

@@ -55,5 +55,10 @@ describe('palette path contracts', () => {
         expect(values.slice(0, 4)).toEqual([1, 0, 4, 7])
         expect(values[10]).toBe(0.8)
         expect(values[32]).toBe(11)
+        // Relief lighting sits after the older scalars and defaults to off.
+        expect(values.slice(33)).toEqual([0, 0, 4, 0.35, 0, 0.1, 0])
+        p.stops[0].appearance = snapshotPathAppearance({ ...appearance, castShadowStrength: 0.7, indirectLightStrength: 1.5 })
+        expect(pathNodeValues(p.stops[0], 4, 7, 11).slice(33)).toEqual([0, 0.7, 4, 0.35, 0, 0.1, 1.5])
+        expect(pathNodeValues(p.stops[0], 4, 7, 11, false).slice(33)).toEqual([0, 0, 0, 0, 0, 0, 0])
     })
 })

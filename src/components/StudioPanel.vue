@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { centerOn, clampView, revealTime, rulerStep, snapTime, viewSpan, zoomAround, type TimelineView } from '../studioTimelineView'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Palette } from '../Palette'
 import type { MandelbrotParams } from '../Mandelbrot'
@@ -9,7 +10,7 @@ import {
   keyframeDisplayTime, keyframeTimes, keyframeTrack, lookKeyframes, lookStateAt, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, removeStudioKeyframe, snapshotStudioCamera, snapshotStudioLook, validateStudioParcours,
   STUDIO_CAMERA_EASES, STUDIO_MAX_DURATION, STUDIO_MIN_DURATION,
-  type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
+  STUDIO_MAX_MARKERS, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
 } from '../studioParcours'
 import { StudioHistory } from '../studioHistory'
 import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
@@ -210,11 +211,13 @@ async function refreshLibrary() { try { saved.value = await readStudioParcoursRe
 function replaceParcours(next: StudioParcours) {
   Object.assign(parcours, JSON.parse(JSON.stringify(next)))
   parcours.keyframes = next.keyframes.map(k => JSON.parse(JSON.stringify(k)))
+  parcours.markers = (next.markers ?? []).map(m => ({ ...m }))
   selectedId.value = parcours.keyframes[0]?.id ?? null
   pending.camera = null
   pending.look = null
   history.clear()
   historyVersion.value++
+  view.zoom = 1; view.start = 0
   player.pause()
   time.value = 0
   void restoreAudio()
@@ -470,7 +473,12 @@ function handleKey(e: KeyboardEvent): boolean {
   if (e.code === 'Space') { togglePlay(); return true }
   // Physical keys: Alt+K types "˚" on a Mac layout.
   if (e.code === 'KeyK') { if (!e.repeat) addKeyframe(e.shiftKey ? 'camera' : e.altKey ? 'look' : 'both'); return true }
+  if (e.code === 'KeyZ' && e.shiftKey) { zoomFit(); return true }
   switch (e.key.toLowerCase()) {
+    case '+': case '=': zoomBy(1.5); return true
+    case '-': case '_': zoomBy(1 / 1.5); return true
+    case 'f': toggleFollow(); return true
+    case 'm': if (!e.repeat) addMarker(); return true
     case 'j': stepKeyframe(-1); return true
     case 'l': stepKeyframe(1); return true
     case 'home': seek(0); return true
@@ -490,14 +498,46 @@ const TRACKS = [
   { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 }, { id: 'audio', h: 56 }, { id: 'modulator', h: 28 },
 ] as const
 let frame: number | null = null
-let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean } | null = null
+let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean } | { kind: 'marker'; id: string; moved: boolean } | { kind: 'pan'; x: number; start: number } | null = null
 let lastSeek = 0
 const paletteCache = new Map<string, string>()
 
 function invalidate() { if (frame === null) frame = requestAnimationFrame(() => { frame = null; draw() }) }
 function cssVar(name: string): string { return canvasRef.value ? getComputedStyle(canvasRef.value).getPropertyValue(name).trim() : '#888' }
-function xOf(seconds: number, width: number) { return PAD + (width - 2 * PAD) * seconds / Math.max(1e-6, parcours.durationSeconds) }
-function tOf(x: number, width: number) { return Math.max(0, Math.min(parcours.durationSeconds, (x - PAD) / (width - 2 * PAD) * parcours.durationSeconds)) }
+// Horizontal zoom and scroll (studioTimelineView.ts). Zoom 1 fits the parcours.
+const FOLLOW_KEY = 'mandelbrot_studio_follow'
+const view = reactive<TimelineView>({ zoom: 1, start: 0 })
+const follow = ref((() => { try { return localStorage.getItem(FOLLOW_KEY) !== '0' } catch { return true } })())
+let viewTime = -1
+/** Deepest zoom: one frame about 14 px wide. */
+function maxZoom(width: number) { return Math.max(1, parcours.durationSeconds * FPS * 14 / Math.max(1, width - 2 * PAD)) }
+function canvasWidth() { return Math.max(120, canvasRef.value?.parentElement?.getBoundingClientRect().width ?? 120) }
+function setView(next: TimelineView) { Object.assign(view, clampView(next, parcours.durationSeconds, maxZoom(canvasWidth()))); invalidate() }
+/** Zoom from a button or a key: around the playhead when it is in view. */
+function zoomBy(factor: number, anchor?: number) {
+  const span = viewSpan(view, parcours.durationSeconds), head = time.value
+  const at = anchor ?? (head >= view.start && head <= view.start + span ? head : view.start + span / 2)
+  setView(zoomAround(view, parcours.durationSeconds, factor, at, maxZoom(canvasWidth())))
+}
+function zoomFit() { setView({ zoom: 1, start: 0 }) }
+function toggleFollow() {
+  follow.value = !follow.value
+  try { localStorage.setItem(FOLLOW_KEY, follow.value ? '1' : '0') } catch { /* ignore */ }
+  if (follow.value) setView(centerOn(view, parcours.durationSeconds, time.value))
+}
+/** Keep the playhead in view: centred while playing in follow mode, otherwise
+ *  the window only jumps when the playhead leaves it. */
+function syncView(width: number) {
+  const duration = parcours.durationSeconds
+  let next = clampView(view, duration, maxZoom(width))
+  if (time.value !== viewTime && (!drag || drag.kind === 'key')) {
+    next = follow.value && playing.value ? centerOn(next, duration, time.value) : revealTime(next, duration, time.value)
+  }
+  viewTime = time.value
+  Object.assign(view, next)
+}
+function xOf(seconds: number, width: number) { return PAD + (width - 2 * PAD) * (seconds - view.start) / Math.max(1e-6, viewSpan(view, parcours.durationSeconds)) }
+function tOf(x: number, width: number) { return Math.max(0, Math.min(parcours.durationSeconds, view.start + (x - PAD) / (width - 2 * PAD) * viewSpan(view, parcours.durationSeconds))) }
 function lookGradient(look: StudioLook): string {
   const key = JSON.stringify([look.colorStops, look.interpolationMode])
   let g = paletteCache.get(key)
@@ -527,6 +567,7 @@ function draw() {
   const dpr = window.devicePixelRatio || 1
   const w = Math.max(120, box.width), h = RULER + TRACKS.reduce((a, b) => a + b.h, 0)
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.height = `${h}px` }
+  syncView(w)
   const c = canvas.getContext('2d')!
   c.setTransform(dpr, 0, 0, dpr, 0, 0)
   c.clearRect(0, 0, w, h)
@@ -536,11 +577,18 @@ function draw() {
   c.font = '10px "JetBrains Mono", ui-monospace, monospace'; c.textBaseline = 'middle'
   // Ruler
   const duration = parcours.durationSeconds
-  const tickStep = duration <= 20 ? 1 : duration <= 60 ? 5 : duration <= 300 ? 15 : duration <= 1200 ? 60 : 300
-  for (let s = 0; s <= duration + 1e-6; s += tickStep) {
-    const x = xOf(s, w), major = Math.round(s / tickStep) % (duration <= 60 ? 2 : 4) === 0
+  const span = viewSpan(view, duration), viewEnd = Math.min(duration, view.start + span)
+  const { step: tickStep, labelEvery } = rulerStep((w - 2 * PAD) / span, FPS)
+  for (let i = Math.floor(view.start / tickStep); i * tickStep <= viewEnd + 1e-6; i++) {
+    const s = i * tickStep, x = xOf(s, w), major = i % labelEvery === 0
+    if (x < PAD - 0.5) continue
     c.fillStyle = line; c.fillRect(x, RULER - (major ? 8 : 4), 1, major ? 8 : 4)
-    if (major) { c.fillStyle = ink3; c.fillText(formatSeconds(s), x + 3, RULER - 7) }
+    if (major) { c.fillStyle = ink3; c.fillText(tickStep < 1 ? formatTimecode(s + 0.5 / FPS, FPS) : formatSeconds(s), x + 3, RULER - 7) }
+  }
+  // Zoomed in: a thin bar shows which part of the parcours is in view.
+  if (view.zoom > 1) {
+    c.fillStyle = line; c.fillRect(PAD, 0, w - 2 * PAD, 2)
+    c.fillStyle = ink3; c.fillRect(PAD + (w - 2 * PAD) * view.start / duration, 0, Math.max(6, (w - 2 * PAD) / view.zoom), 2)
   }
   for (const tr of TRACKS) { c.fillStyle = line; c.fillRect(0, r[tr.id][1] - 1, w, 1) }
   // Ramps: shade the eased ends of the camera track.
@@ -590,11 +638,11 @@ function draw() {
       const holdX = x0 + (x1 - x0) * next.hold
       c.fillStyle = 'rgba(0,0,0,0.45)'; c.fillRect(holdX, y0, x1 - holdX, bandH)
       c.strokeStyle = lookColor; c.lineWidth = 1; c.beginPath()
-      for (let x = holdX; x <= x1; x += 2) {
+      for (let x = Math.max(holdX, 0); x <= Math.min(x1, w); x += 2) {
         const f = (x - holdX) / Math.max(1, x1 - holdX)
         const state = lookStateAt(parcours, tOf(x, w))?.w ?? f
         const yy = y0 + bandH - bandH * state
-        if (x === holdX) c.moveTo(x, yy); else c.lineTo(x, yy)
+        if (x === Math.max(holdX, 0)) c.moveTo(x, yy); else c.lineTo(x, yy)
       }
       c.stroke()
     }
@@ -649,11 +697,97 @@ function draw() {
       c.fillStyle = ink3; c.fillText(`${t(`studioPanel.features.${m.feature}`)} → ${t(`studioPanel.targets.${m.target}`)} ×${m.amount.toFixed(2)} · A ${m.attackMs} ms · R ${m.releaseMs} ms`, PAD + 4, y0 + 8)
     } else { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyModulator'), PAD + 4, y0 + hh / 2) }
   }
+  // Markers: a flag on the ruler, a faint line down the tracks.
+  const markerColor = 'oklch(0.8 0.15 150)'
+  for (const m of parcours.markers) {
+    const mx = xOf(m.time, w)
+    if (mx < 0 || mx > w) continue
+    c.fillStyle = markerColor; c.globalAlpha = 0.25; c.fillRect(mx - 0.5, RULER, 1, h - RULER); c.globalAlpha = 1
+    c.beginPath(); c.moveTo(mx - 4, 3); c.lineTo(mx + 4, 3); c.lineTo(mx + 4, 9); c.lineTo(mx, 13); c.lineTo(mx - 4, 9); c.fill()
+    if (m.name && markerEdit.value?.id !== m.id) {
+      const tw = c.measureText(m.name).width
+      c.fillStyle = 'rgba(0,0,0,0.55)'; c.fillRect(mx + 6, 2, tw + 6, 12)
+      c.fillStyle = markerColor; c.fillText(m.name, mx + 9, 8.5)
+    }
+  }
+  // Magnet guide: what the dragged item is stuck to.
+  if (snapGuide !== null) {
+    c.fillStyle = 'oklch(0.82 0.16 95)'; c.globalAlpha = 0.8
+    c.fillRect(xOf(snapGuide, w) - 0.5, RULER, 1, h - RULER)
+    c.globalAlpha = 1
+  }
   // Playhead
   const x = xOf(Math.min(time.value, duration), w)
   c.fillStyle = recording.value ? red : ink
   c.fillRect(x - 0.5, 0, 1, h)
   c.beginPath(); c.moveTo(x - 6, 0); c.lineTo(x + 6, 0); c.lineTo(x, 8); c.fill()
+}
+
+// ── Markers ──
+// Named points on the ruler (M). Drag to move, double-click to rename, an
+// empty name deletes. They are magnet targets and never affect the render.
+const markerEdit = ref<{ id: string; x: number; name: string } | null>(null)
+const markerInput = ref<HTMLInputElement | null>(null)
+function markerAt(px: number, py: number, width: number): StudioMarker | null {
+  if (py >= RULER) return null
+  let best: StudioMarker | null = null, distance = 7
+  for (const m of parcours.markers) {
+    const d = Math.abs(px - xOf(m.time, width))
+    if (d < distance) { best = m; distance = d }
+  }
+  return best
+}
+function editMarker(m: StudioMarker) {
+  markerEdit.value = { id: m.id, x: Math.max(0, Math.min(canvasWidth() - 130, xOf(m.time, canvasWidth()))), name: m.name }
+  void nextTick(() => { markerInput.value?.focus(); markerInput.value?.select() })
+}
+function addMarker() {
+  if (parcours.markers.length >= STUDIO_MAX_MARKERS) return
+  const existing = parcours.markers.find(m => Math.abs(m.time - time.value) < 0.5 / FPS)
+  if (existing) { editMarker(existing); return }
+  recordEdit()
+  const marker: StudioMarker = { id: crypto.randomUUID(), time: time.value, name: '' }
+  parcours.markers.push(marker)
+  parcours.markers.sort((a, b) => a.time - b.time)
+  invalidate()
+  editMarker(marker)
+}
+function commitMarker(keep = true) {
+  const edit = markerEdit.value
+  if (!edit) return
+  markerEdit.value = null
+  const m = parcours.markers.find(x => x.id === edit.id)
+  if (!m) return
+  const name = edit.name.trim().slice(0, 40)
+  if (keep && name) { if (name !== m.name) { recordEdit(); m.name = name } }
+  // Empty name, or Escape on a marker that never had one: remove it.
+  else if (!name || !m.name) { recordEdit(); parcours.markers = parcours.markers.filter(x => x.id !== m.id) }
+  invalidate()
+}
+
+// ── Magnet ──
+// A dragged playhead or keyframe sticks to the other keyframes, then to the
+// music (sections, beats), then to whole seconds. Shift turns it off.
+const SNAP_PIXELS = 7
+let snapGuide: number | null = null
+function snapped(value: number, width: number, e: PointerEvent, exceptId?: string): number {
+  snapGuide = null
+  if (e.shiftKey) return value
+  const duration = parcours.durationSeconds
+  const pixelsPerSecond = (width - 2 * PAD) / viewSpan(view, duration)
+  const cams = cameraKeyframes(parcours)
+  const keys = parcours.keyframes.filter(k => k.id !== exceptId).map(k => keyframeDisplayTime(parcours, k, cams))
+  const groups: number[][] = [[...keys, ...parcours.markers.filter(m => m.id !== exceptId).map(m => m.time), 0, duration]]
+  const a = audio.value?.analysis
+  if (a) {
+    groups.push(a.sections)
+    // Targets closer than the magnet's reach would make every position stick.
+    if (a.bpm > 0 && 60 / a.bpm * pixelsPerSecond >= 3 * SNAP_PIXELS) groups.push(a.beats)
+  }
+  if (pixelsPerSecond >= 3 * SNAP_PIXELS) groups.push([Math.round(value)])
+  const hit = snapTime(value, groups, SNAP_PIXELS / pixelsPerSecond)
+  if (hit.snapped) snapGuide = hit.time
+  return Math.max(0, Math.min(duration, hit.time))
 }
 
 function hitKeyframe(px: number, py: number, width: number): StudioKeyframe | null {
@@ -673,22 +807,38 @@ function onPointerDown(e: PointerEvent) {
   if (!canvas) return
   const box = canvas.getBoundingClientRect(), px = e.clientX - box.left, py = e.clientY - box.top
   canvas.setPointerCapture(e.pointerId)
+  // Middle button, or Alt + drag: scroll the timeline.
+  if (e.button === 1 || e.altKey) { e.preventDefault(); drag = { kind: 'pan', x: e.clientX, start: view.start }; return }
+  const marker = markerAt(px, py, box.width)
+  if (marker) { drag = { kind: 'marker', id: marker.id, moved: false }; return }
   const k = hitKeyframe(px, py, box.width)
   if (k) { selectKeyframe(k); drag = { kind: 'key', id: k.id, moved: false } }
-  else { drag = { kind: 'head' }; throttledSeek(tOf(px, box.width), true) }
+  else { drag = { kind: 'head' }; throttledSeek(snapped(tOf(px, box.width), box.width, e), true) }
   invalidate()
 }
 function onPointerMove(e: PointerEvent) {
   const canvas = canvasRef.value
   if (!drag || !canvas) return
   const box = canvas.getBoundingClientRect(), value = tOf(e.clientX - box.left, box.width)
-  if (drag.kind === 'head') { throttledSeek(value, false); return }
+  if (drag.kind === 'pan') {
+    setView({ zoom: view.zoom, start: drag.start - (e.clientX - drag.x) / (box.width - 2 * PAD) * viewSpan(view, parcours.durationSeconds) })
+    return
+  }
+  if (drag.kind === 'head') { throttledSeek(snapped(value, box.width, e), false); return }
+  if (drag.kind === 'marker') {
+    const markerDrag = drag, m = parcours.markers.find(x => x.id === markerDrag.id)
+    if (!m) return
+    if (!markerDrag.moved) { recordEdit(); markerDrag.moved = true }
+    m.time = Math.round(snapped(value, box.width, e, m.id) * FPS) / FPS
+    invalidate()
+    return
+  }
   const keyDrag = drag
   const k = parcours.keyframes.find(x => x.id === keyDrag.id)
   if (!k) return
   if (!keyDrag.moved) { recordEdit(); keyDrag.moved = true }
   // The playhead rides with the keyframe, so it stays the one being edited.
-  const at = Math.round(value * FPS) / FPS
+  const at = Math.round(snapped(value, box.width, e, k.id) * FPS) / FPS
   moveStudioKeyframe(parcours, k.id, k.camera ? rampedTime(parcours, at) : at)
   time.value = displayTime(k)
   invalidate()
@@ -697,9 +847,41 @@ function onPointerUp(e: PointerEvent) {
   const canvas = canvasRef.value
   if (!drag || !canvas) return
   const box = canvas.getBoundingClientRect(), value = tOf(e.clientX - box.left, box.width)
-  if (drag.kind === 'head') throttledSeek(value, true)
-  else if (drag.moved) afterEdit()
+  if (drag.kind === 'head') throttledSeek(snapped(value, box.width, e), true)
+  else if (drag.kind === 'key' && drag.moved) afterEdit()
+  else if (drag.kind === 'marker') {
+    // A plain click on a marker jumps to it.
+    const m = parcours.markers.find(x => x.id === (drag as { id: string }).id)
+    if (m && !drag.moved) seek(m.time)
+    else parcours.markers.sort((a, b) => a.time - b.time)
+  }
   drag = null
+  snapGuide = null
+  invalidate()
+}
+/** Double-click on the ruler: fit the whole parcours. */
+function onDoubleClick(e: MouseEvent) {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const box = canvas.getBoundingClientRect()
+  const marker = markerAt(e.clientX - box.left, e.clientY - box.top, box.width)
+  if (marker) editMarker(marker)
+  else if (e.clientY - box.top < RULER) zoomFit()
+}
+/** Wheel: zoom around the pointer. Horizontal wheel or Shift + wheel: scroll. */
+function onWheel(e: WheelEvent) {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const box = canvas.getBoundingClientRect(), unit = e.deltaMode === 1 ? 16 : 1
+  const duration = parcours.durationSeconds, inner = box.width - 2 * PAD
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    const delta = (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) * unit
+    setView({ zoom: view.zoom, start: view.start + delta / inner * viewSpan(view, duration) })
+    return
+  }
+  // Following the playhead: it is the anchor, the window stays centred on it.
+  const anchor = follow.value && playing.value ? time.value : view.start + (e.clientX - box.left - PAD) / inner * viewSpan(view, duration)
+  zoomBy(Math.exp(-e.deltaY * unit * 0.0025), Math.max(0, Math.min(duration, anchor)))
 }
 /** Scrubbing teleports the camera and resets the reference orbit: cap the rate. */
 function throttledSeek(value: number, force: boolean) {
@@ -801,7 +983,13 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
     <div class="studio-main">
       <div class="studio-timeline">
         <div class="studio-heads">
-          <div class="ruler">TC · {{ FPS }} fps</div>
+          <div class="ruler" :title="`TC · ${FPS} fps`">
+            <button class="vbtn" type="button" :disabled="view.zoom <= 1" :title="t('studioPanel.view.zoomOut')" :aria-label="t('studioPanel.view.zoomOut')" @click="zoomBy(1 / 1.5)"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
+            <button class="vbtn" type="button" :title="t('studioPanel.view.zoomIn')" :aria-label="t('studioPanel.view.zoomIn')" @click="zoomBy(1.5)"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
+            <button class="vbtn" type="button" :disabled="view.zoom <= 1" :title="t('studioPanel.view.fit')" :aria-label="t('studioPanel.view.fit')" @click="zoomFit"><i class="fa-solid fa-arrows-left-right-to-line"></i></button>
+            <button class="vbtn" type="button" :title="t('studioPanel.markers.add')" :aria-label="t('studioPanel.markers.add')" @click="addMarker"><i class="fa-solid fa-location-pin"></i></button>
+            <button class="vbtn" type="button" :aria-pressed="follow" :title="t('studioPanel.view.follow')" :aria-label="t('studioPanel.view.follow')" @click="toggleFollow"><i class="fa-solid fa-arrows-to-dot"></i></button>
+          </div>
           <div class="hd" style="height:64px"><span class="dot cam"></span>{{ t('studioPanel.tracks.camera') }}</div>
           <div class="hd" style="height:44px"><span class="dot look"></span>{{ t('studioPanel.tracks.look') }}</div>
           <div class="hd" style="height:24px"><span class="dot disc"></span>{{ t('studioPanel.tracks.discrete') }}</div>
@@ -809,7 +997,10 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           <div class="hd" style="height:28px"><span class="dot mod"></span>{{ t('studioPanel.tracks.modulator') }}</div>
         </div>
         <div class="studio-canvas">
-          <canvas ref="canvasRef" :aria-label="t('studioPanel.tracks.ariaTimeline')" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp"></canvas>
+          <canvas ref="canvasRef" :aria-label="t('studioPanel.tracks.ariaTimeline')" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel.prevent="onWheel" @dblclick="onDoubleClick"></canvas>
+          <input v-if="markerEdit" ref="markerInput" v-model="markerEdit.name" class="marker-input" maxlength="40" :style="{ left: `${markerEdit.x}px` }"
+            :placeholder="t('studioPanel.markers.placeholder')" :aria-label="t('studioPanel.markers.placeholder')"
+            @keydown.enter.prevent="commitMarker()" @keydown.esc.prevent.stop="commitMarker(false)" @blur="commitMarker()" />
         </div>
       </div>
 
@@ -934,6 +1125,12 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
 .studio-timeline { display: grid; grid-template-columns: 112px minmax(0, 1fr); min-height: 0; overflow: hidden; }
 .studio-heads { border-right: 1px solid var(--line-soft); }
 .studio-heads .ruler { height: 20px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; padding: 0 8px; font: 10px var(--mono); color: var(--ink-3); letter-spacing: .05em; }
+.studio-heads .ruler { gap: 2px; padding: 0 4px; }
+.marker-input { position: absolute; top: 0; width: 130px; height: 20px; padding: 0 6px; border: 1px solid oklch(0.8 0.15 150 / .7); border-radius: 4px; background: var(--row); color: var(--ink); font: 11px var(--mono); outline: none; }
+.vbtn { width: 20px; height: 16px; border: 0; background: none; border-radius: 4px; color: var(--ink-3); display: grid; place-items: center; cursor: pointer; font-size: 9.5px; }
+.vbtn:hover:not(:disabled) { background: var(--row-on); color: var(--ink); }
+.vbtn:disabled { opacity: .35; cursor: default; }
+.vbtn[aria-pressed="true"] { color: oklch(0.72 0.15 245); }
 .studio-heads .hd { display: flex; align-items: center; gap: 7px; padding: 0 8px; border-bottom: 1px solid var(--line-soft); font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
 .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .dot.cam { background: oklch(0.72 0.15 245); } .dot.look { background: oklch(0.72 0.16 320); } .dot.disc { background: oklch(0.78 0.14 75); }

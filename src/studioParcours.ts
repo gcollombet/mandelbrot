@@ -77,6 +77,10 @@ export type StudioKeyframe = {
   hold: number
 }
 
+/** A named point on the ruler, e.g. a moment of the music. Moves nothing. */
+export type StudioMarker = { id: string; time: number; name: string }
+export const STUDIO_MAX_MARKERS = 64
+
 export type StudioParcours = {
   version: typeof STUDIO_PARCOURS_VERSION
   id: string
@@ -91,6 +95,7 @@ export type StudioParcours = {
   /** Half-window, in seconds, over which each interior camera corner is
    *  rounded by the navigator (camera_path.rs). 0 keeps corners sharp. */
   cornerSeconds: number
+  markers: StudioMarker[]
   /** Imported music (studioAudioStore.ts); the file stays local. */
   audio?: StudioAudioRef
   /** Music features driving parameters on top of the keyframes. */
@@ -124,6 +129,11 @@ export const STUDIO_DISCRETE_LOOK_FIELDS = [
   'textureGuid', 'textureName', 'skyboxGuid', 'skyboxName', 'mu', 'stripeFrequency', 'orbitTrap', 'orbitTrapStrength',
 ] as const
 
+/** Tilted 3D view (Navigation tab): part of a look keyframe, mixed linearly.
+ *  A look saved before it existed is top-down. */
+export const STUDIO_VIEW3D_DEFAULTS = { tiltViewTilt: 0, tiltViewHeading: 0, tiltViewRelief: 10, tiltViewInteriorDepth: 1 } as const
+const VIEW3D_FIELDS = Object.keys(STUDIO_VIEW3D_DEFAULTS) as (keyof typeof STUDIO_VIEW3D_DEFAULTS)[]
+
 const finite = (v: unknown, fallback: number) => typeof v === 'number' && Number.isFinite(v) ? v : fallback
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
 export const copyPlain = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
@@ -137,6 +147,7 @@ export function snapshotStudioLook(source: Partial<MandelbrotParams>): StudioLoo
   for (const field of Object.keys(TRANSITION_DEFAULTS) as (keyof typeof TRANSITION_DEFAULTS)[]) {
     look[field] = finite(source[field], TRANSITION_DEFAULTS[field])
   }
+  for (const field of VIEW3D_FIELDS) look[field] = finite(source[field], STUDIO_VIEW3D_DEFAULTS[field])
   look.mu = finite(source.mu, 4)
   look.stripeFrequency = finite(source.stripeFrequency, 8)
   look.orbitTrap = normalizeOrbitTrapFromLegacy(source)
@@ -151,6 +162,16 @@ function validateCamera(value: unknown): StudioCamera {
   catch { throw new Error(t('studioPanel.errors.invalidCamera')) }
   if (!Number.isFinite(c.angle)) throw new Error(t('studioPanel.errors.invalidCamera'))
   return { cx: String(c.cx), cy: String(c.cy), scale: String(c.scale), angle: Number(c.angle) }
+}
+
+/** Markers are a convenience: a malformed one is dropped, never an error. */
+function validateMarkers(value: unknown, durationSeconds: number): StudioMarker[] {
+  if (!Array.isArray(value)) return []
+  const ids = new Set<string>()
+  return (value as StudioMarker[]).filter(m => m && typeof m.id === 'string' && m.id && !ids.has(m.id) && ids.add(m.id) && Number.isFinite(m.time))
+    .slice(0, STUDIO_MAX_MARKERS)
+    .map(m => ({ id: m.id, time: clamp(m.time, 0, durationSeconds), name: typeof m.name === 'string' ? m.name.trim().slice(0, 40) : '' }))
+    .sort((a, b) => a.time - b.time)
 }
 
 export function validateStudioParcours(value: unknown): StudioParcours {
@@ -191,13 +212,14 @@ export function validateStudioParcours(value: unknown): StudioParcours {
     retime: p.retime === true,
     cornerSeconds: clamp(finite(p.cornerSeconds, 1), 0, 10),
     modulators: validateModulators(p.modulators),
+    markers: validateMarkers(p.markers, durationSeconds),
     ...(validateAudioRef(p.audio) ? { audio: validateAudioRef(p.audio) } : {}),
   }
 }
 
 export function newStudioParcours(name = t('studioPanel.newName')): StudioParcours {
   return { version: STUDIO_PARCOURS_VERSION, id: crypto.randomUUID(), name, durationSeconds: 30, keyframes: [],
-    easeInSeconds: 2, easeOutSeconds: 2, retime: false, cornerSeconds: 1, modulators: [] }
+    easeInSeconds: 2, easeOutSeconds: 2, retime: false, cornerSeconds: 1, modulators: [], markers: [] }
 }
 
 export const keyframeTrack = (k: StudioKeyframe): StudioTrack => k.camera ? 'camera' : 'look'
@@ -389,7 +411,14 @@ export function lookStateAt(parcours: StudioParcours, time: number): LookState |
 /** Continuous appearance at a blend weight, through the same mixer the preset
  *  travel uses (wrapped and log fields, trap switched at zero contribution). */
 export function blendedLook(state: LookState): Partial<MandelbrotParams> {
-  return interpolatePresetAppearance(state.a as MandelbrotParams, state.b as MandelbrotParams, state.w)
+  const out = interpolatePresetAppearance(state.a as MandelbrotParams, state.b as MandelbrotParams, state.w)
+  for (const field of VIEW3D_FIELDS) {
+    const from = state.a[field] ?? STUDIO_VIEW3D_DEFAULTS[field], to = state.b[field] ?? STUDIO_VIEW3D_DEFAULTS[field]
+    // The heading is an angle in degrees: turn through the shortest arc.
+    const delta = field === 'tiltViewHeading' ? ((to - from) % 360 + 540) % 360 - 180 : to - from
+    out[field] = field === 'tiltViewHeading' ? ((from + delta * state.w) % 360 + 360) % 360 : from + delta * state.w
+  }
+  return out
 }
 
 /** Discrete look fields of one keyframe, ready to assign onto the params. */
