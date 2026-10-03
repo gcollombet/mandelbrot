@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest'
 import {
     ViewGrids,
+    frozenCoversViewport,
     ZERO,
     cameraShiftTexels,
     iterationDispatchBox,
@@ -290,5 +291,38 @@ describe('rect helpers', () => {
         const tile = { originX: 256, originY: 0, width: 256, height: 256 }
         expect(tileLocalRect({ x: 200, y: 100, width: 100, height: 300 }, tile)).toEqual({ x: 0, y: 100, width: 44, height: 156 })
         expect(tileLocalRect({ x: 0, y: 0, width: 10, height: 10 }, tile).width).toBe(0)
+    })
+})
+
+describe('frozenCoversViewport', () => {
+    const base = { aspect: ASPECT, angle: 0, neutralSize: N, fullGrid: false }
+    const box = iterationDispatchBox(ASPECT, 0, N)
+
+    it('a zoom on a fixed point stays covered', () => {
+        for (const zf of [1, 1.5, 4]) expect(frozenCoversViewport({ ...base, offset: ZERO, zf })).toBe(true)
+    })
+
+    it('right after a swap (zf = 1) a pan of a few texels leaves the frozen texture', () => {
+        expect(frozenCoversViewport({ ...base, offset: { x: 0.5, y: 0 }, zf: 1 })).toBe(true)
+        expect(frozenCoversViewport({ ...base, offset: { x: 4, y: 0 }, zf: 1 })).toBe(false)
+        expect(frozenCoversViewport({ ...base, offset: { x: 0, y: -4 }, zf: 1 })).toBe(false)
+    })
+
+    it('the margin grows with the zoom ratio', () => {
+        // At zf = 2 the viewport spans half the box: a quarter box of slack each side.
+        const slack = box.width / 4
+        expect(frozenCoversViewport({ ...base, offset: { x: slack - 1, y: 0 }, zf: 2 })).toBe(true)
+        expect(frozenCoversViewport({ ...base, offset: { x: slack + 2, y: 0 }, zf: 2 })).toBe(false)
+    })
+
+    it('the rotation margin widens the valid region to the whole grid', () => {
+        const offset = { x: 0, y: (N - box.height) / 2 - 2 }
+        expect(frozenCoversViewport({ ...base, offset, zf: 1 })).toBe(false)
+        expect(frozenCoversViewport({ ...base, offset, zf: 1, fullGrid: true })).toBe(true)
+    })
+
+    it('degenerate inputs are never covered', () => {
+        expect(frozenCoversViewport({ ...base, offset: ZERO, zf: 0 })).toBe(false)
+        expect(frozenCoversViewport({ ...base, offset: { x: NaN, y: 0 }, zf: 2 })).toBe(false)
     })
 })

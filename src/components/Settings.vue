@@ -114,6 +114,7 @@ import VideoExportPanel from './VideoExportPanel.vue';
 import ExpmapPanel from './ExpmapPanel.vue';
 import { expmapBusy, expmapOpenDocument } from '../expmap/runtime';
 import {runVideoExportToWebm} from '../videoExportRunner';
+import {paletteLookFields} from '../paletteLook';
 import {createStudioFrameDriver, type StudioController} from '../studioPlayer';
 import {resolveStudioTextures} from '../studioTextures';
 import type {StudioParcours} from '../studioParcours';
@@ -1498,36 +1499,7 @@ async function savePaletteVariant(): Promise<void> {
 }
 
 function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
-  model.value.iterationPaletteCurve = normalizeIterationPaletteCurve(source.iterationPaletteCurve);
-  model.value.tessellationLevel = source.tessellationLevel ?? 0;
-  model.value.displacementAmount = source.displacementAmount ?? 0;
-  model.value.microBumpStrength = source.microBumpStrength ?? 0;
-  model.value.reliefDepth = source.reliefDepth ?? 1;
-  model.value.protrusionPhase = source.protrusionPhase ?? 0;
-  model.value.protrusionSharpness = source.protrusionSharpness ?? 2;
-  model.value.protrusionStrength = source.protrusionStrength ?? 1;
-  model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;
-  model.value.protrusionPeriod = source.protrusionPeriod ?? 1;
-  model.value.protrusionTerrace = source.protrusionTerrace ?? 0;
-  if (source.lightAngle != null) model.value.lightAngle = source.lightAngle;
-  model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
-  model.value.localShadowStrength = source.localShadowStrength ?? 0;
-  model.value.castShadowStrength = source.castShadowStrength ?? 0;
-  model.value.castShadowLength = source.castShadowLength ?? 4;
-  model.value.castShadowSoftness = source.castShadowSoftness ?? 0.35;
-  model.value.horizonOcclusionStrength = source.horizonOcclusionStrength ?? 0;
-  model.value.horizonOcclusionRadius = source.horizonOcclusionRadius ?? 0.1;
-  model.value.indirectLightStrength = source.indirectLightStrength ?? 0;
-  model.value.reliefClosing = source.reliefClosing ?? 0;
-  model.value.varnishStrength = source.varnishStrength ?? 0;
-  model.value.gradeContrast = source.gradeContrast ?? 1.18;
-  model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
-  model.value.orbitTrapStrength = source.orbitTrapStrength ?? 0;
-  model.value.orbitTrap = normalizeOrbitTrapFromLegacy(source);
-  model.value.orbitTrapStrength = model.value.orbitTrap.strength;
-  model.value.phaseColoringStrength = source.phaseColoringStrength ?? 0;
-  model.value.stripeFrequency = source.stripeFrequency ?? 8;
-  model.value.textureMapping = normalizeTextureMappingFromLegacy(source);
+  Object.assign(model.value, paletteLookFields(source));
   delete (model.value as any).textureMappingMode;
 }
 

@@ -1,10 +1,10 @@
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, shallowRef } from 'vue'
 import type { MandelbrotParams } from './Mandelbrot'
 import type { ModulatorBank } from './studioAudio'
 import {
-  addStudioKeyframe, blendedLook, cameraPathSpec, discreteLookFields, lookStateAt, rampedTime,
+  addStudioKeyframe, blendedLook, cameraClockAt, copyPlain, cameraPathSpec, discreteLookFields, lookStateAt, rampedTime,
   snapshotStudioCamera, snapshotStudioLook,
-  type StudioKeyframe, type StudioLook, type StudioParcours,
+  type StudioCamera, type StudioKeyframe, type StudioLook, type StudioParcours,
 } from './studioParcours'
 
 // ── Studio player: turns the parcours evaluator into engine and navigator calls ──
@@ -73,6 +73,9 @@ export type StudioPlayerDeps = {
   params: { readonly value: MandelbrotParams }
   /** Resolve the tile and skybox textures a look refers to. */
   resolveTextures(look: StudioLook): Promise<StudioTextures>
+  /** The clock stopped and the params hold the parcours' state at `time`
+   *  (after a seek, a refresh or a pause). */
+  onSettled?(): void
 }
 
 export type StudioCaptureScope = 'both' | 'camera' | 'look'
@@ -87,11 +90,16 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   const recording = ref(false)
   /** Set while the player owns the camera (play, seek, scrub). */
   const driving = ref(false)
+  /** Camera the player last placed (the parcours' camera at the playhead),
+   *  null without camera keyframes. Navigation is measured against it. */
+  const placedCamera = shallowRef<StudioCamera | null>(null)
   let parcours: StudioParcours | null = null
   let frame: ReturnType<typeof setTimeout> | null = null
   let wallStart = 0, timeAtStart = 0
   // Whether the navigator currently holds the parcours' camera path.
   let cameraKey = ''
+  // Segment the camera is held on (ease `hold`), -1 otherwise: leaving it is a cut.
+  let heldSegment = -1
   // Look segment the GPU transition is prepared for.
   let lookKey = ''
   let lookPrepared = false
@@ -159,8 +167,10 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     const controller = deps.getController(), navigator = controller?.getNavigator()
     if (!controller || !navigator) return
     const path = cameraPathSpec(parcours)
-    if (!path) return
-    const cameraTime = rampedTime(parcours, t)
+    if (!path) { placedCamera.value = null; return }
+    const clock = cameraClockAt(parcours, t)
+    const cameraTime = clock.time
+    heldSegment = clock.hold ? clock.index : -1
     // The navigator's own deep-safe path evaluation gives the point; read it
     // back as decimal strings and teleport there with a fresh reference orbit
     // (cold-start state). The teleport cancels the path.
@@ -168,6 +178,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     navigator.step_at_transition_time(undefined, undefined, cameraTime)
     const here = readParams(navigator)
     if (here) controller.resetReferenceTo(here.cx, here.cy, here.scale, here.angle)
+    placedCamera.value = here
     if (continuePath) {
       navigator.start_export_path(path.spec, parcours.cornerSeconds)
       cameraKey = path.spec
@@ -183,7 +194,12 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     const controller = deps.getController(), navigator = controller?.getNavigator()
     if (!controller || !navigator) return
     if (!cameraKey || !navigator.has_export_path()) { placeCamera(t, true); return }
-    controller.setExportTime(rampedTime(parcours, t), t)
+    const clock = cameraClockAt(parcours, t)
+    // The end of a held segment is a cut: teleport with a fresh reference
+    // instead of letting the path jump under the running one.
+    if (heldSegment >= 0 && clock.index !== heldSegment) { placeCamera(t, true); return }
+    heldSegment = clock.hold ? clock.index : -1
+    controller.setExportTime(clock.time, t)
   }
 
   // ── Look ──
@@ -281,7 +297,9 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     recording.value = false
     if (deps.params.value.palettePath?.enabled) {
       // The timeline owns the appearance while it plays.
-      deps.params.value.palettePath = { ...deps.params.value.palettePath, enabled: false }
+      // A plain copy: spreading the reactive object keeps nested proxies the
+      // engine's structuredClone rejects.
+      deps.params.value.palettePath = { ...copyPlain(deps.params.value.palettePath), enabled: false }
     }
     if (time.value >= parcours.durationSeconds) time.value = 0
     driving.value = true
@@ -324,6 +342,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     releaseTextures()
     driving.value = false
     cameraKey = ''
+    deps.onSettled?.()
   }
 
   /** Jump to a parcours time: exact camera, exact look, clock stopped. */
@@ -351,6 +370,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     // image: it is what the frame looks like at this time. pause() settles it.
     applyLook(clamped)
     driving.value = false
+    deps.onSettled?.()
   }
 
   /** Re-evaluate the current time after the parcours was edited. */
@@ -379,15 +399,18 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     if (frame !== null) { clearTimeout(frame); frame = null }
   }
 
-  /** Pin the live camera and/or look at the current time. */
-  function capture(scope: StudioCaptureScope = 'both'): StudioKeyframe | null {
-    if (!parcours) return null
+  /** Pin the live camera and/or look at the current time: one keyframe per
+   *  track. The camera one is placed on the camera clock, so the camera passes
+   *  through this view exactly when the playhead is here. */
+  function capture(scope: StudioCaptureScope = 'both'): StudioKeyframe[] {
+    if (!parcours) return []
     const params = deps.params.value
-    const keyframe = addStudioKeyframe(parcours, time.value, {
+    const created = addStudioKeyframe(parcours, time.value, {
       camera: scope !== 'look' ? snapshotStudioCamera(params) : undefined,
       look: scope !== 'camera' ? snapshotStudioLook(params) : undefined,
-    })
-    return keyframe
+    }, rampedTime(parcours, time.value))
+    if (scope !== 'look') placedCamera.value = snapshotStudioCamera(params)
+    return created
   }
 
   function destroy() {
@@ -398,7 +421,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     audioContext = null
   }
 
-  return { time, playing, recording, driving, setParcours, setAudio, play, pause, seek, refresh, record, stopRecording, capture, destroy }
+  return { time, playing, recording, driving, placedCamera, setParcours, setAudio, play, pause, seek, refresh, record, stopRecording, capture, destroy }
 }
 
 export type StudioPlayer = ReturnType<typeof createStudioPlayer>
@@ -452,7 +475,7 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
       palettePathSuspended = true
       if (params.palettePath?.enabled) {
         restoredPalettePath = params.palettePath
-        params.palettePath = { ...params.palettePath, enabled: false }
+        params.palettePath = { ...copyPlain(params.palettePath), enabled: false }
       }
     }
 
@@ -464,7 +487,7 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
         if (!navigator.start_export_path(path.spec, parcours.cornerSeconds)) throw new Error('Studio export: camera path rejected by the navigator')
         pathArmed = true
       }
-      controller.setExportTime(rampedTime(parcours, t), t)
+      controller.setExportTime(cameraClockAt(parcours, t).time, t)
     } else {
       controller.setExportTime(0, t)
     }

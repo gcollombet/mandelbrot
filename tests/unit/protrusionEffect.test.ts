@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import { paletteLookFields } from '../../src/paletteLook';
 import {describe, expect, it} from 'vitest';
 import {createInterpolatedColorStop, getEffectValue, type ColorStop} from '../../src/ColorStop';
 import {Palette} from '../../src/Palette';
@@ -93,11 +94,11 @@ describe('palette protrusion effect', () => {
     expect(settings).toContain('protrusionStrength: model.value.protrusionStrength');
     expect(settings).toContain('protrusionGeometryMix: model.value.protrusionGeometryMix');
     expect(settings).toContain('protrusionPeriod: model.value.protrusionPeriod');
-    expect(settings).toContain('model.value.protrusionPhase = source.protrusionPhase ?? 0;');
-    expect(settings).toContain('model.value.protrusionSharpness = source.protrusionSharpness ?? 2;');
-    expect(settings).toContain('model.value.protrusionStrength = source.protrusionStrength ?? 1;');
-    expect(settings).toContain('model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;');
-    expect(settings).toContain('model.value.protrusionPeriod = source.protrusionPeriod ?? 1;');
+    // Selecting a saved palette restores the shape controls (paletteLook.ts).
+    expect(settings).toContain('Object.assign(model.value, paletteLookFields(source));');
+    expect(paletteLookFields({})).toMatchObject({ protrusionPhase: 0, protrusionSharpness: 2, protrusionStrength: 1, protrusionGeometryMix: 0, protrusionPeriod: 1 });
+    expect(paletteLookFields({ protrusionPhase: 0.3, protrusionSharpness: 3, protrusionStrength: 2, protrusionGeometryMix: 0.5, protrusionPeriod: 4 }))
+        .toMatchObject({ protrusionPhase: 0.3, protrusionSharpness: 3, protrusionStrength: 2, protrusionGeometryMix: 0.5, protrusionPeriod: 4 });
     expect(settings).toContain(`:label="t('settings.palettes.surface.protrusionPhase')"`);
     expect(settings).toContain(`:label="t('settings.palettes.surface.protrusionSharpness')"`);
     expect(settings).toContain(`<DenseField :label="t('settings.palettes.surface.protrusionStrength')" :min="1" :max="4"`);

@@ -36,6 +36,7 @@ import {
     displayZoomFactors,
     getFrozenScale,
     getLiveScale,
+    getZoomingIn,
     isZoomActive,
     liveGridScale,
     reduceZoomState,
@@ -48,7 +49,7 @@ import {COLOR_UNIFORM_BYTES, colorUniformByteOffset, orbitTrapUniforms, packColo
 import {bind, computePipelineDescriptor, createPassLayout, fullscreenPipelineDescriptor} from './gpuPipelines'
 import {ExportCapture} from './exportCapture'
 import {FrameRequests, frameClears, planFrame, type FramePlan} from './framePlan'
-import {ViewGrids, ZERO, neutralSizeFor, cameraShiftTexels, iterationDispatchBox, padRect, tileLocalRect, toUv, type GridMapping, type MergeUniforms} from './viewGrids'
+import {ViewGrids, ZERO, frozenCoversViewport, neutralSizeFor, cameraShiftTexels, iterationDispatchBox, padRect, tileLocalRect, toUv, type GridMapping, type MergeUniforms} from './viewGrids'
 import {
     isFieldConverged as evaluateFieldConvergence,
     UNFINISHED_PIXEL_DONE_THRESHOLD,
@@ -3563,6 +3564,26 @@ export class Engine {
                 }
             }
 
+            // An export keeps the cycle alive across the whole parcours, and the
+            // live grid only fills the centre mid-cycle: once a pan carries the
+            // viewport out of the frozen texture, the uncovered band would be
+            // emitted black. Drop the cycle; this frame is computed whole at
+            // its own scale and the next scale step starts a fresh cycle.
+            if (this.exporting && !this.tiled && isZoomActive(this.zoomState) && getZoomingIn(this.zoomState)
+                && !frozenCoversViewport({
+                    offset: this.grids.frozenOffset,
+                    zf: getFrozenScale(this.zoomState) / mandelbrot.scale,
+                    aspect,
+                    angle: mandelbrot.angle,
+                    neutralSize: this.neutralSize,
+                    fullGrid: this.liveRotationMargin,
+                })) {
+                this.zoomState = resetZoomState()
+                this.requests.cancelSnapshot()
+                this.requests.requestClear('zoomCycle')
+                this.frozenAligned = false
+            }
+
             // Rotation margin (see liveRotationMargin). A cycle start or swap
             // hands the live texture to the frozen role and restarts the live
             // one: the margin re-arms only if the angle keeps changing. In idle
@@ -4256,9 +4277,13 @@ export class Engine {
                 new Float32Array([liveShiftV]),
             )
         }
-        if (this.budget.entersTranslation(hasTranslationShift)) {
+        if (this.budget.entersTranslation(hasTranslationShift) || (hasTranslationShift && this.exporting)) {
             // Discard a pre-pan count once. Subsequent pan frames keep this new
             // generation so dense translations can contribute fresh samples.
+            // An export emits one frame per pan step and decides convergence on
+            // this count: the previous step's count (already converged) would
+            // pass the band this shift just exposed as finished — black bands
+            // in the film. Every pan frame of an export starts a fresh count.
             this.invalidateCounterReadback()
         }
         this.dispatchBox = this.tileLocalDispatchBox(

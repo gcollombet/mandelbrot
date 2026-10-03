@@ -19,6 +19,9 @@ export const studioVideoSelected = ref(false)
  *  export's modulators and its audio track. */
 export const studioExportAudio = shallowRef<StudioAudioSource | null>(null)
 
+/** Look copied from a keyframe (Ctrl+C in the studio), pasted onto another. */
+export const studioLookClipboard = shallowRef<import('./studioParcours').StudioLook | null>(null)
+
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
 
 export function publishStudioParcours(parcours: StudioParcours): void {

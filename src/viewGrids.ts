@@ -90,6 +90,34 @@ export function iterationDispatchBox(aspect: number, angle: number, neutralSize:
     return { x, y, width: Math.max(8, right - x), height: Math.max(8, bottom - y) }
 }
 
+/**
+ * Does the frozen grid still hold every texel of the viewport?
+ *
+ * The frozen texture only carries what was iterated when it was captured: the
+ * viewport box on its own grid (the whole grid with the rotation margin). At
+ * zoom ratio `zf` = frozen/display scale the viewport covers 1/zf of that box,
+ * displaced by `offset` frozen texels. A zoom on a fixed point never leaves it;
+ * a pan does, and mid-cycle the live grid (finer, centred) cannot fill the
+ * rest: what neither holds would be emitted unrendered.
+ */
+export function frozenCoversViewport(input: {
+    offset: Vec2
+    zf: number
+    aspect: number
+    angle: number
+    neutralSize: number
+    /** The frozen texture was iterated over the whole grid (rotation margin). */
+    fullGrid: boolean
+}): boolean {
+    if (!(input.zf > 0) || !Number.isFinite(input.offset.x) || !Number.isFinite(input.offset.y)) return false
+    const box = iterationDispatchBox(input.aspect, input.angle, input.neutralSize)
+    const validX = input.fullGrid ? input.neutralSize / 2 : box.width / 2
+    const validY = input.fullGrid ? input.neutralSize / 2 : box.height / 2
+    // One texel of slack: the box is already snapped outwards to 8 texels.
+    return Math.abs(input.offset.x) + box.width / 2 / input.zf <= validX + 1
+        && Math.abs(input.offset.y) + box.height / 2 / input.zf <= validY + 1
+}
+
 /** `rect` grown by `pad` texels on every side, clamped to an n×n grid. */
 export function padRect(rect: Rect, pad: number, n: number): Rect {
     const x = Math.max(0, rect.x - pad)

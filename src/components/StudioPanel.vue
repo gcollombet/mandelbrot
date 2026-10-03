@@ -5,17 +5,21 @@ import { Palette } from '../Palette'
 import type { MandelbrotParams } from '../Mandelbrot'
 import { log10FromDecimalString } from '../floatexp'
 import {
-  cameraKeyframes, cameraSegmentAt, discreteLookDiffers, formatSeconds, formatTimecode, keyframeTimes, lookKeyframes,
-  moveStudioKeyframe, newStudioParcours, rampedTime, removeStudioKeyframe, snapshotStudioCamera, snapshotStudioLook,
-  STUDIO_MAX_DURATION, STUDIO_MIN_DURATION,
-  type StudioKeyframe, type StudioLook, type StudioParcours,
+  cameraClockAt, cameraDistance, cameraKeyframes, cameraSegmentAt, copyPlain, discreteLookDiffers, formatSeconds, formatTimecode,
+  keyframeDisplayTime, keyframeTimes, keyframeTrack, lookKeyframes, lookStateAt, moveStudioKeyframe, newStudioParcours,
+  parcoursTimeOfCameraTime, rampedTime, removeStudioKeyframe, snapshotStudioCamera, snapshotStudioLook, validateStudioParcours,
+  STUDIO_CAMERA_EASES, STUDIO_MAX_DURATION, STUDIO_MIN_DURATION,
+  type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
 } from '../studioParcours'
+import { StudioHistory } from '../studioHistory'
+import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
+import { paletteRecordAppearance } from '../paletteLook'
 import { deleteStudioParcours, readStudioParcoursRecords, saveStudioParcours, type StudioParcoursRecord } from '../studioParcoursStore'
 import { createStudioPlayer, type StudioAudioSource, type StudioController, type StudioEngine, type StudioTextures } from '../studioPlayer'
 import { AUDIO_FEATURES, type AudioAnalysis } from '../audioAnalysis'
 import { buildMusicParcours, ModulatorBank, MODULATOR_TARGETS, newModulator, MODULATOR_MAX, type StudioModulator } from '../studioAudio'
 import { decodeStudioAudio, getStudioAudioRecord, importStudioAudio } from '../studioAudioStore'
-import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio } from '../studioDraft'
+import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio, studioLookClipboard } from '../studioDraft'
 import { DenseField, DenseSeg, DenseSelect, DenseToggle } from './dense'
 
 // ── Studio: a Resolve-style timeline docked under the live view ──
@@ -27,13 +31,47 @@ const props = defineProps<{
   controller: StudioController | null
   resolveTextures: (look: StudioLook) => Promise<StudioTextures>
 }>()
-const emit = defineEmits<{ close: []; export: [] }>()
+const emit = defineEmits<{
+  close: []
+  export: []
+  /** Open the Palettes panel to edit the look the selected keyframe will capture. */
+  openPalettes: []
+  /** Editor layout: the rectangle (viewport px) the live view must fill; null in dock layout. */
+  stage: [rect: { left: number; top: number; width: number; height: number } | null]
+}>()
 const { t } = useI18n()
+
+// ── Layout: `dock` overlays the timeline on the full-screen view; `editor`
+// is the Resolve-style page (viewer rectangle, tall inspector, timeline). ──
+const LAYOUT_KEY = 'mandelbrot_studio_layout'
+const EDITOR_MIN_WIDTH = 900
+const layout = ref<'dock' | 'editor'>((() => {
+  try { return localStorage.getItem(LAYOUT_KEY) === 'editor' ? 'editor' : 'dock' } catch { return 'dock' }
+})())
+const wide = ref(window.innerWidth > EDITOR_MIN_WIDTH)
+const editor = computed(() => layout.value === 'editor' && wide.value)
+const stageRef = ref<HTMLElement | null>(null)
+let stageObserver: ResizeObserver | null = null
+function toggleLayout() {
+  layout.value = layout.value === 'editor' ? 'dock' : 'editor'
+  try { localStorage.setItem(LAYOUT_KEY, layout.value) } catch { /* ignore */ }
+}
+function publishStage() {
+  const el = stageRef.value
+  if (!editor.value || !el) { emit('stage', null); return }
+  const box = el.getBoundingClientRect()
+  emit('stage', { left: Math.round(box.left), top: Math.round(box.top), width: Math.round(box.width), height: Math.round(box.height) })
+}
+function onWindowResize() { wide.value = window.innerWidth > EDITOR_MIN_WIDTH; publishStage() }
 
 const FPS = 30
 // The draft survives the dock closing and reopening (studioDraft.ts).
 const draft = recallStudioDraft()
-const parcours = reactive<StudioParcours>(draft?.parcours ?? newStudioParcours(t('studioPanel.newName')))
+// A draft from before the one-track-per-keyframe model is split on the way in.
+const parcours = reactive<StudioParcours>((() => {
+  try { if (draft) return validateStudioParcours(draft.parcours) } catch { /* start fresh */ }
+  return newStudioParcours(t('studioPanel.newName'))
+})())
 const savedId = ref(draft?.savedId ?? '')
 const saved = ref<StudioParcoursRecord[]>([])
 const selectedId = ref<string | null>(null)
@@ -45,6 +83,7 @@ const player = createStudioPlayer({
   getController: () => props.controller,
   params: { get value() { return props.params } },
   resolveTextures: look => props.resolveTextures(look),
+  onSettled: () => onSettled(),
 })
 player.setParcours(parcours)
 const { time, playing, recording } = player
@@ -112,6 +151,7 @@ function removeAudio() {
 function generateFromMusic() {
   if (!audio.value) return
   player.pause()
+  recordEdit()
   const result = buildMusicParcours(parcours, audio.value.analysis, props.params)
   selectedId.value = parcours.keyframes[0]?.id ?? null
   afterEdit()
@@ -120,19 +160,50 @@ function generateFromMusic() {
 
 function addModulator() {
   if (parcours.modulators.length >= MODULATOR_MAX) return
+  recordEdit()
   parcours.modulators.push(newModulator())
 }
-function removeModulator(id: string) { parcours.modulators = parcours.modulators.filter(m => m.id !== id) }
-function updateModulator(m: StudioModulator, patch: Partial<StudioModulator>) { Object.assign(m, patch); invalidate() }
+function removeModulator(id: string) { recordEdit(); parcours.modulators = parcours.modulators.filter(m => m.id !== id) }
+function updateModulator(m: StudioModulator, patch: Partial<StudioModulator>) { recordEdit(`mod:${m.id}:${Object.keys(patch).join()}`); Object.assign(m, patch); invalidate() }
 if (draft) time.value = Math.min(draft.time, parcours.durationSeconds)
 
 const selected = computed(() => parcours.keyframes.find(k => k.id === selectedId.value) ?? null)
 const cameraCount = computed(() => parcours.keyframes.filter(k => k.camera).length)
 const lookCount = computed(() => parcours.keyframes.filter(k => k.look).length)
+const EASE_OPTIONS = computed(() => STUDIO_CAMERA_EASES.map(value => ({ value, label: t(`studioPanel.eases.${value}`) })))
+const firstCameraId = computed(() => cameraKeyframes(parcours)[0]?.id ?? null)
+function setEase(value: StudioCameraEase) {
+  const k = selected.value
+  if (!k) return
+  recordEdit()
+  if (value === 'linear') delete k.ease
+  else k.ease = value
+  afterEdit()
+}
 const CURVE_OPTIONS = computed(() => (['linear', 'gaussian', 'square', 'exponential'] as const).map(value => ({ value, label: t(`studioPanel.curves.${value}`) })))
 
 function flash(message: string) { status.value = message; error.value = ''; setTimeout(() => { if (status.value === message) status.value = '' }, 2600) }
 function fail(e: unknown) { error.value = e instanceof Error ? e.message : String(e) }
+
+// ── Undo / redo (studioHistory.ts) ──
+// Every edit records the parcours before it; bursts under one key coalesce.
+// The music reference is not part of the history: undo never unloads a track.
+const history = new StudioHistory<StudioParcours>()
+const historyVersion = ref(0)
+const canUndo = computed(() => (historyVersion.value, history.canUndo))
+const canRedo = computed(() => (historyVersion.value, history.canRedo))
+function recordEdit(key = '') { history.record(copyPlain(parcours), key); historyVersion.value++ }
+function restoreSnapshot(snapshot: StudioParcours | null) {
+  if (!snapshot) return
+  const audioRef = parcours.audio
+  Object.assign(parcours, snapshot)
+  if (audioRef) parcours.audio = audioRef; else delete parcours.audio
+  if (!parcours.keyframes.some(k => k.id === selectedId.value)) selectedId.value = null
+  historyVersion.value++
+  afterEdit()
+}
+function undo() { player.pause(); restoreSnapshot(history.undo(copyPlain(parcours))) }
+function redo() { player.pause(); restoreSnapshot(history.redo(copyPlain(parcours))) }
 
 // ── Library ──
 async function refreshLibrary() { try { saved.value = await readStudioParcoursRecords() } catch (e) { fail(e) } }
@@ -140,6 +211,10 @@ function replaceParcours(next: StudioParcours) {
   Object.assign(parcours, JSON.parse(JSON.stringify(next)))
   parcours.keyframes = next.keyframes.map(k => JSON.parse(JSON.stringify(k)))
   selectedId.value = parcours.keyframes[0]?.id ?? null
+  pending.camera = null
+  pending.look = null
+  history.clear()
+  historyVersion.value++
   player.pause()
   time.value = 0
   void restoreAudio()
@@ -165,24 +240,38 @@ async function remove() {
 function togglePlay() { if (playing.value) player.pause(); else player.play() }
 function toggleRecord() { if (recording.value) player.stopRecording(); else { player.record(); flash(t('studioPanel.hints.record')) } }
 function seek(value: number) { player.seek(value); invalidate() }
+const displayTime = (k: StudioKeyframe) => keyframeDisplayTime(parcours, k)
+/** Select a keyframe and bring the playhead onto it: the view shows what the
+ *  inspector edits. */
+function selectKeyframe(k: StudioKeyframe) {
+  selectedId.value = k.id
+  if (!playing.value) seek(displayTime(k))
+}
 function stepKeyframe(direction: 1 | -1) {
   const times = keyframeTimes(parcours)
   const next = direction > 0 ? times.find(x => x > time.value + 1e-3) : [...times].reverse().find(x => x < time.value - 1e-3)
   if (next === undefined) return
-  seek(next)
-  selectedId.value = parcours.keyframes.find(k => k.time === next)?.id ?? selectedId.value
+  const here = parcours.keyframes.filter(k => Math.abs(displayTime(k) - next) < 2e-3)
+  const preferred = here.find(k => selected.value && keyframeTrack(k) === keyframeTrack(selected.value)) ?? here[0]
+  if (preferred) selectKeyframe(preferred)
+  else seek(next)
 }
 function addKeyframe(scope: 'both' | 'camera' | 'look' = 'both') {
   try {
-    const keyframe = player.capture(scope)
-    if (!keyframe) return
-    selectedId.value = keyframe.id
+    recordEdit()
+    const created = player.capture(scope)
+    if (!created.length) return
+    // What was pending on a captured track now lives in a keyframe.
+    if (scope !== 'look') pending.camera = null
+    if (scope !== 'camera') { pending.look = null; lookBaseline = lookSnapshotJson() }
+    selectedId.value = created[created.length - 1].id
     invalidate()
-    flash(t('studioPanel.hints.keyframeAdded', { time: formatTimecode(keyframe.time, FPS) }))
+    flash(t('studioPanel.hints.keyframeAdded', { time: formatTimecode(time.value, FPS) }))
   } catch (e) { fail(e) }
 }
 function deleteSelected() {
   if (!selected.value) return
+  recordEdit()
   const index = parcours.keyframes.findIndex(k => k.id === selected.value!.id)
   removeStudioKeyframe(parcours, selected.value.id)
   selectedId.value = parcours.keyframes[Math.max(0, index - 1)]?.id ?? null
@@ -190,38 +279,175 @@ function deleteSelected() {
 }
 function afterEdit() { player.refresh(); invalidate() }
 
-// Inspector edits
-function setScope(kind: 'camera' | 'look', on: boolean) {
-  const k = selected.value
-  if (!k) return
-  if (on) {
-    if (kind === 'camera') k.camera = snapshotStudioCamera(props.params)
-    else k.look = snapshotStudioLook(props.params)
-  } else {
-    if (kind === 'camera' && k.look) delete k.camera
-    if (kind === 'look' && k.camera) delete k.look
-  }
-  afterEdit()
+// ── Editing linked to the keyframe under the playhead ──
+//
+// The live view is the editor. While the playhead rests on a keyframe of a
+// track, edits of that track (navigation for the camera, palette and look
+// controls for the look) are written into it as they happen. Elsewhere they
+// are kept as PENDING: nothing overwrites them. A seek re-evaluates the
+// parcours, then shows the pending look and view again over it, so they can
+// be applied to another keyframe, pinned as a new one, or discarded.
+const pending = reactive<{ camera: StudioCamera | null; look: StudioLook | null }>({ camera: null, look: null })
+/** The look the parcours itself puts on the view at the playhead (JSON). */
+let lookBaseline = ''
+let staleAfterExport = false
+let disposed = false
+const HALF_FRAME = 0.5 / FPS
+const CAMERA_EDIT_TOLERANCE = 1e-4
+
+function lookSnapshotJson(): string {
+  try { return JSON.stringify(snapshotStudioLook(props.params)) } catch { return lookBaseline }
 }
-function recapture(kind: 'camera' | 'look') {
+const lookKeyAtPlayhead = computed(() => lookKeyframes(parcours).find(k => Math.abs(k.time - time.value) < HALF_FRAME) ?? null)
+const cameraKeyAtPlayhead = computed(() => {
+  const cams = cameraKeyframes(parcours)
+  return cams.find(k => Math.abs(keyframeDisplayTime(parcours, k, cams) - time.value) < HALF_FRAME) ?? null
+})
+const editing = computed(() => !playing.value && !recording.value)
+
+/** Called by the player once the params hold the parcours' state again. */
+function onSettled() {
+  if (disposed) return
+  lookBaseline = lookSnapshotJson()
+  // Show what is pending over the evaluated parcours.
+  if (pending.look) Object.assign(props.params, copyPlain(pending.look))
+  if (pending.camera) props.controller?.resetReferenceTo(pending.camera.cx, pending.camera.cy, pending.camera.scale, pending.camera.angle)
+}
+
+function editsBlocked(): boolean {
+  if (props.controller?.isExporting()) { staleAfterExport = true; return true }
+  if (staleAfterExport) { staleAfterExport = false; player.refresh(); return true }
+  return disposed || playing.value || recording.value || player.driving.value
+}
+
+function checkLookEdit() {
+  if (editsBlocked() || !lookKeyframes(parcours).length) return
+  const now = lookSnapshotJson()
+  if (now === lookBaseline) return
+  const target = lookKeyAtPlayhead.value
+  if (target && !pending.look) {
+    recordEdit(`look:${target.id}`)
+    target.look = JSON.parse(now)
+    lookBaseline = now
+  } else {
+    pending.look = JSON.parse(now)
+  }
+}
+
+function checkCameraEdit() {
+  if (editsBlocked() || !cameraKeyframes(parcours).length) return
+  const placed = player.placedCamera.value
+  if (!placed) return
+  const current = snapshotStudioCamera(props.params)
+  if (cameraDistance(current, placed) < CAMERA_EDIT_TOLERANCE) return
+  const target = cameraKeyAtPlayhead.value
+  if (target && !pending.camera) {
+    recordEdit(`camera:${target.id}`)
+    target.camera = current
+    player.placedCamera.value = current
+  } else {
+    pending.camera = current
+  }
+}
+
+let lookTimer: ReturnType<typeof setTimeout> | null = null
+let cameraTimer: ReturnType<typeof setTimeout> | null = null
+watch(lookSnapshotJson, () => { if (lookTimer) clearTimeout(lookTimer); lookTimer = setTimeout(() => { lookTimer = null; checkLookEdit() }, 200) })
+watch(() => [props.params.cx, props.params.cy, props.params.scale, props.params.angle], () => {
+  if (cameraTimer) clearTimeout(cameraTimer)
+  cameraTimer = setTimeout(() => { cameraTimer = null; checkCameraEdit() }, 250)
+})
+
+/** Write the pending edit of a track into the keyframe under the playhead. */
+function applyPending(track: StudioTrack) {
+  const target = track === 'look' ? lookKeyAtPlayhead.value : cameraKeyAtPlayhead.value
+  if (!target) return
+  recordEdit()
+  if (track === 'look' && pending.look) { target.look = copyPlain(pending.look); pending.look = null; lookBaseline = lookSnapshotJson() }
+  if (track === 'camera' && pending.camera) { target.camera = copyPlain(pending.camera); player.placedCamera.value = pending.camera; pending.camera = null }
+  selectedId.value = target.id
+  invalidate()
+  flash(t('studioPanel.edit.applied', { time: formatTimecode(time.value, FPS) }))
+}
+function discardPending(track: StudioTrack) {
+  if (track === 'look') pending.look = null
+  else pending.camera = null
+  player.refresh()
+}
+
+// Inspector edits
+/** Open the full palette editor on this keyframe's look: edits there are
+ *  written into it while the playhead stays here. */
+function editLook() {
   const k = selected.value
   if (!k) return
-  if (kind === 'camera') k.camera = snapshotStudioCamera(props.params)
-  else k.look = snapshotStudioLook(props.params)
-  invalidate()
-  flash(t(kind === 'camera' ? 'studioPanel.hints.cameraCaptured' : 'studioPanel.hints.lookCaptured'))
+  selectKeyframe(k)
+  emit('openPalettes')
 }
 function setSelectedTime(value: number) {
-  if (!selected.value) return
-  moveStudioKeyframe(parcours, selected.value.id, value)
+  const k = selected.value
+  if (!k) return
+  recordEdit(`time:${k.id}`)
+  // A camera keyframe lives on the camera clock.
+  moveStudioKeyframe(parcours, k.id, k.camera ? rampedTime(parcours, value) : value)
+  time.value = displayTime(k)
+  afterEdit()
+}
+function setLookField(field: 'curve' | 'hold', value: unknown) {
+  const k = selected.value
+  if (!k) return
+  recordEdit(`${field}:${k.id}`)
+  if (field === 'curve') k.curve = value as StudioKeyframe['curve']
+  else k.hold = value as number
+  afterEdit()
+}
+function setSetting<K extends 'easeInSeconds' | 'easeOutSeconds' | 'retime' | 'cornerSeconds'>(field: K, value: StudioParcours[K]) {
+  recordEdit(field)
+  parcours[field] = value
   afterEdit()
 }
 function setDuration(value: number) {
+  recordEdit('duration')
   parcours.durationSeconds = Math.max(STUDIO_MIN_DURATION, Math.min(STUDIO_MAX_DURATION, value))
   for (const k of parcours.keyframes) if (k.time > parcours.durationSeconds) k.time = parcours.durationSeconds
   parcours.easeInSeconds = Math.min(parcours.easeInSeconds, parcours.durationSeconds / 2)
   parcours.easeOutSeconds = Math.min(parcours.easeOutSeconds, parcours.durationSeconds / 2)
   afterEdit()
+}
+
+// ── Look library: saved palettes and a look clipboard ──
+const palettes = ref<PaletteRecord[]>([])
+async function refreshPalettes() {
+  try {
+    const all = await getAllPaletteEntries()
+    palettes.value = all.filter(p => p.colorStops?.length).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
+  } catch (e) { fail(e) }
+}
+function paletteSwatch(p: PaletteRecord): string {
+  return `linear-gradient(to right, ${lookGradient({ colorStops: p.colorStops, interpolationMode: p.interpolationMode ?? 'lab' } as StudioLook).split('|').join(',')})`
+}
+function applyPalette(p: PaletteRecord) {
+  const k = selected.value
+  if (!k?.look) return
+  recordEdit()
+  k.look = snapshotStudioLook({ ...k.look, ...paletteRecordAppearance(p) })
+  if (Math.abs(k.time - time.value) < HALF_FRAME) pending.look = null
+  afterEdit()
+  flash(t('studioPanel.palettes.applied', { name: p.name }))
+}
+function copyLook() {
+  const k = selected.value
+  if (!k?.look) return
+  studioLookClipboard.value = copyPlain(k.look)
+  flash(t('studioPanel.palettes.copied'))
+}
+function pasteLook() {
+  const k = selected.value
+  if (!k?.look || !studioLookClipboard.value) return
+  recordEdit()
+  k.look = copyPlain(studioLookClipboard.value)
+  afterEdit()
+  flash(t('studioPanel.palettes.pasted'))
 }
 
 const depthOf = (scale: string) => { const d = -log10FromDecimalString(scale); return Number.isFinite(d) ? d : 0 }
@@ -231,9 +457,20 @@ const selectedDepth = computed(() => selected.value?.camera ? depthOf(selected.v
 function handleKey(e: KeyboardEvent): boolean {
   const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase()
   if (tag === 'input' || tag === 'select' || tag === 'textarea') return false
+  const mod = e.metaKey || e.ctrlKey
+  if (mod) {
+    switch (e.code) {
+      case 'KeyZ': if (e.shiftKey) redo(); else undo(); return true
+      case 'KeyY': redo(); return true
+      case 'KeyC': if (selected.value?.look) { copyLook(); return true } return false
+      case 'KeyV': if (selected.value?.look && studioLookClipboard.value) { pasteLook(); return true } return false
+    }
+    return false
+  }
   if (e.code === 'Space') { togglePlay(); return true }
+  // Physical keys: Alt+K types "˚" on a Mac layout.
+  if (e.code === 'KeyK') { if (!e.repeat) addKeyframe(e.shiftKey ? 'camera' : e.altKey ? 'look' : 'both'); return true }
   switch (e.key.toLowerCase()) {
-    case 'k': if (!e.repeat) addKeyframe(); return true
     case 'j': stepKeyframe(-1); return true
     case 'l': stepKeyframe(1); return true
     case 'home': seek(0); return true
@@ -253,7 +490,7 @@ const TRACKS = [
   { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 }, { id: 'audio', h: 56 }, { id: 'modulator', h: 28 },
 ] as const
 let frame: number | null = null
-let drag: { kind: 'head' } | { kind: 'key'; id: string } | null = null
+let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean } | null = null
 let lastSeek = 0
 const paletteCache = new Map<string, string>()
 
@@ -330,10 +567,11 @@ function draw() {
     }
     if (parcours.retime) {
       c.globalAlpha = 0.35; c.fillStyle = camColor
-      for (const k of parcours.keyframes) if (k.camera) c.fillRect(xOf(k.time, w) - 0.5, r.camera[0] + 4, 1, r.camera[1] - r.camera[0] - 8)
+      // Ghosts: where the keyframes were placed before the retiming.
+      for (const k of parcours.keyframes) if (k.camera) c.fillRect(xOf(parcoursTimeOfCameraTime(parcours, k.time), w) - 0.5, r.camera[0] + 4, 1, r.camera[1] - r.camera[0] - 8)
       c.globalAlpha = 1
     }
-    cams.forEach((k, i) => diamond(c, xOf(k.time, w), yv(depths[i]), camColor, k.id === selectedId.value))
+    cams.forEach((k, i) => diamond(c, xOf(parcoursTimeOfCameraTime(parcours, k.time), w), yv(depths[i]), camColor, k.id === selectedId.value))
     c.fillStyle = ink3; c.fillText(`1e-${depths[0].toFixed(1)} → 1e-${depths[depths.length - 1].toFixed(1)}`, PAD + 4, r.camera[0] + 8)
   } else {
     c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyCamera'), PAD + 4, (r.camera[0] + r.camera[1]) / 2)
@@ -354,8 +592,7 @@ function draw() {
       c.strokeStyle = lookColor; c.lineWidth = 1; c.beginPath()
       for (let x = holdX; x <= x1; x += 2) {
         const f = (x - holdX) / Math.max(1, x1 - holdX)
-        const probe = tOf(x, w)
-        const state = probe <= k.time ? 0 : f
+        const state = lookStateAt(parcours, tOf(x, w))?.w ?? f
         const yy = y0 + bandH - bandH * state
         if (x === holdX) c.moveTo(x, yy); else c.lineTo(x, yy)
       }
@@ -422,12 +659,14 @@ function draw() {
 function hitKeyframe(px: number, py: number, width: number): StudioKeyframe | null {
   const r = rows()
   const cams = cameraKeyframes(parcours)
+  let best: StudioKeyframe | null = null, bestDistance = 9
   for (const k of parcours.keyframes) {
-    const camTime = cams.find(c => c.id === k.id)?.time ?? k.time
-    if (k.camera && Math.abs(px - xOf(camTime, width)) <= 8 && py >= r.camera[0] && py < r.camera[1]) return k
-    if (k.look && Math.abs(px - xOf(k.time, width)) <= 8 && py >= r.look[0] && py < r.look[1]) return k
+    const [top, bottom] = k.camera ? r.camera : r.look
+    if (py < top || py >= bottom) continue
+    const distance = Math.abs(px - xOf(keyframeDisplayTime(parcours, k, cams), width))
+    if (distance < bestDistance) { best = k; bestDistance = distance }
   }
-  return null
+  return best
 }
 function onPointerDown(e: PointerEvent) {
   const canvas = canvasRef.value
@@ -435,7 +674,7 @@ function onPointerDown(e: PointerEvent) {
   const box = canvas.getBoundingClientRect(), px = e.clientX - box.left, py = e.clientY - box.top
   canvas.setPointerCapture(e.pointerId)
   const k = hitKeyframe(px, py, box.width)
-  if (k) { selectedId.value = k.id; drag = { kind: 'key', id: k.id } }
+  if (k) { selectKeyframe(k); drag = { kind: 'key', id: k.id, moved: false } }
   else { drag = { kind: 'head' }; throttledSeek(tOf(px, box.width), true) }
   invalidate()
 }
@@ -443,15 +682,23 @@ function onPointerMove(e: PointerEvent) {
   const canvas = canvasRef.value
   if (!drag || !canvas) return
   const box = canvas.getBoundingClientRect(), value = tOf(e.clientX - box.left, box.width)
-  if (drag.kind === 'head') throttledSeek(value, false)
-  else { moveStudioKeyframe(parcours, drag.id, Math.round(value * FPS) / FPS); invalidate() }
+  if (drag.kind === 'head') { throttledSeek(value, false); return }
+  const keyDrag = drag
+  const k = parcours.keyframes.find(x => x.id === keyDrag.id)
+  if (!k) return
+  if (!keyDrag.moved) { recordEdit(); keyDrag.moved = true }
+  // The playhead rides with the keyframe, so it stays the one being edited.
+  const at = Math.round(value * FPS) / FPS
+  moveStudioKeyframe(parcours, k.id, k.camera ? rampedTime(parcours, at) : at)
+  time.value = displayTime(k)
+  invalidate()
 }
 function onPointerUp(e: PointerEvent) {
   const canvas = canvasRef.value
   if (!drag || !canvas) return
   const box = canvas.getBoundingClientRect(), value = tOf(e.clientX - box.left, box.width)
   if (drag.kind === 'head') throttledSeek(value, true)
-  else afterEdit()
+  else if (drag.moved) afterEdit()
   drag = null
 }
 /** Scrubbing teleports the camera and resets the reference orbit: cap the rate. */
@@ -467,13 +714,27 @@ function throttledSeek(value: number, force: boolean) {
 let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   void refreshLibrary()
+  void refreshPalettes()
   void restoreAudio()
   resizeObserver = new ResizeObserver(() => invalidate())
   if (canvasRef.value?.parentElement) resizeObserver.observe(canvasRef.value.parentElement)
+  stageObserver = new ResizeObserver(() => publishStage())
+  window.addEventListener('resize', onWindowResize)
   invalidate()
 })
+watch(stageRef, (el, previous) => {
+  if (previous) stageObserver?.unobserve(previous)
+  if (el) stageObserver?.observe(el)
+  publishStage()
+}, { flush: 'post', immediate: true })
 onBeforeUnmount(() => {
+  disposed = true
+  if (lookTimer) clearTimeout(lookTimer)
+  if (cameraTimer) clearTimeout(cameraTimer)
   resizeObserver?.disconnect()
+  stageObserver?.disconnect()
+  window.removeEventListener('resize', onWindowResize)
+  emit('stage', null)
   if (frame !== null) cancelAnimationFrame(frame)
   player.destroy()
   rememberStudioDraft(parcours, savedId.value, time.value)
@@ -483,11 +744,11 @@ watch(() => JSON.stringify(parcours), () => { invalidate(); publishStudioParcour
 
 const timecode = computed(() => formatTimecode(time.value, FPS))
 const durationLabel = computed(() => formatSeconds(parcours.durationSeconds))
-const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.value), FPS))
+const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, time.value).time, FPS))
 </script>
 
 <template>
-  <div class="studio" :class="{ recording, playing }">
+  <div class="studio" :class="{ recording, playing, editor }">
     <div class="studio-bar">
       <div class="studio-brand">
         <i class="fa-solid fa-clapperboard" aria-hidden="true"></i>
@@ -510,9 +771,15 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
         <button class="tbtn" type="button" :title="t('studioPanel.transport.end')" @click="seek(parcours.durationSeconds)"><i class="fa-solid fa-forward-fast"></i></button>
         <button class="tbtn tbtn-rec" type="button" :aria-pressed="recording" :title="recording ? t('studioPanel.transport.stopRecord') : t('studioPanel.transport.record')" @click="toggleRecord"><i class="fa-solid fa-circle"></i></button>
         <div class="studio-tc" :title="t('studioPanel.transport.cameraTime', { time: cameraTimeLabel })">{{ timecode }}<small>/ {{ durationLabel }}</small></div>
-        <button class="sbtn sbtn-primary" type="button" :title="t('studioPanel.transport.keyframeTitle')" @click="addKeyframe()">
-          <i class="fa-solid fa-diamond"></i> {{ t('studioPanel.transport.keyframe') }} <kbd>K</kbd>
-        </button>
+        <div class="key-group">
+          <button class="sbtn sbtn-primary" type="button" :title="t('studioPanel.transport.keyframeTitle')" @click="addKeyframe()">
+            <i class="fa-solid fa-diamond"></i> {{ t('studioPanel.transport.keyframe') }} <kbd>K</kbd>
+          </button>
+          <button class="tbtn key-cam" type="button" :title="t('studioPanel.transport.keyframeCamera')" :aria-label="t('studioPanel.transport.keyframeCamera')" @click="addKeyframe('camera')"><i class="fa-solid fa-video"></i></button>
+          <button class="tbtn key-look" type="button" :title="t('studioPanel.transport.keyframeLook')" :aria-label="t('studioPanel.transport.keyframeLook')" @click="addKeyframe('look')"><i class="fa-solid fa-palette"></i></button>
+        </div>
+        <button class="tbtn" type="button" :disabled="!canUndo" :title="t('studioPanel.transport.undo')" :aria-label="t('studioPanel.transport.undo')" @click="undo"><i class="fa-solid fa-rotate-left"></i></button>
+        <button class="tbtn" type="button" :disabled="!canRedo" :title="t('studioPanel.transport.redo')" :aria-label="t('studioPanel.transport.redo')" @click="redo"><i class="fa-solid fa-rotate-right"></i></button>
         <button class="sbtn" type="button" :disabled="!cameraCount" @click="player.pause(); emit('export')">
           <i class="fa-solid fa-film"></i> {{ t('studioPanel.transport.export') }}
         </button>
@@ -522,8 +789,14 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
         <span v-else-if="status">{{ status }}</span>
         <span v-else>{{ t('studioPanel.status.keyframes', { total: parcours.keyframes.length, camera: cameraCount, look: lookCount }) }}</span>
       </div>
+      <button v-if="wide" class="tbtn" type="button" :aria-pressed="editor" :title="t(editor ? 'studioPanel.layout.dock' : 'studioPanel.layout.editor')" :aria-label="t(editor ? 'studioPanel.layout.dock' : 'studioPanel.layout.editor')" @click="toggleLayout">
+        <i :class="editor ? 'fa-solid fa-window-maximize' : 'fa-solid fa-table-columns'"></i>
+      </button>
       <button class="tbtn" type="button" :aria-label="t('common.close')" @click="emit('close')"><i class="fa-solid fa-xmark"></i></button>
     </div>
+
+    <!-- Editor layout: the live view is laid under this hole by the viewer. -->
+    <div v-if="editor" ref="stageRef" class="studio-stage" aria-hidden="true"></div>
 
     <div class="studio-main">
       <div class="studio-timeline">
@@ -541,23 +814,47 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
       </div>
 
       <aside class="studio-insp">
-        <template v-if="selected">
-          <h3>{{ t('studioPanel.inspector.title') }} <small>{{ formatTimecode(selected.time, FPS) }}</small></h3>
-          <DenseField :model-value="selected.time" :label="t('studioPanel.inspector.time')" :min="0" :max="parcours.durationSeconds" :step="1 / FPS" f="p2" unit="s" @update:model-value="setSelectedTime" />
-          <div class="scope">
-            <button type="button" class="chip cam" :aria-pressed="!!selected.camera" @click="setScope('camera', !selected.camera)"><i></i>{{ t('studioPanel.tracks.camera') }}</button>
-            <button type="button" class="chip look" :aria-pressed="!!selected.look" @click="setScope('look', !selected.look)"><i></i>{{ t('studioPanel.tracks.look') }}</button>
+        <!-- Edit state: where live edits go (studioPanel § editing linked to the keyframe). -->
+        <section v-if="editing && (pending.camera || pending.look || cameraKeyAtPlayhead || lookKeyAtPlayhead)" class="edit-state">
+          <div v-for="track in (['camera', 'look'] as const)" :key="track">
+            <div v-if="pending[track]" class="pending" :class="track">
+              <p><i></i>{{ t(`studioPanel.edit.pending.${track}`) }}</p>
+              <div class="pending-actions">
+                <button v-if="track === 'look' ? lookKeyAtPlayhead : cameraKeyAtPlayhead" class="sbtn sbtn-primary" type="button" @click="applyPending(track)">{{ t('studioPanel.edit.applyHere', { time: formatTimecode(time, FPS) }) }}</button>
+                <button class="sbtn" type="button" @click="addKeyframe(track)">{{ t('studioPanel.edit.newKeyframe') }}</button>
+                <button class="sbtn" type="button" @click="discardPending(track)">{{ t('studioPanel.edit.discard') }}</button>
+              </div>
+            </div>
+            <p v-else-if="track === 'look' ? lookKeyAtPlayhead : cameraKeyAtPlayhead" class="linked" :class="track"><i></i>{{ t(`studioPanel.edit.linked.${track}`) }}</p>
           </div>
+        </section>
+
+        <template v-if="selected">
+          <h3>{{ t(selected.camera ? 'studioPanel.inspector.titleCamera' : 'studioPanel.inspector.titleLook') }} <small>{{ formatTimecode(displayTime(selected), FPS) }}</small></h3>
+          <DenseField :model-value="displayTime(selected)" :label="t('studioPanel.inspector.time')" :min="0" :max="parcours.durationSeconds" :step="1 / FPS" f="p2" unit="s" @update:model-value="setSelectedTime" />
           <template v-if="selected.camera">
             <div class="readout"><span>{{ t('studioPanel.inspector.scaleExp') }}</span><b>1e-{{ selectedDepth.toFixed(2) }}</b></div>
             <div class="readout"><span>{{ t('studioPanel.inspector.angle') }}</span><b>{{ (selected.camera.angle * 180 / Math.PI).toFixed(1) }}°</b></div>
-            <button class="sbtn" type="button" @click="recapture('camera')">{{ t('studioPanel.inspector.captureCamera') }}</button>
+            <DenseSelect v-if="selected.id !== firstCameraId" :model-value="selected.ease ?? 'linear'" :label="t('studioPanel.inspector.ease')" :options="EASE_OPTIONS" :desc="t('studioPanel.inspector.easeDesc')" @update:model-value="setEase($event as StudioCameraEase)" />
+            <p class="hint">{{ t('studioPanel.inspector.cameraHint') }}</p>
           </template>
-          <template v-if="selected.look">
+          <template v-else-if="selected.look">
             <div class="swatch" :style="{ background: `linear-gradient(to right, ${lookGradient(selected.look).split('|').join(',')})` }"></div>
-            <DenseSeg :model-value="selected.curve" :label="t('studioPanel.inspector.curve')" :options="CURVE_OPTIONS" @update:model-value="selected.curve = $event as StudioKeyframe['curve']; afterEdit()" />
-            <DenseField :model-value="selected.hold" :label="t('studioPanel.inspector.hold')" :min="0" :max="0.95" :step="0.05" :f="(v: number) => String(Math.round(v * 100))" unit="%" :desc="t('studioPanel.inspector.holdDesc')" @update:model-value="selected.hold = $event; afterEdit()" />
-            <button class="sbtn" type="button" @click="recapture('look')">{{ t('studioPanel.inspector.captureLook') }}</button>
+            <DenseSeg :model-value="selected.curve" :label="t('studioPanel.inspector.curve')" :options="CURVE_OPTIONS" @update:model-value="setLookField('curve', $event)" />
+            <DenseField :model-value="selected.hold" :label="t('studioPanel.inspector.hold')" :min="0" :max="0.95" :step="0.05" :f="(v: number) => String(Math.round(v * 100))" unit="%" :desc="t('studioPanel.inspector.holdDesc')" @update:model-value="setLookField('hold', $event)" />
+            <div class="row2">
+              <button class="sbtn" type="button" :title="t('studioPanel.palettes.copyTitle')" @click="copyLook"><i class="fa-regular fa-copy"></i> {{ t('studioPanel.palettes.copy') }}</button>
+              <button class="sbtn" type="button" :disabled="!studioLookClipboard" :title="t('studioPanel.palettes.pasteTitle')" @click="pasteLook"><i class="fa-regular fa-paste"></i> {{ t('studioPanel.palettes.paste') }}</button>
+            </div>
+            <button class="sbtn" type="button" :title="t('studioPanel.inspector.editLookDesc')" @click="editLook"><i class="fa-solid fa-sliders"></i> {{ t('studioPanel.inspector.editLook') }}</button>
+            <h3>{{ t('studioPanel.palettes.title') }} <small>{{ palettes.length }}</small></h3>
+            <div v-if="palettes.length" class="palette-grid">
+              <button v-for="p in palettes" :key="p.guid ?? p.name" type="button" class="palette-tile" :title="t('studioPanel.palettes.applyTitle', { name: p.name })" @click="applyPalette(p)">
+                <span class="palette-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : { background: paletteSwatch(p) }"></span>
+                <span class="palette-name"><i v-if="p.favorite" class="fa-solid fa-star"></i>{{ p.name }}</span>
+              </button>
+            </div>
+            <p v-else class="empty">{{ t('studioPanel.palettes.empty') }}</p>
           </template>
           <button class="sbtn sbtn-danger" type="button" @click="deleteSelected">{{ t('studioPanel.inspector.delete') }}</button>
         </template>
@@ -565,10 +862,10 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
 
         <h3>{{ t('studioPanel.settings.title') }}</h3>
         <DenseField :model-value="parcours.durationSeconds" :label="t('studioPanel.settings.duration')" :min="STUDIO_MIN_DURATION" :max="600" :step="0.5" f="p1" unit="s" @update:model-value="setDuration" />
-        <DenseField :model-value="parcours.easeInSeconds" :label="t('studioPanel.settings.easeIn')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeInSeconds = $event; afterEdit()" />
-        <DenseField :model-value="parcours.easeOutSeconds" :label="t('studioPanel.settings.easeOut')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeOutSeconds = $event; afterEdit()" />
-        <DenseToggle :model-value="parcours.retime" :label="t('studioPanel.settings.retime')" :desc="t('studioPanel.settings.retimeDesc')" @update:model-value="parcours.retime = $event; afterEdit()" />
-        <DenseField :model-value="parcours.cornerSeconds" :label="t('studioPanel.settings.corner')" :min="0" :max="5" :step="0.1" f="p1" unit="s" :default="1" :desc="t('studioPanel.settings.cornerDesc')" @update:model-value="parcours.cornerSeconds = $event; afterEdit()" />
+        <DenseField :model-value="parcours.easeInSeconds" :label="t('studioPanel.settings.easeIn')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="setSetting('easeInSeconds', $event)" />
+        <DenseField :model-value="parcours.easeOutSeconds" :label="t('studioPanel.settings.easeOut')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="setSetting('easeOutSeconds', $event)" />
+        <DenseToggle :model-value="parcours.retime" :label="t('studioPanel.settings.retime')" :desc="t('studioPanel.settings.retimeDesc')" @update:model-value="setSetting('retime', $event)" />
+        <DenseField :model-value="parcours.cornerSeconds" :label="t('studioPanel.settings.corner')" :min="0" :max="5" :step="0.1" f="p1" unit="s" :default="1" :desc="t('studioPanel.settings.cornerDesc')" @update:model-value="setSetting('cornerSeconds', $event)" />
 
         <h3>{{ t('studioPanel.audio.title') }}</h3>
         <p v-if="audioBusy" class="empty">{{ t('studioPanel.audio.importing') }}</p>
@@ -652,19 +949,43 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
 .studio-canvas { position: relative; overflow: hidden; }
 .studio-canvas canvas { display: block; width: 100%; touch-action: none; cursor: crosshair; }
 .studio-insp { border-left: 1px solid var(--line-soft); padding: 6px 10px 10px; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
+.studio-insp > * { flex: none; }
+.key-group { display: inline-flex; gap: 2px; }
+.key-cam { color: oklch(0.72 0.15 245); } .key-look { color: oklch(0.72 0.16 320); }
+.tbtn:disabled { opacity: .4; cursor: default; }
+.edit-state { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 4px; }
+.edit-state .linked, .edit-state .pending p { margin: 0; display: flex; align-items: center; gap: 7px; font-size: 11.5px; line-height: 1.35; color: var(--ink-2); }
+.edit-state i { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.edit-state .camera i { background: oklch(0.72 0.15 245); } .edit-state .look i { background: oklch(0.72 0.16 320); }
+.edit-state .pending { border: 1px solid oklch(0.78 0.14 75 / .55); background: oklch(0.78 0.14 75 / .10); border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
+.edit-state .pending p { color: var(--ink); font-weight: 600; }
+.pending-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.pending-actions .sbtn { height: 24px; padding: 0 8px; font-size: 11.5px; }
+.hint { color: var(--ink-3); font-size: 11.5px; line-height: 1.4; margin: 2px 0; }
+.palette-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px; max-height: 236px; overflow: auto; padding-right: 2px; }
+.palette-tile { display: flex; flex-direction: column; gap: 3px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--row); color: var(--ink-2); font: inherit; font-size: 11px; cursor: pointer; text-align: left; min-width: 0; }
+.palette-tile:hover { border-color: oklch(0.72 0.16 320 / .6); color: var(--ink); }
+.palette-thumb { height: 22px; border-radius: 4px; background-size: cover; background-position: center; }
+.palette-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.palette-name i { color: oklch(0.82 0.15 85); font-size: 9px; margin-right: 4px; }
 .studio-insp h3 { margin: 6px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); display: flex; justify-content: space-between; }
 .studio-insp h3 small { font-family: var(--mono); text-transform: none; letter-spacing: 0; }
-.scope { display: flex; gap: 6px; margin: 2px 0 4px; }
-.chip { border: 1px solid var(--line); background: var(--row); color: var(--ink-2); border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-family: inherit; }
-.chip i { width: 7px; height: 7px; border-radius: 50%; opacity: .35; }
-.chip.cam i { background: oklch(0.72 0.15 245); } .chip.look i { background: oklch(0.72 0.16 320); }
-.chip[aria-pressed="true"] { color: var(--ink); } .chip[aria-pressed="true"] i { opacity: 1; }
-.chip.cam[aria-pressed="true"] { background: oklch(0.72 0.15 245 / .18); border-color: oklch(0.72 0.15 245 / .5); }
-.chip.look[aria-pressed="true"] { background: oklch(0.72 0.16 320 / .18); border-color: oklch(0.72 0.16 320 / .5); }
 .readout { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-2); padding: 2px 0; }
 .readout b { font-family: var(--mono); color: var(--ink); font-weight: 600; }
 .swatch { height: 12px; border-radius: 4px; margin: 2px 0 4px; border: 1px solid var(--line-soft); }
 .empty { color: var(--ink-3); font-size: 12px; margin: 8px 0; line-height: 1.45; }
+/* Editor layout: bar on top, viewer hole + timeline on the left, inspector full height on the right. */
+.studio.editor { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 26vw, 420px); grid-template-rows: auto minmax(0, 1fr) auto; gap: 6px; pointer-events: none; }
+.studio.editor .studio-main { display: contents; }
+.studio.editor .studio-bar, .studio.editor .studio-timeline, .studio.editor .studio-insp {
+  pointer-events: auto; background: var(--panel-bg); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--line); border-radius: 10px;
+}
+.studio.editor .studio-bar { grid-column: 1 / -1; grid-row: 1; }
+.studio.editor .studio-stage { grid-column: 1; grid-row: 2; min-height: 0; border: 1px solid var(--line); border-radius: 4px; pointer-events: none; }
+.studio.editor .studio-timeline { grid-column: 1; grid-row: 3; }
+.studio.editor .studio-insp { grid-column: 2; grid-row: 2 / 4; padding: 10px 14px 14px; gap: 6px; }
+.tbtn[aria-pressed="true"]:not(.tbtn-play):not(.tbtn-rec) { background: var(--row-on); }
 @media (max-width: 900px) {
   .studio-main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .studio-insp { border-left: 0; border-top: 1px solid var(--line-soft); }

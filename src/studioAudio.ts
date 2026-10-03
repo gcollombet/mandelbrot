@@ -136,9 +136,9 @@ export function buildMusicParcours(parcours: StudioParcours, analysis: AudioAnal
   const boundaries = [0, ...analysis.sections.filter(s => s > 1 && s < duration - 1)]
   let added = 0
   for (const at of boundaries) {
-    const existing = parcours.keyframes.find(k => Math.abs(k.time - at) < 0.5)
-    if (existing?.look) continue
-    const keyframe = addStudioKeyframe(parcours, at, { look: snapshotStudioLook(params), ...(parcours.keyframes.some(k => k.camera) ? {} : { camera: snapshotStudioCamera(params) }) })
+    if (parcours.keyframes.some(k => k.look && Math.abs(k.time - at) < 0.5)) continue
+    const keyframe = addStudioKeyframe(parcours, at, { look: snapshotStudioLook(params) }).find(k => k.look)!
+    if (!parcours.keyframes.some(k => k.camera)) addStudioKeyframe(parcours, at, { camera: snapshotStudioCamera(params) })
     keyframe.hold = 0.5
     keyframe.curve = 'gaussian'
     added++

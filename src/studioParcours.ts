@@ -37,12 +37,39 @@ export type StudioCamera = VideoPathLocation
  *  the discrete choices (textures, µ, trap shape) that switch at the keyframe. */
 export type StudioLook = PathAppearance & Partial<MandelbrotParams>
 
+/** Timing of the camera along the segment that ARRIVES at a keyframe. The path
+ *  itself (camera_path.rs) is unchanged: the ease only warps camera time
+ *  inside the segment. `hold` rests on the previous keyframe, then cuts. */
+export const STUDIO_CAMERA_EASES = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'hold'] as const
+export type StudioCameraEase = typeof STUDIO_CAMERA_EASES[number]
+export const isStudioCameraEase = (v: unknown): v is StudioCameraEase => (STUDIO_CAMERA_EASES as readonly unknown[]).includes(v)
+
+export function applyCameraEase(ease: StudioCameraEase | undefined, f: number): number {
+  const x = clamp(f, 0, 1)
+  switch (ease) {
+    case 'easeIn': return x * x
+    case 'easeOut': return 1 - (1 - x) * (1 - x)
+    case 'easeInOut': return x * x * (3 - 2 * x)
+    case 'hold': return x >= 1 ? 1 : 0
+    default: return x
+  }
+}
+
+/** A keyframe belongs to ONE track: it carries a camera or a look, never both,
+ *  so each diamond moves on its own. Older parcours that pinned both on one
+ *  keyframe are split on load (`validateStudioParcours`). */
+export type StudioTrack = 'camera' | 'look'
+
 export type StudioKeyframe = {
   id: string
-  /** Seconds from the start of the parcours. */
+  /** Seconds from the start of the parcours. A camera keyframe's time is in
+   *  CAMERA time (after the global ramps, see `rampedTime`); a look keyframe's
+   *  is in parcours time. `keyframeDisplayTime` maps both onto the playhead. */
   time: number
   camera?: StudioCamera
   look?: StudioLook
+  /** Camera timing of the segment that ARRIVES at this keyframe (default linear). */
+  ease?: StudioCameraEase
   /** Transfer curve of the look transition that ARRIVES at this keyframe. */
   curve: StopTransferCurve
   /** Fraction of the incoming segment during which the previous look holds
@@ -133,17 +160,27 @@ export function validateStudioParcours(value: unknown): StudioParcours {
   const durationSeconds = finite(p.durationSeconds, NaN)
   if (!(durationSeconds >= STUDIO_MIN_DURATION && durationSeconds <= STUDIO_MAX_DURATION)) throw new Error(t('studioPanel.errors.invalidDuration'))
   const ids = new Set<string>()
-  const keyframes = p.keyframes.map(k => {
+  const keyframes = p.keyframes.flatMap(k => {
     if (!k || typeof k.id !== 'string' || !k.id || ids.has(k.id) || !Number.isFinite(k.time) || k.time < 0 || k.time > durationSeconds
       || (!k.camera && !k.look)) throw new Error(t('studioPanel.errors.invalidKeyframe'))
     ids.add(k.id)
-    const out: StudioKeyframe = {
-      id: k.id, time: k.time,
-      curve: isStopTransferCurve(k.curve) ? k.curve : 'gaussian',
-      hold: clamp(finite(k.hold, 0), 0, 0.95),
+    const out: StudioKeyframe[] = []
+    if (k.camera) {
+      const camera: StudioKeyframe = { id: k.id, time: k.time, curve: 'gaussian', hold: 0, camera: validateCamera(k.camera) }
+      if (isStudioCameraEase(k.ease) && k.ease !== 'linear') camera.ease = k.ease
+      out.push(camera)
     }
-    if (k.camera) out.camera = validateCamera(k.camera)
-    if (k.look) out.look = snapshotStudioLook(k.look)
+    if (k.look) {
+      // A legacy keyframe pinning both is split: the look gets its own id.
+      let id = k.camera ? `${k.id}:look` : k.id
+      while (k.camera && ids.has(id)) id += "'"
+      ids.add(id)
+      out.push({
+        id, time: k.time, look: snapshotStudioLook(k.look),
+        curve: isStopTransferCurve(k.curve) ? k.curve : 'gaussian',
+        hold: clamp(finite(k.hold, 0), 0, 0.95),
+      })
+    }
     return out
   }).sort((a, b) => a.time - b.time)
   return {
@@ -163,39 +200,49 @@ export function newStudioParcours(name = t('studioPanel.newName')): StudioParcou
     easeInSeconds: 2, easeOutSeconds: 2, retime: false, cornerSeconds: 1, modulators: [] }
 }
 
-/** Insert a keyframe at `time`, merging into one already standing there. The
- *  duration grows to hold it; a keyframe past the end extends the parcours. */
-export function addStudioKeyframe(parcours: StudioParcours, time: number, scope: { camera?: StudioCamera; look?: StudioLook }): StudioKeyframe {
-  const at = Math.max(0, Math.round(time * 1000) / 1000)
-  const existing = parcours.keyframes.find(k => Math.abs(k.time - at) < STUDIO_KEYFRAME_MIN_GAP)
-  if (existing) {
-    if (scope.camera) existing.camera = copyPlain(scope.camera)
-    if (scope.look) existing.look = copyPlain(scope.look)
-    return existing
+export const keyframeTrack = (k: StudioKeyframe): StudioTrack => k.camera ? 'camera' : 'look'
+
+/** Pin a camera and/or a look: one keyframe per track. A keyframe of the same
+ *  track already standing there is updated instead. `time` is parcours time
+ *  (look keyframes); `cameraTime` the camera clock at that instant (camera
+ *  keyframes, see `rampedTime`). The duration grows to hold them. */
+export function addStudioKeyframe(
+  parcours: StudioParcours, time: number, scope: { camera?: StudioCamera; look?: StudioLook }, cameraTime = time,
+): StudioKeyframe[] {
+  const out: StudioKeyframe[] = []
+  const place = (track: StudioTrack, raw: number, fill: (k: StudioKeyframe) => void) => {
+    const at = Math.max(0, Math.round(raw * 1000) / 1000)
+    const existing = parcours.keyframes.find(k => keyframeTrack(k) === track && Math.abs(k.time - at) < STUDIO_KEYFRAME_MIN_GAP)
+    if (existing) { fill(existing); out.push(existing); return }
+    if (parcours.keyframes.length >= STUDIO_MAX_KEYFRAMES) throw new Error(t('studioPanel.errors.tooManyKeyframes', { max: STUDIO_MAX_KEYFRAMES }))
+    const keyframe: StudioKeyframe = { id: crypto.randomUUID(), time: at, curve: 'gaussian', hold: 0 }
+    fill(keyframe)
+    parcours.keyframes.push(keyframe)
+    if (at > parcours.durationSeconds) parcours.durationSeconds = Math.min(STUDIO_MAX_DURATION, at)
+    out.push(keyframe)
   }
-  if (parcours.keyframes.length >= STUDIO_MAX_KEYFRAMES) throw new Error(t('studioPanel.errors.tooManyKeyframes', { max: STUDIO_MAX_KEYFRAMES }))
-  const keyframe: StudioKeyframe = { id: crypto.randomUUID(), time: at, curve: 'gaussian', hold: 0 }
-  if (scope.camera) keyframe.camera = copyPlain(scope.camera)
-  if (scope.look) keyframe.look = copyPlain(scope.look)
-  parcours.keyframes.push(keyframe)
+  if (scope.camera) place('camera', cameraTime, k => { k.camera = copyPlain(scope.camera!) })
+  if (scope.look) place('look', time, k => { k.look = copyPlain(scope.look!) })
   parcours.keyframes.sort((a, b) => a.time - b.time)
-  if (at > parcours.durationSeconds) parcours.durationSeconds = Math.min(STUDIO_MAX_DURATION, at)
-  return keyframe
+  return out
 }
 
 export function removeStudioKeyframe(parcours: StudioParcours, id: string): void {
   parcours.keyframes = parcours.keyframes.filter(k => k.id !== id)
 }
 
-/** Move a keyframe in time, keeping it between its neighbours. */
+/** Move a keyframe in time (in its own clock), keeping it between the
+ *  neighbours of its track. */
 export function moveStudioKeyframe(parcours: StudioParcours, id: string, time: number): number {
-  const sorted = parcours.keyframes
-  const i = sorted.findIndex(k => k.id === id)
-  if (i < 0) return time
-  const lo = i > 0 ? sorted[i - 1].time + STUDIO_KEYFRAME_MIN_GAP : 0
-  const hi = i < sorted.length - 1 ? sorted[i + 1].time - STUDIO_KEYFRAME_MIN_GAP : parcours.durationSeconds
-  sorted[i].time = clamp(Math.round(time * 1000) / 1000, Math.min(lo, hi), Math.max(lo, hi))
-  return sorted[i].time
+  const self = parcours.keyframes.find(k => k.id === id)
+  if (!self) return time
+  const track = parcours.keyframes.filter(k => keyframeTrack(k) === keyframeTrack(self)).sort((a, b) => a.time - b.time)
+  const i = track.indexOf(self)
+  const lo = i > 0 ? track[i - 1].time + STUDIO_KEYFRAME_MIN_GAP : 0
+  const hi = i < track.length - 1 ? track[i + 1].time - STUDIO_KEYFRAME_MIN_GAP : parcours.durationSeconds
+  self.time = clamp(Math.round(time * 1000) / 1000, Math.min(lo, hi), Math.max(lo, hi))
+  parcours.keyframes.sort((a, b) => a.time - b.time)
+  return self.time
 }
 
 // ── Perceptual arc length ──
@@ -244,17 +291,63 @@ export function rampedTime(parcours: StudioParcours, time: number): number {
   return d * integral / area
 }
 
+/** Parcours time at which the ramped camera clock reaches `cameraTime`
+ *  (inverse of `rampedTime`, which is monotone). */
+export function parcoursTimeOfCameraTime(parcours: StudioParcours, cameraTime: number): number {
+  const d = parcours.durationSeconds
+  if (parcours.easeInSeconds <= 0 && parcours.easeOutSeconds <= 0) return clamp(cameraTime, 0, d)
+  let lo = 0, hi = d
+  for (let i = 0; i < 48; i++) {
+    const mid = (lo + hi) / 2
+    if (rampedTime(parcours, mid) < cameraTime) lo = mid; else hi = mid
+  }
+  return (lo + hi) / 2
+}
+
+/** Where a keyframe sits under the playhead, in parcours time: a look at its
+ *  time, a camera where the camera clock (ramps, retiming) reaches it. */
+export function keyframeDisplayTime(parcours: StudioParcours, keyframe: StudioKeyframe, cams = cameraKeyframes(parcours)): number {
+  if (!keyframe.camera) return keyframe.time
+  return parcoursTimeOfCameraTime(parcours, cams.find(c => c.id === keyframe.id)?.time ?? keyframe.time)
+}
+
+export type CameraClock = {
+  /** Camera time: ramps, then the ease of the segment under it. */
+  time: number
+  /** Index of the segment's first keyframe in the camera keyframe list. */
+  index: number
+  /** Linear and eased progress inside the segment, [0, 1]. */
+  linear: number
+  eased: number
+  /** The segment rests on its first keyframe until the cut. */
+  hold: boolean
+}
+
+/** Parcours time → camera time on the navigator path: the global ramps, then
+ *  the per-segment ease. Preview, export and the timeline all read this. */
+export function cameraClockAt(parcours: StudioParcours, time: number, keys = cameraKeyframes(parcours)): CameraClock {
+  const u = rampedTime(parcours, time)
+  if (keys.length < 2 || u <= keys[0].time) return { time: u, index: 0, linear: 0, eased: 0, hold: false }
+  const lastIndex = keys.length - 1
+  if (u >= keys[lastIndex].time) return { time: u, index: lastIndex, linear: 0, eased: 0, hold: false }
+  let i = 0
+  while (i < lastIndex - 1 && u > keys[i + 1].time) i++
+  const span = keys[i + 1].time - keys[i].time
+  const linear = span > 0 ? (u - keys[i].time) / span : 1
+  const ease = keys[i + 1].ease
+  const eased = applyCameraEase(ease, linear)
+  return { time: keys[i].time + span * eased, index: i, linear, eased, hold: ease === 'hold' }
+}
+
 export function cameraSegmentAt(parcours: StudioParcours, time: number): CameraSegment | null {
   const ks = cameraKeyframes(parcours)
   if (!ks.length) return null
-  const u = rampedTime(parcours, time)
-  if (u <= ks[0].time) return { from: ks[0].camera, to: ks[0].camera, localElapsed: 0, duration: 0, index: 0 }
-  const last = ks[ks.length - 1]
-  if (u >= last.time) return { from: last.camera, to: last.camera, localElapsed: 0, duration: 0, index: ks.length - 1 }
-  for (let i = 0; i < ks.length - 1; i++) {
-    if (u <= ks[i + 1].time) return { from: ks[i].camera, to: ks[i + 1].camera, localElapsed: u - ks[i].time, duration: ks[i + 1].time - ks[i].time, index: i }
-  }
-  return { from: last.camera, to: last.camera, localElapsed: 0, duration: 0, index: ks.length - 1 }
+  const clock = cameraClockAt(parcours, time, ks)
+  const from = ks[clock.index]
+  const to = ks[clock.index + 1]
+  if (!to || clock.time <= ks[0].time) return { from: from.camera, to: from.camera, localElapsed: 0, duration: 0, index: clock.index }
+  const duration = to.time - from.time
+  return { from: from.camera, to: to.camera, localElapsed: duration * clock.eased, duration, index: clock.index }
 }
 
 /** The camera keyframes as the navigator's path spec, `cx|cy|scale|angle|time;…`
@@ -324,7 +417,8 @@ export function formatSeconds(seconds: number): string {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** Camera keyframe times, in order, for prev/next navigation. */
+/** Keyframe positions under the playhead, in order, for prev/next navigation. */
 export function keyframeTimes(parcours: StudioParcours): number[] {
-  return [...new Set(parcours.keyframes.map(k => k.time))].sort((a, b) => a - b)
+  const cams = cameraKeyframes(parcours)
+  return [...new Set(parcours.keyframes.map(k => Math.round(keyframeDisplayTime(parcours, k, cams) * 1000) / 1000))].sort((a, b) => a - b)
 }

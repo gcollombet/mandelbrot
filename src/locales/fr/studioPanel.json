@@ -19,17 +19,19 @@
     "stopRecord": "Arrêter l'enregistrement",
     "cameraTime": "Temps caméra après rampes : {time}",
     "keyframe": "Keyframe",
-    "keyframeTitle": "Poser un keyframe caméra + look au curseur (K)",
-    "export": "Exporter…"
+    "keyframeTitle": "Poser un keyframe caméra et un keyframe look au curseur (K)",
+    "export": "Exporter…",
+    "keyframeCamera": "Keyframe caméra seul (Maj+K)",
+    "keyframeLook": "Keyframe look seul (Alt+K)",
+    "undo": "Annuler (Ctrl/Cmd+Z)",
+    "redo": "Rétablir (Ctrl/Cmd+Maj+Z)"
   },
   "status": {
     "keyframes": "{total} keyframes · {camera} caméra · {look} look"
   },
   "hints": {
     "record": "Enregistrement : naviguez, puis K pose un keyframe à l'instant courant",
-    "keyframeAdded": "Keyframe posé à {time}",
-    "cameraCaptured": "Caméra actuelle capturée dans le keyframe",
-    "lookCaptured": "Look actuel capturé dans le keyframe"
+    "keyframeAdded": "Keyframe posé à {time}"
   },
   "tracks": {
     "camera": "Caméra",
@@ -48,13 +50,18 @@
     "time": "Instant",
     "scaleExp": "Échelle",
     "angle": "Angle",
-    "captureCamera": "Capturer la caméra actuelle",
-    "captureLook": "Capturer le look actuel",
     "curve": "Courbe",
     "hold": "Maintien",
     "holdDesc": "Le look précédent tient pendant cette part du segment, puis bascule sur le reste.",
     "delete": "Supprimer le keyframe",
-    "empty": "Sélectionnez un keyframe dans la timeline, ou appuyez sur K pour en poser un au curseur."
+    "empty": "Cliquez un losange pour l'éditer (la tête de lecture s'y place), ou appuyez sur K pour poser la vue actuelle.",
+    "ease": "Interpolation",
+    "easeDesc": "Rythme de la caméra sur le segment qui arrive à ce keyframe. « Maintien » reste sur le keyframe précédent puis coupe.",
+    "editLook": "Ouvrir l'éditeur de palette",
+    "editLookDesc": "Ouvre le panneau Palettes sur ce keyframe : vos modifications s'y enregistrent tant que la tête de lecture reste ici.",
+    "titleCamera": "Keyframe caméra",
+    "titleLook": "Keyframe look",
+    "cameraHint": "Naviguez dans la vue : tant que la tête de lecture est sur ce keyframe, la vue s'y enregistre."
   },
   "curves": {
     "linear": "Linéaire",
@@ -133,5 +140,42 @@
     "ambientOcclusionStrength": "Occlusion ambiante",
     "tessellationLevel": "Tessellation",
     "lightAngle": "Angle de lumière"
+  },
+  "layout": {
+    "editor": "Vue éditeur : la fractale dans un cadre, inspecteur pleine hauteur",
+    "dock": "Vue plein écran : timeline ancrée sur la fractale"
+  },
+  "eases": {
+    "linear": "Linéaire",
+    "easeIn": "Accélération",
+    "easeOut": "Décélération",
+    "easeInOut": "Douce (entrée + sortie)",
+    "hold": "Maintien (coupe)"
+  },
+  "edit": {
+    "linked": {
+      "camera": "La navigation s'enregistre dans ce keyframe caméra.",
+      "look": "Les réglages de palette et de look s'enregistrent dans ce keyframe."
+    },
+    "pending": {
+      "camera": "Vue modifiée, non enregistrée",
+      "look": "Look modifié, non enregistré"
+    },
+    "applyHere": "Appliquer au keyframe {time}",
+    "newKeyframe": "Nouveau keyframe ici",
+    "discard": "Abandonner",
+    "applied": "Appliqué au keyframe {time}"
+  },
+  "palettes": {
+    "title": "Palettes",
+    "empty": "Aucune palette enregistrée. Enregistrez-en dans le panneau Palettes.",
+    "applyTitle": "Appliquer « {name} » à ce keyframe",
+    "applied": "Palette « {name} » appliquée",
+    "copy": "Copier",
+    "paste": "Coller",
+    "copyTitle": "Copier le look de ce keyframe (Ctrl/Cmd+C)",
+    "pasteTitle": "Coller le look copié sur ce keyframe (Ctrl/Cmd+V)",
+    "copied": "Look copié",
+    "pasted": "Look collé"
   }
 }

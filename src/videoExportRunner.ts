@@ -266,7 +266,12 @@ export async function runVideoExportToWebm(
           // Each frame accumulates from scratch: carrying samples across frames
           // would average two different camera positions together.
           if (elapsedSeconds !== null) {
-            if (tiledKeyframePlan) deps.engine.beginVideoExportFrame()
+            // Readiness must be judged on THIS frame's camera: the camera only
+            // steps at the next render, so without this flag the loop reads the
+            // previous frame's converged state and captures after a single
+            // pass. Harmless for a zoom (display reprojection), but a pan's
+            // freshly exposed band was emitted unrendered (black bands).
+            deps.engine.beginVideoExportFrame()
             deps.engine.beginExportFrameAa()
           }
         },

@@ -19,17 +19,19 @@
     "stopRecord": "Stop recording",
     "cameraTime": "Camera time after ramps: {time}",
     "keyframe": "Keyframe",
-    "keyframeTitle": "Drop a camera + look keyframe at the playhead (K)",
-    "export": "Export…"
+    "keyframeTitle": "Drop a camera keyframe and a look keyframe at the playhead (K)",
+    "export": "Export…",
+    "keyframeCamera": "Camera keyframe only (Shift+K)",
+    "keyframeLook": "Look keyframe only (Alt+K)",
+    "undo": "Undo (Ctrl/Cmd+Z)",
+    "redo": "Redo (Ctrl/Cmd+Shift+Z)"
   },
   "status": {
     "keyframes": "{total} keyframes · {camera} camera · {look} look"
   },
   "hints": {
     "record": "Recording: navigate, then K drops a keyframe at the current time",
-    "keyframeAdded": "Keyframe dropped at {time}",
-    "cameraCaptured": "Current camera captured into the keyframe",
-    "lookCaptured": "Current look captured into the keyframe"
+    "keyframeAdded": "Keyframe dropped at {time}"
   },
   "tracks": {
     "camera": "Camera",
@@ -48,13 +50,18 @@
     "time": "Time",
     "scaleExp": "Scale",
     "angle": "Angle",
-    "captureCamera": "Capture current camera",
-    "captureLook": "Capture current look",
     "curve": "Curve",
     "hold": "Hold",
     "holdDesc": "The previous look holds for this share of the segment, then crosses over the rest.",
     "delete": "Delete keyframe",
-    "empty": "Select a keyframe in the timeline, or press K to drop one at the playhead."
+    "empty": "Click a diamond to edit it (the playhead jumps to it), or press K to pin the current view.",
+    "ease": "Interpolation",
+    "easeDesc": "Camera timing over the segment arriving at this keyframe. “Hold” rests on the previous keyframe, then cuts.",
+    "editLook": "Open the palette editor",
+    "editLookDesc": "Opens the Palettes panel on this keyframe: your edits are stored in it while the playhead stays here.",
+    "titleCamera": "Camera keyframe",
+    "titleLook": "Look keyframe",
+    "cameraHint": "Navigate the view: while the playhead is on this keyframe, the view is stored in it."
   },
   "curves": {
     "linear": "Linear",
@@ -133,5 +140,42 @@
     "ambientOcclusionStrength": "Ambient occlusion",
     "tessellationLevel": "Tessellation",
     "lightAngle": "Light angle"
+  },
+  "layout": {
+    "editor": "Editor view: the fractal in a frame, full-height inspector",
+    "dock": "Full-screen view: timeline docked over the fractal"
+  },
+  "eases": {
+    "linear": "Linear",
+    "easeIn": "Ease in",
+    "easeOut": "Ease out",
+    "easeInOut": "Ease in-out",
+    "hold": "Hold (cut)"
+  },
+  "edit": {
+    "linked": {
+      "camera": "Navigation is stored in this camera keyframe.",
+      "look": "Palette and look settings are stored in this keyframe."
+    },
+    "pending": {
+      "camera": "View changed, not saved",
+      "look": "Look changed, not saved"
+    },
+    "applyHere": "Apply to keyframe {time}",
+    "newKeyframe": "New keyframe here",
+    "discard": "Discard",
+    "applied": "Applied to keyframe {time}"
+  },
+  "palettes": {
+    "title": "Palettes",
+    "empty": "No saved palette yet. Save some in the Palettes panel.",
+    "applyTitle": "Apply “{name}” to this keyframe",
+    "applied": "Palette “{name}” applied",
+    "copy": "Copy",
+    "paste": "Paste",
+    "copyTitle": "Copy this keyframe's look (Ctrl/Cmd+C)",
+    "pasteTitle": "Paste the copied look onto this keyframe (Ctrl/Cmd+V)",
+    "copied": "Look copied",
+    "pasted": "Look pasted"
   }
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { encodeHdrPng } from '../hdrPng';
 import { nearestPaletteStop } from '../palettePicking';
-import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
+import {computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import MandelbrotController from './MandelbrotController.vue';
@@ -369,7 +369,8 @@ if (import.meta.env.DEV) {
   w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
   // Studio export dry run: the real export loop and frame driver, no encoder.
   // Returns the camera and look placed for every frame, for determinism checks.
-  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number; width?: number; height?: number } = {}) => {
+  // `save: 'name'` writes every emitted frame to captures/name-###.png.
+  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number; width?: number; height?: number; save?: string } = {}) => {
     const ctrl = mandelbrotCtrlRef.value, engine = mandelbrotEngine.value;
     if (!ctrl || !engine) throw new Error('engine not ready');
     const valid = validateStudioParcours(parcours);
@@ -382,7 +383,7 @@ if (import.meta.env.DEV) {
     await engine.beginVideoExportSession({ magnificationThreshold: 4, outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1, batchTargetFps: 1 });
     try {
       const result = await runVideoExport({
-        setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else { await driver.placeFrame(t); engine.beginExportFrameAa(); } },
+        setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else { await driver.placeFrame(t); engine.beginVideoExportFrame(); engine.beginExportFrameAa(); } },
         drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
         isFrameReady: () => engine.videoFrameReady(),
         emitFrame: async (frame) => {
@@ -394,7 +395,15 @@ if (import.meta.env.DEV) {
           const done = pending.then((f) => { settled = true; return f; });
           void done.catch(() => {});
           for (let attempt = 0; attempt < 8 && !settled; attempt++) { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); }
-          (await done).close();
+          const videoFrame = await done;
+          if (opts.save) {
+            const canvas = document.createElement('canvas');
+            canvas.width = videoFrame.displayWidth; canvas.height = videoFrame.displayHeight;
+            canvas.getContext('2d')!.drawImage(videoFrame, 0, 0);
+            await fetch('/__capture/save', { method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ name: `${opts.save}-${String(frame.index).padStart(3, '0')}`, dataUrl: canvas.toDataURL('image/png') }) });
+          }
+          videoFrame.close();
           const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
           frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
             paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
@@ -1238,8 +1247,11 @@ function toggleTab(tabKey: string) {
     openTabs.delete(tabKey);
     delete popupPositions[tabKey];
   } else {
-    // Close any other open settings window first so only one is open at a time
-    closeAllSettings();
+    // Close any other open settings window first so only one is open at a time.
+    // The studio is a mode, not a window: a panel opened over it (Palettes to
+    // edit a keyframe's look, Video to export) leaves it in place.
+    if (tabKey === 'studio') closeAllSettings();
+    else closePopups();
     openTabs.add(tabKey);
     // Initialize centered position for new popup
     popupPositions[tabKey] = { x: -1, y: -1 };
@@ -1261,6 +1273,14 @@ function closeAllSettings() {
   invalidateDiscoveryLayout();
 }
 
+/** Close the floating panels but keep the studio: it is a mode the user
+ *  navigates under, so a click on the live view must not dismiss it. */
+function closePopups() {
+  const keepStudio = openTabs.has('studio');
+  closeAllSettings();
+  if (keepStudio) openTabs.add('studio');
+}
+
 // Close popups when tapping outside on mobile
 function handleOutsidePointerDown(e: PointerEvent) {
   const target = e.target as HTMLElement;
@@ -1276,7 +1296,7 @@ function handleOutsidePointerDown(e: PointerEvent) {
   );
   const insideBar = target.closest('.top-settings-bar');
   if (!insidePopup && !insideBar) {
-    closeAllSettings();
+    closePopups();
   }
 }
 
@@ -1307,7 +1327,9 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     }
     if (openTabs.size > 0) {
       e.preventDefault();
-      closeAllSettings();
+      // Panels first; the studio only closes once nothing floats over it.
+      if (openTabs.has('studio') && openTabs.size > 1) closePopups();
+      else closeAllSettings();
       return;
     }
     // Rien d'autre à fermer → masquer l'UI (Escape devient un bascule).
@@ -1463,7 +1485,8 @@ const dragOffset = ref({ x: 0, y: 0 });
 const draggingTab = ref<string | null>(null);
 // Z-index tracking: bring focused popup to front
 const tabZOrder = reactive<Record<string, number>>({});
-let nextZ = 51;
+// Above the studio dock (z 60): a panel opened from the studio must not land under it.
+let nextZ = 61;
 
 function bringToFront(tabKey: string) {
   tabZOrder[tabKey] = nextZ++;
@@ -2145,6 +2168,27 @@ async function startTravelToPreset(preset: PresetRecord) {
 // ── Studio mode (StudioPanel.vue): docked timeline under the live view ──
 const studioPanelRef = ref<InstanceType<typeof StudioPanel> | null>(null);
 const studioOpen = computed(() => openTabs.has('studio'));
+// Editor layout: the live view shrinks into the rectangle the panel reserves.
+type StudioStageRect = { left: number; top: number; width: number; height: number };
+const studioStage = ref<StudioStageRect | null>(null);
+const studioEditor = computed(() => studioOpen.value && !discoveryRadarActive.value && studioStage.value !== null);
+const liveViewStyle = computed(() => {
+  const r = studioEditor.value ? studioStage.value : null;
+  return r
+    ? { position: 'absolute', left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px`, display: 'block' }
+    : { width: '100%', height: '100%', display: 'block' };
+});
+const studioStageVars = computed(() => {
+  const r = studioEditor.value ? studioStage.value : null;
+  return r ? { '--stage-center': `${r.left + r.width / 2}px`, '--stage-bottom': `${r.top + r.height}px` } : {};
+});
+function onStudioStage(rect: StudioStageRect | null) {
+  const a = studioStage.value;
+  if (a === rect || (a && rect && a.left === rect.left && a.top === rect.top && a.width === rect.width && a.height === rect.height)) return;
+  studioStage.value = rect;
+}
+// The canvas only re-reads its size on a window resize: replay one once the new box is laid out.
+watch(liveViewStyle, () => { void nextTick(() => window.dispatchEvent(new Event('resize'))); });
 
 /** "Export…" in the studio: open the Video panel on the Studio parcours source. */
 function openStudioExport() {
@@ -2158,7 +2202,7 @@ function openStudioExport() {
 </script>
 
 <template>
-  <div ref="rootRef" style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
+  <div ref="rootRef" :style="[{ position: 'relative', height: '100vh', width: '100vw' }, studioStageVars]" :class="{ 'picker-cursor': pickerMode, 'studio-editor': studioEditor }">
     <!-- Indication affichée quand l'interface est masquée -->
     <div v-show="!showUI" class="ui-hidden-hint">
       <template v-if="isTouchDevice">{{ t('mandelbrotViewer.uiHidden.touch') }}</template>
@@ -2274,7 +2318,7 @@ function openStudioExport() {
       ref="mandelbrotCtrlRef"
       :navigation-locked="expmapBusy || !!expmapOpenDocument"
       :inert="expmapBusy || !!expmapOpenDocument"
-      style="width: 100%; height: 100%; display: block;"
+      :style="liveViewStyle"
       v-model:scale="mandelbrotParams.scale"
       v-model:angle="mandelbrotParams.angle"
       v-model:cx="mandelbrotParams.cx"
@@ -2736,6 +2780,7 @@ function openStudioExport() {
     <div
       v-if="studioOpen && !discoveryRadarActive"
       class="dense studio-dock"
+      :class="{ 'studio-dock-editor': studioEditor }"
       v-bind="denseAttrs(denseView)"
       role="region"
       :aria-label="t('shortcuts.tabs.studio')"
@@ -2749,6 +2794,8 @@ function openStudioExport() {
         :resolve-textures="resolveStudioTextures"
         @close="closeTab('studio')"
         @export="openStudioExport"
+        @stage="onStudioStage"
+        @open-palettes="openTabs.has('palettes') || toggleTab('palettes'); bringToFront('palettes')"
       />
     </div>
 
@@ -2936,6 +2983,24 @@ function openStudioExport() {
   overflow: hidden;
   padding-bottom: env(safe-area-inset-bottom);
 }
+
+/* Studio editor layout: the dock becomes the whole page under the top bar;
+   its panes carry their own chrome and the live view shows through the hole. */
+.studio-editor { background: #07080c; }
+.studio-dock.studio-dock-editor {
+  top: 58px;
+  height: auto;
+  background: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: visible;
+  pointer-events: none;
+}
+.studio-editor .render-stats-wrapper { left: var(--stage-center); bottom: calc(100vh - var(--stage-bottom) + 10px); }
+.studio-editor .aa-control { left: var(--stage-center); bottom: calc(100vh - var(--stage-bottom) + 50px); }
 
 .settings-popup {
   max-width: 96vw;
