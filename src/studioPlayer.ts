@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import type { MandelbrotParams } from './Mandelbrot'
 import {
   addStudioKeyframe, blendedLook, cameraSegmentAt, discreteLookFields, lookStateAt,
@@ -52,6 +52,10 @@ export interface StudioEngine {
   finishPresetTransition(): void
   cancelPresetTransition(): void
   readonly isPresetTransitionActive: boolean
+  isTileTextureSourceCurrent(sourceKey: string): boolean
+  isSkyboxTextureSourceCurrent(sourceKey: string): boolean
+  updateTileTexture(url: string, sourceKey?: string): Promise<void>
+  updateSkyboxTexture(url: string, sourceKey?: string): Promise<void>
 }
 
 export type StudioTextures = { tile: { url: string; key: string }; sky: { url: string; key: string }; release(): void }
@@ -362,3 +366,128 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
 }
 
 export type StudioPlayer = ReturnType<typeof createStudioPlayer>
+
+// ── Export frame driver ──
+//
+// The video export places every frame at an ABSOLUTE parcours time and pumps
+// the render until it converges, so a frame may be placed once and drawn many
+// times. `placeFrame` is therefore idempotent for a given time, awaits every
+// texture load it depends on (nothing is left to a watcher that may land a
+// frame late), and never touches the wall clock. The navigator is placed
+// through its own calls only, as the two-point export does: the engine
+// re-anchors its reference through the ordinary update path.
+
+export type StudioFrameDriver = {
+  placeFrame(parcoursTime: number): Promise<void>
+  /** Release textures and settle the GPU transition. Safe to call twice. */
+  finish(): void
+}
+
+export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: StudioParcours): StudioFrameDriver {
+  let cameraIndex = -1
+  let cameraSegmentActive = false
+  let lookKey = ''
+  let lookPreparedKey = ''
+  let heldTextures: StudioTextures | null = null
+  let restoredPalettePath: MandelbrotParams['palettePath'] | undefined
+  let palettePathSuspended = false
+  let finished = false
+
+  function releaseTextures() {
+    heldTextures?.release()
+    heldTextures = null
+  }
+
+  async function ensureTextures(look: StudioLook, engine: StudioEngine) {
+    const textures = await deps.resolveTextures(look)
+    try {
+      if (!engine.isTileTextureSourceCurrent(textures.tile.key)) await engine.updateTileTexture(textures.tile.url, textures.tile.key)
+      if (!engine.isSkyboxTextureSourceCurrent(textures.sky.key)) await engine.updateSkyboxTexture(textures.sky.url, textures.sky.key)
+    } finally {
+      textures.release()
+    }
+  }
+
+  async function placeFrame(t: number) {
+    if (finished) return
+    const controller = deps.getController(), navigator = controller?.getNavigator(), engine = deps.getEngine()
+    if (!controller || !navigator) throw new Error('Studio export: navigator unavailable')
+    const params = deps.params.value
+    if (!palettePathSuspended) {
+      palettePathSuspended = true
+      if (params.palettePath?.enabled) {
+        restoredPalettePath = params.palettePath
+        params.palettePath = { ...params.palettePath, enabled: false }
+      }
+    }
+
+    // Camera: one export transition per segment, re-armed at every hand-over.
+    const segment = cameraSegmentAt(parcours, t)
+    if (segment) {
+      const needsPlacement = segment.index !== cameraIndex || (segment.duration > 0) !== cameraSegmentActive
+      if (needsPlacement) {
+        navigator.cancel_transition()
+        navigator.origin(segment.from.cx, segment.from.cy)
+        navigator.scale(segment.from.scale)
+        navigator.angle(segment.from.angle)
+        if (segment.duration > 0) {
+          navigator.start_export_transition(segment.to.cx, segment.to.cy, segment.to.scale, segment.to.angle, segment.duration)
+        }
+        cameraIndex = segment.index
+        cameraSegmentActive = segment.duration > 0
+      }
+      controller.setExportTime(segment.duration > 0 ? Math.min(segment.localElapsed, segment.duration) : 0, t)
+    } else {
+      controller.setExportTime(0, t)
+    }
+
+    // Look: continuous fields through the preset mixer, stops through the
+    // engine's GPU transition, discrete fields at the keyframe.
+    const state = lookStateAt(parcours, t)
+    if (state && engine) {
+      const key = `${state.fromId}>${state.toId}`
+      const resting = state.w <= 0 || state.w >= 1 || state.fromId === state.toId
+      if (key !== lookKey) {
+        lookKey = key
+        if (engine.isPresetTransitionActive) engine.cancelPresetTransition()
+        lookPreparedKey = ''
+        releaseTextures()
+      }
+      Object.assign(params, blendedLook(state))
+      if (resting) {
+        const side = state.w >= 1 ? state.b : state.a
+        if (engine.isPresetTransitionActive) {
+          if (state.w >= 1) engine.finishPresetTransition()
+          else engine.cancelPresetTransition()
+          lookPreparedKey = ''
+          releaseTextures()
+        }
+        Object.assign(params, discreteLookFields(side))
+        await ensureTextures(side, engine)
+      } else {
+        if (lookPreparedKey !== key) {
+          releaseTextures()
+          heldTextures = await deps.resolveTextures(state.b)
+          const ok = await engine.preparePresetTransition(state.a as MandelbrotParams, state.b as MandelbrotParams, heldTextures.tile, heldTextures.sky)
+          if (!ok) throw new Error('Studio export: look transition could not be prepared')
+          lookPreparedKey = key
+        }
+        engine.setPresetTransitionProgress(state.w)
+      }
+    }
+    // Let the params reach the renderer's props before the frame is drawn.
+    await nextTick()
+  }
+
+  function finish() {
+    if (finished) return
+    finished = true
+    const engine = deps.getEngine()
+    if (engine?.isPresetTransitionActive) engine.cancelPresetTransition()
+    releaseTextures()
+    if (restoredPalettePath) deps.params.value.palettePath = restoredPalettePath
+    restoredPalettePath = undefined
+  }
+
+  return { placeFrame, finish }
+}

@@ -19,7 +19,8 @@
     "stopRecord": "Arrêter l'enregistrement",
     "cameraTime": "Temps caméra après rampes : {time}",
     "keyframe": "Keyframe",
-    "keyframeTitle": "Poser un keyframe caméra + look au curseur (K)"
+    "keyframeTitle": "Poser un keyframe caméra + look au curseur (K)",
+    "export": "Exporter…"
   },
   "status": {
     "keyframes": "{total} keyframes · {camera} caméra · {look} look"

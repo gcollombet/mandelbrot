@@ -11,7 +11,7 @@ import {
   type StudioKeyframe, type StudioLook, type StudioParcours,
 } from '../studioParcours'
 import { deleteStudioParcours, readStudioParcoursRecords, saveStudioParcours, type StudioParcoursRecord } from '../studioParcoursStore'
-import { recallStudioDraft, rememberStudioDraft } from '../studioDraft'
+import { publishStudioParcours, recallStudioDraft, rememberStudioDraft } from '../studioDraft'
 import { createStudioPlayer, type StudioController, type StudioEngine, type StudioTextures } from '../studioPlayer'
 import { DenseField, DenseSeg, DenseToggle } from './dense'
 
@@ -24,7 +24,7 @@ const props = defineProps<{
   controller: StudioController | null
   resolveTextures: (look: StudioLook) => Promise<StudioTextures>
 }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: []; export: [] }>()
 const { t } = useI18n()
 
 const FPS = 30
@@ -363,7 +363,7 @@ onBeforeUnmount(() => {
   rememberStudioDraft(parcours, savedId.value, time.value)
 })
 watch([time, playing, recording, selectedId], invalidate)
-watch(() => JSON.stringify(parcours), invalidate)
+watch(() => JSON.stringify(parcours), () => { invalidate(); publishStudioParcours(parcours) }, { immediate: true })
 
 const timecode = computed(() => formatTimecode(time.value, FPS))
 const durationLabel = computed(() => formatSeconds(parcours.durationSeconds))
@@ -396,6 +396,9 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
         <div class="studio-tc" :title="t('studioPanel.transport.cameraTime', { time: cameraTimeLabel })">{{ timecode }}<small>/ {{ durationLabel }}</small></div>
         <button class="sbtn sbtn-primary" type="button" :title="t('studioPanel.transport.keyframeTitle')" @click="addKeyframe()">
           <i class="fa-solid fa-diamond"></i> {{ t('studioPanel.transport.keyframe') }} <kbd>K</kbd>
+        </button>
+        <button class="sbtn" type="button" :disabled="!cameraCount" @click="player.pause(); emit('export')">
+          <i class="fa-solid fa-film"></i> {{ t('studioPanel.transport.export') }}
         </button>
       </div>
       <div class="studio-status">

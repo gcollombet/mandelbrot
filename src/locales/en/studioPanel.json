@@ -19,7 +19,8 @@
     "stopRecord": "Stop recording",
     "cameraTime": "Camera time after ramps: {time}",
     "keyframe": "Keyframe",
-    "keyframeTitle": "Drop a camera + look keyframe at the playhead (K)"
+    "keyframeTitle": "Drop a camera + look keyframe at the playhead (K)",
+    "export": "Export…"
   },
   "status": {
     "keyframes": "{total} keyframes · {camera} camera · {look} look"

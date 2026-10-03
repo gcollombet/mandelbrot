@@ -6,7 +6,8 @@ import {useRoute, useRouter} from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
-import { expmapOpenDocument, expmapBusy } from '../expmap/runtime';
+import { expmapOpenDocument, expmapBusy, expmapVideoSelected, shaderExpmapVideoSelected } from '../expmap/runtime';
+import { studioVideoSelected } from '../studioDraft';
 import Settings from './Settings.vue';
 import PalettePathPanel from './PalettePathPanel.vue';
 import RenderStats from './RenderStats.vue';
@@ -69,8 +70,10 @@ import AboutPanel from './AboutPanel.vue';
 import CloudAccountControl from './CloudAccountControl.vue';
 import LanguageSwitcher from './LanguageSwitcher.vue';
 import StudioPanel from './StudioPanel.vue';
-import type {StudioLook} from '../studioParcours';
-import type {StudioController, StudioTextures} from '../studioPlayer';
+import {createStudioFrameDriver, type StudioController} from '../studioPlayer';
+import {validateStudioParcours, type StudioParcours} from '../studioParcours';
+import {runVideoExport} from '../videoExportSession';
+import {resolveStudioTextures} from '../studioTextures';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 import {centredCropForRatio, renderStill, stillAspectRatio, stillPresetDimensions, STILL_PRESET_WIDTHS, type StillAspect, type StillSize} from '../stillExport';
@@ -357,12 +360,37 @@ if (import.meta.env.DEV) {
     getView: () => { const p = mandelbrotParams.value; return { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle }; },
     getEps: () => clampBlaEpsilon(mandelbrotParams.value.blaEpsilon),
   });
-  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown };
+  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown; __studioExport?: unknown; __engineReady?: unknown };
+  w.__engineReady = () => !!mandelbrotEngine.value && !!mandelbrotCtrlRef.value;
   w.__capture = dev.capture;
   w.__compare = dev.compare;
   w.__bench = bench.bench;
   // Live-path tests: patch viewer settings without touching localStorage.
   w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
+  // Studio export dry run: the real export loop and frame driver, no encoder.
+  // Returns the camera and look placed for every frame, for determinism checks.
+  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number } = {}) => {
+    const ctrl = mandelbrotCtrlRef.value, engine = mandelbrotEngine.value;
+    if (!ctrl || !engine) throw new Error('engine not ready');
+    const valid = validateStudioParcours(parcours);
+    const driver = createStudioFrameDriver({
+      getEngine: () => engine, getController: () => ctrl as unknown as StudioController,
+      params: mandelbrotParams, resolveTextures: resolveStudioTextures,
+    }, valid);
+    const frames: Record<string, unknown>[] = [];
+    const result = await runVideoExport({
+      setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else await driver.placeFrame(t); },
+      drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
+      isFrameReady: () => engine.videoFrameReady(),
+      emitFrame: async (frame) => {
+        const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
+        frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
+          paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
+          stops: mandelbrotParams.value.colorStops.length, transition: engine.isPresetTransitionActive });
+      },
+    }, { fps: opts.fps ?? 10, durationSeconds: valid.durationSeconds, maxPumpsPerFrame: opts.maxPumpsPerFrame ?? 4000 });
+    return { result, frames };
+  };
 }
 
 // ── Minibrot shortcuts (same actions as the Navigation panel) ──
@@ -2099,26 +2127,15 @@ async function startTravelToPreset(preset: PresetRecord) {
 const studioPanelRef = ref<InstanceType<typeof StudioPanel> | null>(null);
 const studioOpen = computed(() => openTabs.has('studio'));
 
-/** Textures a studio look refers to, as the engine's preset transition wants
- *  them. Same resolution as a preset travel: catalog reference → stored blob. */
-async function resolveStudioTextures(look: StudioLook): Promise<StudioTextures> {
-  const textures = await getTextureEntries();
-  const urls: string[] = [];
-  const resolve = async (kind: 'tile' | 'skybox') => {
-    const name = nameForCatalogReference(textures,
-      kind === 'tile' ? look.textureGuid : look.skyboxGuid,
-      kind === 'tile' ? look.textureName : look.skyboxName);
-    const fallback = kind === 'tile' ? 'Gold' : 'Window';
-    const effective = name && textures.some(t => t.name === name) ? name : fallback;
-    const url = await storedTextureObjectUrl(effective);
-    if (!url) throw new Error(`Texture introuvable : ${effective}`);
-    urls.push(url);
-    return { url, key: textureSourceKey(effective, textures) };
-  };
-  const tile = await resolve('tile');
-  const sky = await resolve('skybox');
-  return { tile, sky, release: () => urls.forEach(revokeObjectUrl) };
+/** "Export…" in the studio: open the Video panel on the Studio parcours source. */
+function openStudioExport() {
+  studioVideoSelected.value = true;
+  expmapVideoSelected.value = false;
+  shaderExpmapVideoSelected.value = false;
+  if (!openTabs.has('video')) toggleTab('video');
+  bringToFront('video');
 }
+
 </script>
 
 <template>
@@ -2710,6 +2727,7 @@ async function resolveStudioTextures(look: StudioLook): Promise<StudioTextures> 
         :controller="(mandelbrotCtrlRef as unknown as StudioController | null)"
         :resolve-textures="resolveStudioTextures"
         @close="closeTab('studio')"
+        @export="openStudioExport"
       />
     </div>
 

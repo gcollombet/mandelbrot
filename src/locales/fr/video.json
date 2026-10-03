@@ -24,7 +24,8 @@
     "navigatorUnavailable": "Navigateur indisponible.",
     "hdrCaptureUnavailable": "Capture HDR vidéo indisponible.",
     "cancelled": "Export annulé",
-    "interrupted": "Export interrompu"
+    "interrupted": "Export interrompu",
+    "studioMonolithicOnly": "Un parcours Studio s'exporte en rendu monolithique uniquement."
   },
   "session": {
     "frameTimeout": "Export vidéo interrompu : l’image {frame} n’a pas convergé après {pumps} passes de rendu. Aucune image partiellement convergée n’a été émise.",

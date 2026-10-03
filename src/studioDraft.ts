@@ -1,3 +1,4 @@
+import { ref, shallowRef } from 'vue'
 import type { StudioParcours } from './studioParcours'
 
 // The studio dock is unmounted when it closes. The parcours being edited
@@ -6,10 +7,24 @@ import type { StudioParcours } from './studioParcours'
 
 let draft: { parcours: StudioParcours; savedId: string; time: number } | null = null
 
+/** Latest state of the parcours under edit, for the Video panel's "Studio
+ *  parcours" source. A deep copy, refreshed by the dock on every change. */
+export const studioExportParcours = shallowRef<StudioParcours | null>(null)
+
+/** The Video panel exports the studio parcours instead of a two-point path. */
+export const studioVideoSelected = ref(false)
+
+const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
+
+export function publishStudioParcours(parcours: StudioParcours): void {
+  studioExportParcours.value = copy(parcours)
+}
+
 export function rememberStudioDraft(parcours: StudioParcours, savedId: string, time: number): void {
-  draft = { parcours: JSON.parse(JSON.stringify(parcours)), savedId, time }
+  draft = { parcours: copy(parcours), savedId, time }
+  publishStudioParcours(parcours)
 }
 
 export function recallStudioDraft(): { parcours: StudioParcours; savedId: string; time: number } | null {
-  return draft ? { parcours: JSON.parse(JSON.stringify(draft.parcours)), savedId: draft.savedId, time: draft.time } : null
+  return draft ? { parcours: copy(draft.parcours), savedId: draft.savedId, time: draft.time } : null
 }
