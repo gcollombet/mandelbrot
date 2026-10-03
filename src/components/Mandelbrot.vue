@@ -612,9 +612,12 @@ defineExpose({
   // so the parcours position and every cosmetic track phase are derived from
   // the same frame index and cannot drift apart. Pass null to hand both back to
   // wall-clock time.
-  setExportTime: (elapsedSeconds: number | null) => {
+  // The studio preview chains one export transition per camera segment: its
+  // camera clock restarts at every keyframe while the animation clock keeps the
+  // parcours time, hence the optional second argument.
+  setExportTime: (elapsedSeconds: number | null, animationSeconds: number | null = elapsedSeconds) => {
     exportTimeSeconds = elapsedSeconds;
-    if (engine) engine.animationTimeOverride = elapsedSeconds;
+    if (engine) engine.animationTimeOverride = elapsedSeconds === null ? null : animationSeconds;
     if (elapsedSeconds === null) navigator?.reset_step_clock();
   },
   isExporting: () => exportTimeSeconds !== null,

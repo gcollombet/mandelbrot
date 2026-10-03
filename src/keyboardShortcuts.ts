@@ -28,6 +28,7 @@ export function getSettingsTabs(layout: KeyboardLayout): SettingsTabDef[] {
     { key: 'animation', label: t('shortcuts.tabs.animation'), icon: 'fa-solid fa-wave-square', shortcut: 'c' },
     { key: 'expmap', label: t('shortcuts.tabs.expmap'), icon: 'fa-solid fa-database', shortcut: '' },
     { key: 'video', label: t('shortcuts.tabs.video'), icon: 'fa-solid fa-video', shortcut: 'k' },
+    { key: 'studio', label: t('shortcuts.tabs.studio'), icon: 'fa-solid fa-clapperboard', shortcut: '' },
     { key: 'performance', label: t('shortcuts.tabs.performance'), icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
     { key: 'about', label: t('shortcuts.tabs.about'), icon: 'fa-solid fa-circle-info', shortcut: 'i' },
   ];

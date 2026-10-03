@@ -68,6 +68,9 @@ import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
 import AboutPanel from './AboutPanel.vue';
 import CloudAccountControl from './CloudAccountControl.vue';
 import LanguageSwitcher from './LanguageSwitcher.vue';
+import StudioPanel from './StudioPanel.vue';
+import type {StudioLook} from '../studioParcours';
+import type {StudioController, StudioTextures} from '../studioPlayer';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 import {centredCropForRatio, renderStill, stillAspectRatio, stillPresetDimensions, STILL_PRESET_WIDTHS, type StillAspect, type StillSize} from '../stillExport';
@@ -1234,6 +1237,11 @@ function handleOutsidePointerDown(e: PointerEvent) {
 
 // Gestion clavier globale (W pour settings, Escape pour fermer)
 function handleGlobalKeydown(e: KeyboardEvent) {
+  // The studio owns the transport keys (Space, K, J, L, Home, End, Delete) while docked.
+  if (e.key !== 'Escape' && openTabs.has('studio') && studioPanelRef.value?.handleKey(e)) {
+    e.preventDefault();
+    return;
+  }
   if (e.key === 'Escape') {
     // Restaurer l'UI masquée en priorité.
     if (!showUI.value) {
@@ -2086,6 +2094,31 @@ async function startTravelToPreset(preset: PresetRecord) {
   
   travelAnimationId = requestAnimationFrame(tickTravelAnimation);
 }
+
+// ── Studio mode (StudioPanel.vue): docked timeline under the live view ──
+const studioPanelRef = ref<InstanceType<typeof StudioPanel> | null>(null);
+const studioOpen = computed(() => openTabs.has('studio'));
+
+/** Textures a studio look refers to, as the engine's preset transition wants
+ *  them. Same resolution as a preset travel: catalog reference → stored blob. */
+async function resolveStudioTextures(look: StudioLook): Promise<StudioTextures> {
+  const textures = await getTextureEntries();
+  const urls: string[] = [];
+  const resolve = async (kind: 'tile' | 'skybox') => {
+    const name = nameForCatalogReference(textures,
+      kind === 'tile' ? look.textureGuid : look.skyboxGuid,
+      kind === 'tile' ? look.textureName : look.skyboxName);
+    const fallback = kind === 'tile' ? 'Gold' : 'Window';
+    const effective = name && textures.some(t => t.name === name) ? name : fallback;
+    const url = await storedTextureObjectUrl(effective);
+    if (!url) throw new Error(`Texture introuvable : ${effective}`);
+    urls.push(url);
+    return { url, key: textureSourceKey(effective, textures) };
+  };
+  const tile = await resolve('tile');
+  const sky = await resolve('skybox');
+  return { tile, sky, release: () => urls.forEach(revokeObjectUrl) };
+}
 </script>
 
 <template>
@@ -2548,7 +2581,7 @@ async function startTravelToPreset(preset: PresetRecord) {
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
       <!-- Dense shell popup (ported panels) -->
       <div
-        v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key)"
+        v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key) && tab.key !== 'studio'"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="dense dense-popup"
         :class="{ 'sheet-expanded': expandedPanel }"
@@ -2622,7 +2655,7 @@ async function startTravelToPreset(preset: PresetRecord) {
 
       <!-- Legacy popup chrome (not-yet-ported panels) -->
 	      <div
-	        v-else-if="openTabs.has(tab.key) && !discoveryRadarActive"
+	        v-else-if="openTabs.has(tab.key) && !discoveryRadarActive && tab.key !== 'studio'"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="settings-popup"
         :style="popupStyle(tab.key)"
@@ -2660,6 +2693,25 @@ async function startTravelToPreset(preset: PresetRecord) {
         </div>
       </div>
     </template>
+
+    <!-- Studio: Resolve-style timeline docked under the live view (a mode of its own, beside the palette path) -->
+    <div
+      v-if="studioOpen && !discoveryRadarActive"
+      class="dense studio-dock"
+      v-bind="denseAttrs(denseView)"
+      role="region"
+      :aria-label="t('shortcuts.tabs.studio')"
+      @pointerdown.stop
+    >
+      <StudioPanel
+        ref="studioPanelRef"
+        :params="mandelbrotParams"
+        :engine="mandelbrotEngine"
+        :controller="(mandelbrotCtrlRef as unknown as StudioController | null)"
+        :resolve-textures="resolveStudioTextures"
+        @close="closeTab('studio')"
+      />
+    </div>
 
     <div v-if="guestImportPlan" class="guest-import-backdrop" role="presentation">
       <section class="guest-import-dialog" role="dialog" aria-modal="true" aria-labelledby="guest-import-title">
@@ -2825,6 +2877,25 @@ async function startTravelToPreset(preset: PresetRecord) {
 .dense-popup {
   pointer-events: auto;
   max-width: 96vw;
+}
+
+/* Studio dock: full-width timeline over the bottom of the live view. */
+.studio-dock {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  height: min(340px, 48dvh);
+  z-index: 60;
+  pointer-events: auto;
+  background: var(--panel-bg);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
+  overflow: hidden;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .settings-popup {

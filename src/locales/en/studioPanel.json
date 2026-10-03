@@ -1,0 +1,80 @@
+{
+  "newName": "New parcours",
+  "library": {
+    "name": "Parcours name",
+    "select": "Saved parcours",
+    "unsaved": "New / unsaved",
+    "new": "New",
+    "saved": "Parcours saved",
+    "deleted": "Parcours deleted"
+  },
+  "transport": {
+    "start": "Start (Home)",
+    "prevKey": "Previous keyframe (J)",
+    "play": "Play (Space)",
+    "pause": "Pause (Space)",
+    "nextKey": "Next keyframe (L)",
+    "end": "End (End)",
+    "record": "Record: the clock runs, navigate freely and drop keyframes",
+    "stopRecord": "Stop recording",
+    "cameraTime": "Camera time after ramps: {time}",
+    "keyframe": "Keyframe",
+    "keyframeTitle": "Drop a camera + look keyframe at the playhead (K)"
+  },
+  "status": {
+    "keyframes": "{total} keyframes · {camera} camera · {look} look"
+  },
+  "hints": {
+    "record": "Recording: navigate, then K drops a keyframe at the current time",
+    "keyframeAdded": "Keyframe dropped at {time}",
+    "cameraCaptured": "Current camera captured into the keyframe",
+    "lookCaptured": "Current look captured into the keyframe"
+  },
+  "tracks": {
+    "camera": "Camera",
+    "look": "Look",
+    "discrete": "Discrete",
+    "emptyCamera": "No camera keyframe yet: press K to pin the current view",
+    "emptyLook": "No look keyframe",
+    "ariaTimeline": "Timeline tracks"
+  },
+  "inspector": {
+    "title": "Keyframe",
+    "time": "Time",
+    "scaleExp": "Scale",
+    "angle": "Angle",
+    "captureCamera": "Capture current camera",
+    "captureLook": "Capture current look",
+    "curve": "Curve",
+    "hold": "Hold",
+    "holdDesc": "The previous look holds for this share of the segment, then crosses over the rest.",
+    "delete": "Delete keyframe",
+    "empty": "Select a keyframe in the timeline, or press K to drop one at the playhead."
+  },
+  "curves": {
+    "linear": "Linear",
+    "gaussian": "Smooth",
+    "square": "Cut",
+    "exponential": "Exponential"
+  },
+  "settings": {
+    "title": "Parcours",
+    "duration": "Duration",
+    "easeIn": "Ease in",
+    "easeOut": "Ease out",
+    "retime": "Perceptual retiming",
+    "retimeDesc": "Redistributes camera durations for a constant perceived speed (zoom decades, pan, angle)."
+  },
+  "discrete": {
+    "texture": "texture",
+    "skybox": "skybox",
+    "stops": "palette"
+  },
+  "errors": {
+    "invalidCamera": "Invalid keyframe camera.",
+    "invalidParcours": "This parcours cannot be read.",
+    "invalidDuration": "Invalid parcours duration.",
+    "invalidKeyframe": "Invalid keyframe.",
+    "tooManyKeyframes": "At most {max} keyframes per parcours."
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "newName": "Nouveau parcours",
+  "library": {
+    "name": "Nom du parcours",
+    "select": "Parcours enregistrés",
+    "unsaved": "Nouveau / non enregistré",
+    "new": "Nouveau",
+    "saved": "Parcours enregistré",
+    "deleted": "Parcours supprimé"
+  },
+  "transport": {
+    "start": "Début (Début)",
+    "prevKey": "Keyframe précédent (J)",
+    "play": "Lecture (Espace)",
+    "pause": "Pause (Espace)",
+    "nextKey": "Keyframe suivant (L)",
+    "end": "Fin (Fin)",
+    "record": "Enregistrer : l'horloge tourne, naviguez librement et posez des keyframes",
+    "stopRecord": "Arrêter l'enregistrement",
+    "cameraTime": "Temps caméra après rampes : {time}",
+    "keyframe": "Keyframe",
+    "keyframeTitle": "Poser un keyframe caméra + look au curseur (K)"
+  },
+  "status": {
+    "keyframes": "{total} keyframes · {camera} caméra · {look} look"
+  },
+  "hints": {
+    "record": "Enregistrement : naviguez, puis K pose un keyframe à l'instant courant",
+    "keyframeAdded": "Keyframe posé à {time}",
+    "cameraCaptured": "Caméra actuelle capturée dans le keyframe",
+    "lookCaptured": "Look actuel capturé dans le keyframe"
+  },
+  "tracks": {
+    "camera": "Caméra",
+    "look": "Look",
+    "discrete": "Discret",
+    "emptyCamera": "Aucun keyframe caméra : appuyez sur K pour poser la vue actuelle",
+    "emptyLook": "Aucun keyframe look",
+    "ariaTimeline": "Pistes de la timeline"
+  },
+  "inspector": {
+    "title": "Keyframe",
+    "time": "Instant",
+    "scaleExp": "Échelle",
+    "angle": "Angle",
+    "captureCamera": "Capturer la caméra actuelle",
+    "captureLook": "Capturer le look actuel",
+    "curve": "Courbe",
+    "hold": "Maintien",
+    "holdDesc": "Le look précédent tient pendant cette part du segment, puis bascule sur le reste.",
+    "delete": "Supprimer le keyframe",
+    "empty": "Sélectionnez un keyframe dans la timeline, ou appuyez sur K pour en poser un au curseur."
+  },
+  "curves": {
+    "linear": "Linéaire",
+    "gaussian": "Douce",
+    "square": "Bascule",
+    "exponential": "Exponentielle"
+  },
+  "settings": {
+    "title": "Parcours",
+    "duration": "Durée",
+    "easeIn": "Rampe d'entrée",
+    "easeOut": "Rampe de sortie",
+    "retime": "Re-timing perceptif",
+    "retimeDesc": "Répartit les durées caméra pour une vitesse perçue constante (décades de zoom, déplacement, angle)."
+  },
+  "discrete": {
+    "texture": "texture",
+    "skybox": "skybox",
+    "stops": "palette"
+  },
+  "errors": {
+    "invalidCamera": "Caméra de keyframe invalide.",
+    "invalidParcours": "Ce parcours est illisible.",
+    "invalidDuration": "Durée de parcours invalide.",
+    "invalidKeyframe": "Keyframe invalide.",
+    "tooManyKeyframes": "Au plus {max} keyframes par parcours."
+  }
+}

@@ -8,7 +8,8 @@
     "expmap": "Rendering",
     "video": "Video",
     "performance": "Performance",
-    "about": "Help"
+    "about": "Help",
+    "studio": "Studio"
   },
   "groups": {
     "move": "Move",
