@@ -386,6 +386,15 @@ if (import.meta.env.DEV) {
         drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
         isFrameReady: () => engine.videoFrameReady(),
         emitFrame: async (frame) => {
+          // Same capture drive as the runner: the capture is fulfilled at the end
+          // of the next render, which is also where the camera steps.
+          const pending = engine.captureExportFrame({ outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1,
+            timestampMicros: Math.round(frame.index * 1e6 / (opts.fps ?? 10)), durationMicros: Math.round(1e6 / (opts.fps ?? 10)) });
+          let settled = false;
+          const done = pending.then((f) => { settled = true; return f; });
+          void done.catch(() => {});
+          for (let attempt = 0; attempt < 8 && !settled; attempt++) { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); }
+          (await done).close();
           const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
           frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
             paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
