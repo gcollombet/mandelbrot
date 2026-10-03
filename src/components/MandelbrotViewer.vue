@@ -759,6 +759,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   horizonOcclusionStrength: 0,
   horizonOcclusionRadius: 0.1,
   indirectLightStrength: 0,
+  reliefClosing: 0,
   tiltViewTilt: 0,
   tiltViewHeading: 0,
   tiltViewRelief: 10,
@@ -1969,6 +1970,7 @@ function tickTravelAnimation() {
     mandelbrotParams.value.horizonOcclusionStrength = target.horizonOcclusionStrength ?? 0;
     mandelbrotParams.value.horizonOcclusionRadius = target.horizonOcclusionRadius ?? 0.1;
     mandelbrotParams.value.indirectLightStrength = target.indirectLightStrength ?? 0;
+    mandelbrotParams.value.reliefClosing = target.reliefClosing ?? 0;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
     mandelbrotParams.value.gradeSaturation = target.gradeSaturation ?? 1.12;
@@ -2263,6 +2265,7 @@ async function startTravelToPreset(preset: PresetRecord) {
       :horizonOcclusionStrength="mandelbrotParams.horizonOcclusionStrength"
       :horizonOcclusionRadius="mandelbrotParams.horizonOcclusionRadius"
       :indirectLightStrength="mandelbrotParams.indirectLightStrength"
+      :reliefClosing="mandelbrotParams.reliefClosing"
       :tiltViewTilt="mandelbrotParams.tiltViewTilt"
       :tiltViewHeading="mandelbrotParams.tiltViewHeading"
       :tiltViewRelief="mandelbrotParams.tiltViewRelief"

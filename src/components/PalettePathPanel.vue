@@ -8,7 +8,7 @@ import type { MandelbrotParams } from '../Mandelbrot'
 import type { Engine } from '../Engine'
 import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
 import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../presetStore'
-import { newPalettePath, snapshotPathAppearance, validatePalettePath, pathSegment, type PalettePath, type PalettePathStop } from '../palettePath'
+import { PALETTE_PATH_MAX_STOPS, newPalettePath, snapshotPathAppearance, validatePalettePath, pathSegment, type PalettePath, type PalettePathStop } from '../palettePath'
 import { readPalettePaths, savePalettePath, deletePalettePath } from '../palettePathStore'
 import { log10FromDecimalString } from '../floatexp'
 import { savePalettePathSnapshot } from '../savePalettePathSnapshot'
@@ -44,8 +44,8 @@ const isEndpoint = computed(() => stopIndex.value <= 0 || stopIndex.value >= sto
 const start = computed(() => stops.value[0].magnitude), end = computed(() => stops.value[stops.value.length - 1].magnitude)
 const percent = (m: number) => 100 * (m - start.value) / (end.value - start.value)
 const progress = computed(() => Math.max(0, Math.min(100, percent(depth.value))))
-const stopMin = computed(() => isEndpoint.value ? start.value : stops.value[stopIndex.value - 1].magnitude + STOP_GAP)
-const stopMax = computed(() => isEndpoint.value ? end.value : stops.value[stopIndex.value + 1].magnitude - STOP_GAP)
+const stopMin = computed(() => stopIndex.value <= 0 ? MAGNITUDE_MIN : stops.value[stopIndex.value - 1].magnitude + STOP_GAP)
+const stopMax = computed(() => stopIndex.value >= stops.value.length - 1 ? MAGNITUDE_MAX : stops.value[stopIndex.value + 1].magnitude - STOP_GAP)
 const editingStop = computed(() => stops.value.find(s => s.id === props.editingStopId))
 const savedOptions = computed(() => [{ value: '', label: t('palettePathPanel.savedNew') }, ...saved.value.map(p => ({ value: p.id, label: p.name }))])
 const fmt = (v: number) => v.toFixed(2)
@@ -70,12 +70,40 @@ let publishTimer: ReturnType<typeof setTimeout> | undefined
 function publishSoon() { clearTimeout(publishTimer); publishTimer = setTimeout(publish, 180) }
 
 // ── Range and stops ──
+// Start/end move only their own endpoint stop: the other stops keep their magnitude (nothing is stretched).
 function setRange(value: number, first: boolean) { guard(() => {
-  const a = first ? value : start.value, b = first ? end.value : value
-  if (!Number.isFinite(a) || !Number.isFinite(b) || b - a < 0.001) throw new Error(t('palettePathPanel.errors.endAfterStart'))
-  const oldA = start.value, span = end.value - oldA
-  stops.value.forEach(s => { s.magnitude = a + (s.magnitude - oldA) / span * (b - a) }); publishSoon()
+  if (!Number.isFinite(value)) throw new Error(t('palettePathPanel.errors.endAfterStart'))
+  const target = first ? stops.value[0] : stops.value[stops.value.length - 1], neighbour = first ? stops.value[1] : stops.value[stops.value.length - 2]
+  if (first ? value > neighbour.magnitude - STOP_GAP : value < neighbour.magnitude + STOP_GAP) throw new Error(t('palettePathPanel.errors.endAfterStart'))
+  target.magnitude = Math.max(MAGNITUDE_MIN, Math.min(MAGNITUDE_MAX, value)); publishSoon()
 }) }
+// Extending adds a copy of the outermost stop at the new bound, so existing stops stay where they are.
+const OCTAVE = Math.log10(2)
+const octaves = ref(3)
+const canExtendToZoom = computed(() => Number.isFinite(depth.value) && (depth.value > end.value + STOP_GAP || depth.value < start.value - STOP_GAP))
+function extendTo(m: number, atEnd: boolean) {
+  if (stops.value.length >= PALETTE_PATH_MAX_STOPS) return
+  m = Math.max(MAGNITUDE_MIN, Math.min(MAGNITUDE_MAX, m))
+  if (atEnd ? m <= end.value + STOP_GAP : m >= start.value - STOP_GAP) return
+  const edge = atEnd ? stops.value[stops.value.length - 1] : stops.value[0]
+  const s: PalettePathStop = { ...copy(edge), id: crypto.randomUUID(), magnitude: m }
+  if (atEnd) stops.value.push(s); else stops.value.unshift(s)
+  selected.value = s.id; publish()
+}
+const extendEnd = () => extendTo(end.value + octaves.value * OCTAVE, true)
+const extendStart = () => extendTo(start.value - octaves.value * OCTAVE, false)
+const extendToZoom = () => { if (depth.value > end.value) extendTo(depth.value, true); else if (depth.value < start.value) extendTo(depth.value, false) }
+function duplicateStop() {
+  const i = stopIndex.value, next = stops.value[i + 1], prev = stops.value[i - 1]
+  const other = next ?? prev; if (!other || stops.value.length >= PALETTE_PATH_MAX_STOPS) return
+  const m = (stop.value.magnitude + other.magnitude) / 2
+  if (Math.abs(other.magnitude - stop.value.magnitude) < 2 * STOP_GAP) return
+  const s: PalettePathStop = { ...copy(stop.value), id: crypto.randomUUID(), magnitude: m }
+  stops.value.push(s); stops.value.sort((a, b) => a.magnitude - b.magnitude); selected.value = s.id; publish()
+}
+function onKey(event: KeyboardEvent, id: string) {
+  if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); selected.value = id; removeStop() }
+}
 function add(m = depth.value) {
   if (stops.value.length >= 64) return
   const magnitude = Math.max(start.value + STOP_GAP, Math.min(end.value - STOP_GAP, m))
@@ -93,7 +121,6 @@ function addInGap() {
 }
 function removeStop() { if (stops.value.length <= 2) return; draft.value.stops = stops.value.filter(s => s.id !== selected.value); selected.value = stops.value[0].id; publish() }
 function moveStop(value: number) {
-  if (isEndpoint.value) return
   stop.value.magnitude = Math.max(stopMin.value, Math.min(stopMax.value, value))
 }
 function onMagnitude(value: number) { moveStop(value); publishSoon() }
@@ -102,7 +129,7 @@ function onMagnitude(value: number) { moveStop(value); publishSoon() }
 const canvas = ref<HTMLCanvasElement>(), strip = ref<HTMLElement>(), dragging = ref(false)
 function pointer(event: PointerEvent, id: string) { selected.value = id; dragging.value = true; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
 function drag(event: PointerEvent) {
-  if (!dragging.value || !strip.value) return
+  if (!dragging.value || !strip.value || isEndpoint.value) return
   const box = strip.value.getBoundingClientRect(); moveStop(start.value + (event.clientX - box.left) / box.width * (end.value - start.value))
 }
 function drop() { if (!dragging.value) return; dragging.value = false; publish() }
@@ -212,14 +239,23 @@ onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); c
             :style="{ left: percent(s.magnitude) + '%', background: stopColor(s) }"
             :aria-label="t('palettePathPanel.path.stopAt', { name: s.name, value: fmt(s.magnitude) }) + (s.id === editingStopId ? t('palettePathPanel.path.editingSuffix') : '')"
             :title="s.name + ' · ' + fmt(s.magnitude)"
-            @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id" @dblclick.stop="emit('edit-stop', s.id)"></button>
+            @keydown="onKey($event, s.id)" @contextmenu.prevent="selected = s.id; removeStop()" @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id" @dblclick.stop="emit('edit-stop', s.id)"></button>
         </div>
         <p class="panel-note">{{ t('palettePathPanel.path.hints') }}</p>
         <p v-if="editingStop" class="panel-note editing-note" role="status">{{ t('palettePathPanel.path.editingNote', { name: editingStop.name }) }}</p>
         <div class="transfer">
           <span class="count">{{ t('palettePathPanel.path.count', { count: stops.length, value: fmt(depth) }) }}</span>
           <button type="button" class="mini-btn" :disabled="stops.length >= 64" @click="addInGap">{{ t('palettePathPanel.path.addStop') }}</button>
+          <button type="button" class="mini-btn" :disabled="stops.length >= 64 || !Number.isFinite(depth)" :title="t('palettePathPanel.path.addHereTitle')" @click="add()">{{ t('palettePathPanel.path.addHere') }}</button>
           <button type="button" class="mini-btn" :disabled="savingSnapshot || !Number.isFinite(depth)" :title="t('palettePathPanel.path.extractTitle')" @click="extractCurrentMix">{{ savingSnapshot ? t('palettePathPanel.path.extracting') : t('palettePathPanel.path.extract') }}</button>
+        </div>
+        <div class="transfer">
+          <DenseField :label="t('palettePathPanel.path.octaves')" :min="0.1" :max="100" :step="0.5" :f="fmt" :default="3" v-model="octaves" />
+        </div>
+        <div class="transfer">
+          <button type="button" class="mini-btn" :title="t('palettePathPanel.path.extendStartTitle')" @click="extendStart">{{ t('palettePathPanel.path.extendStart') }}</button>
+          <button type="button" class="mini-btn" :title="t('palettePathPanel.path.extendEndTitle')" @click="extendEnd">{{ t('palettePathPanel.path.extendEnd') }}</button>
+          <button type="button" class="mini-btn primary" :disabled="!canExtendToZoom" :title="t('palettePathPanel.path.extendZoomTitle')" @click="extendToZoom">{{ t('palettePathPanel.path.extendZoom') }}</button>
         </div>
         <p v-if="snapshotStatus" class="panel-note" role="status">{{ snapshotStatus }}</p>
       </DenseSection>
@@ -232,9 +268,7 @@ onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); c
           <span class="stop-pos">{{ stopIndex + 1 }} / {{ stops.length }}</span>
         </div>
         <div class="fields">
-          <fieldset :disabled="isEndpoint" class="bare" :title="isEndpoint ? t('palettePathPanel.stop.endpointLocked') : undefined">
-            <DenseField :label="t('palettePathPanel.stop.magnitude')" :min="stopMin" :max="stopMax" :step="0.01" :f="fmt" :model-value="stop.magnitude" @update:model-value="onMagnitude" />
-          </fieldset>
+          <DenseField :label="t('palettePathPanel.stop.magnitude')" :min="stopMin" :max="stopMax" :step="0.01" :f="fmt" :model-value="stop.magnitude" @update:model-value="onMagnitude" />
           <DenseSelect v-model="stop.curve" :label="t('palettePathPanel.stop.nextTransition')" :options="CURVE_OPTIONS" default="linear" @update:model-value="publish" />
         </div>
         <div class="subhead">{{ t('palettePathPanel.stop.fill') }}</div>
@@ -261,6 +295,7 @@ onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); c
           </div>
         </div>
         <div class="transfer">
+          <button type="button" class="mini-btn" :disabled="stops.length >= 64" @click="duplicateStop">{{ t('palettePathPanel.stop.duplicate') }}</button>
           <button type="button" class="mini-btn danger" :disabled="stops.length <= 2" @click="removeStop">{{ t('palettePathPanel.stop.remove') }}</button>
         </div>
       </DenseSection>

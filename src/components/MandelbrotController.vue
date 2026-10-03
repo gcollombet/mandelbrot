@@ -67,6 +67,7 @@ const props = defineProps<{
   horizonOcclusionStrength?: number,
   horizonOcclusionRadius?: number,
   indirectLightStrength?: number,
+  reliefClosing?: number,
   tiltViewTilt?: number,
   tiltViewHeading?: number,
   tiltViewRelief?: number,
@@ -501,6 +502,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :horizonOcclusionStrength="props.horizonOcclusionStrength"
       :horizonOcclusionRadius="props.horizonOcclusionRadius"
       :indirectLightStrength="props.indirectLightStrength"
+      :reliefClosing="props.reliefClosing"
       :tiltViewTilt="props.tiltViewTilt"
       :tiltViewHeading="props.tiltViewHeading"
       :tiltViewRelief="props.tiltViewRelief"

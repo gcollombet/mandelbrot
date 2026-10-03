@@ -76,6 +76,7 @@ export interface MandelbrotParams {
     horizonOcclusionStrength?: number;
     horizonOcclusionRadius?: number;
     indirectLightStrength?: number;
+    reliefClosing?: number;
     tiltViewTilt?: number;
     tiltViewHeading?: number;
     tiltViewRelief?: number;

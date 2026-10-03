@@ -1,7 +1,18 @@
 {
-  "curves": { "linear": "Linear", "gaussian": "Gaussian", "square": "Square", "exponential": "Exponential" },
-  "modes": { "radial": "Concentric circles", "global": "Whole image" },
-  "outside": { "hold": "Start / end palette", "manual": "Manual palette" },
+  "curves": {
+    "linear": "Linear",
+    "gaussian": "Gaussian",
+    "square": "Square",
+    "exponential": "Exponential"
+  },
+  "modes": {
+    "radial": "Concentric circles",
+    "global": "Whole image"
+  },
+  "outside": {
+    "hold": "Start / end palette",
+    "manual": "Manual palette"
+  },
   "savedNew": "New / unsaved",
   "errors": {
     "endAfterStart": "The end magnitude must exceed the start magnitude.",
@@ -28,13 +39,22 @@
     "currentMagnitude": "Current magnitude: {value}",
     "stopAt": "{name} at {value}",
     "editingSuffix": " (editing)",
-    "hints": "Click: select · drag: move · double-click the strip: add a stop here · double-click a stop: edit it in Palettes.",
+    "hints": "Click: select · drag: move · double-click the strip: add a stop here · double-click a stop: edit it in Palettes · Delete key or right-click a stop: remove it.",
     "editingNote": "“{name}” is loaded in the Palettes tab: every change applies to the path. Disabling the path restores the previous palette.",
     "count": "{count} stops · magnitude {value}",
     "addStop": "+ Stop",
     "extractTitle": "Saves the blend at the current magnitude to the library, with its materials and images (200-point approximation; in circles mode, at the cursor only)",
     "extracting": "Capturing…",
-    "extract": "Extract at cursor"
+    "extract": "Extract at cursor",
+    "octaves": "Octaves",
+    "addHere": "+ At zoom",
+    "addHereTitle": "Adds a stop at the current magnitude",
+    "extendStart": "← Extend start",
+    "extendStartTitle": "Adds a copy of the first stop N octaves earlier; existing stops do not move",
+    "extendEnd": "Extend end →",
+    "extendEndTitle": "Adds a copy of the last stop N octaves later; existing stops do not move",
+    "extendZoom": "Extend to zoom",
+    "extendZoomTitle": "Adds a stop at the current zoom when it lies beyond the path"
   },
   "stop": {
     "title": "Selected stop",
@@ -53,7 +73,8 @@
     "presetSub": "Colors, materials and images",
     "noPreview": "Preview unavailable",
     "noPreset": "No preset found.",
-    "remove": "Delete this stop"
+    "remove": "Delete this stop",
+    "duplicate": "Duplicate"
   },
   "saved": {
     "title": "Saved paths",

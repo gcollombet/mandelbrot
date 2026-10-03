@@ -224,6 +224,7 @@
       "ambientOcclusion": "Ambient occlusion",
       "horizonOcclusion": "Horizon occlusion",
       "horizonOcclusionRadius": "Occlusion radius",
+      "reliefClosing": "Relief closing",
       "indirectLight": "Indirect light",
       "varnish": "Varnish",
       "contrast": "Contrast",

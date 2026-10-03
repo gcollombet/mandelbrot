@@ -87,6 +87,7 @@ export interface PaletteRecord extends ScopedCacheFields {
   horizonOcclusionStrength?: number;
   horizonOcclusionRadius?: number;
   indirectLightStrength?: number;
+  reliefClosing?: number;
   varnishStrength?: number;
   gradeContrast?: number;
   gradeSaturation?: number;

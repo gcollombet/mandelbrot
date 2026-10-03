@@ -1,7 +1,18 @@
 {
-  "curves": { "linear": "Linéaire", "gaussian": "Gaussienne", "square": "Carrée", "exponential": "Exponentielle" },
-  "modes": { "radial": "Cercles concentriques", "global": "Toute l’image" },
-  "outside": { "hold": "Palette de début / fin", "manual": "Palette manuelle" },
+  "curves": {
+    "linear": "Linéaire",
+    "gaussian": "Gaussienne",
+    "square": "Carrée",
+    "exponential": "Exponentielle"
+  },
+  "modes": {
+    "radial": "Cercles concentriques",
+    "global": "Toute l’image"
+  },
+  "outside": {
+    "hold": "Palette de début / fin",
+    "manual": "Palette manuelle"
+  },
   "savedNew": "Nouveau / non enregistré",
   "errors": {
     "endAfterStart": "La magnitude d’arrivée doit dépasser celle du départ.",
@@ -28,13 +39,22 @@
     "currentMagnitude": "Magnitude actuelle : {value}",
     "stopAt": "{name} à {value}",
     "editingSuffix": " (en édition)",
-    "hints": "Clic : sélectionner · glisser : déplacer · double-clic sur la bande : ajouter un stop ici · double-clic sur un stop : l’éditer dans Palettes.",
+    "hints": "Clic : sélectionner · glisser : déplacer · double-clic sur la bande : ajouter un stop ici · double-clic sur un stop : l’éditer dans Palettes · Suppr ou clic droit sur un stop : le supprimer.",
     "editingNote": "« {name} » est chargé dans l’onglet Palettes : chaque modification s’applique au parcours. Désactiver le parcours restaure la palette précédente.",
     "count": "{count} stops · magnitude {value}",
     "addStop": "+ Stop",
     "extractTitle": "Enregistre le mélange à la magnitude actuelle dans la bibliothèque, avec ses matériaux et images (approximation sur 200 points ; en mode cercles, au curseur uniquement)",
     "extracting": "Capture en cours…",
-    "extract": "Extraire au curseur"
+    "extract": "Extraire au curseur",
+    "octaves": "Octaves",
+    "addHere": "+ Au zoom",
+    "addHereTitle": "Ajoute un stop à la magnitude actuelle",
+    "extendStart": "← Étendre départ",
+    "extendStartTitle": "Ajoute une copie du premier stop N octaves avant ; les stops existants ne bougent pas",
+    "extendEnd": "Étendre arrivée →",
+    "extendEndTitle": "Ajoute une copie du dernier stop N octaves après ; les stops existants ne bougent pas",
+    "extendZoom": "Étendre jusqu’au zoom",
+    "extendZoomTitle": "Ajoute un stop au zoom courant s’il dépasse le parcours"
   },
   "stop": {
     "title": "Stop sélectionné",
@@ -53,7 +73,8 @@
     "presetSub": "Couleurs, matériaux et images",
     "noPreview": "Aperçu indisponible",
     "noPreset": "Aucun preset trouvé.",
-    "remove": "Supprimer ce stop"
+    "remove": "Supprimer ce stop",
+    "duplicate": "Dupliquer"
   },
   "saved": {
     "title": "Parcours enregistrés",

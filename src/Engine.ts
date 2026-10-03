@@ -19,6 +19,7 @@ import presentShader from './assets/present.wgsl?raw'
 import tiltViewShader from './assets/tilt_view.wgsl?raw'
 import tiltDistanceShader from './assets/tilt_distance.wgsl?raw'
 import tiltMipsShader from './assets/tilt_mips.wgsl?raw'
+import heightClosingShader from './assets/height_closing.wgsl?raw'
 import { normalizeTiltView, tiltViewUniforms } from './tiltView'
 import rotationPresentShader from './assets/rotation_present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
@@ -325,6 +326,7 @@ export type RenderOptions = {
     horizonOcclusionStrength: number,
     horizonOcclusionRadius: number,
     indirectLightStrength?: number,
+    reliefClosing?: number,
     varnishStrength: number,
     gradeContrast?: number,
     gradeSaturation?: number,
@@ -628,6 +630,16 @@ export class Engine {
     private pipelineTiltMarchHeight?: GPURenderPipeline
     private pipelineTiltMaxDown?: GPURenderPipeline
     private pipelineCastHeightMaxDown?: GPURenderPipeline
+    // Relief closing (height_closing.wgsl): the height pass renders into a raw
+    // raster, then max x/y and min x/y filters write the closed h back into
+    // level 0 of the height raster. Radius in view half-heights (reliefClosing).
+    private pipelineHeightDilate?: GPURenderPipeline
+    private pipelineHeightErode?: GPURenderPipeline
+    private pipelineHeightErodeFinal?: GPURenderPipeline
+    private heightClosingUniforms: GPUBuffer[] = []
+    private heightRawTexture?: GPUTexture
+    private heightClosingTemps: GPUTexture[] = []
+    private reliefClosing = 0
     private pipelineTiltColorBase?: GPURenderPipeline
     private pipelineTiltColorDown?: GPURenderPipeline
     private tiltMarchTexture?: GPUTexture
@@ -1598,6 +1610,20 @@ export class Engine {
         this.pipelineTiltMarchHeight = mipsPipeline('fs_march_height', 'r16float')
         this.pipelineTiltMaxDown = mipsPipeline('fs_max_down', 'r16float')
         this.pipelineCastHeightMaxDown = mipsPipeline('fs_height_max_down', CAST_SHADOW_HEIGHT_FORMAT)
+        const closingModule = device.createShaderModule({ code: heightClosingShader, label: 'Engine ShaderModule HeightClosing' })
+        const closingPipeline = (entryPoint: string, format: GPUTextureFormat) => device.createRenderPipeline({
+            label: `Engine RenderPipeline HeightClosing (${entryPoint})`,
+            layout: 'auto',
+            vertex: { module: closingModule, entryPoint: 'vs_main' },
+            fragment: { module: closingModule, entryPoint, targets: [{ format }] },
+            primitive: { topology: 'triangle-list' },
+        })
+        this.pipelineHeightDilate = closingPipeline('fs_dilate', 'r32float')
+        this.pipelineHeightErode = closingPipeline('fs_erode', 'r32float')
+        this.pipelineHeightErodeFinal = closingPipeline('fs_erode_final', CAST_SHADOW_HEIGHT_FORMAT)
+        this.heightClosingUniforms = [0, 1].map(axis => device.createBuffer({
+            size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label: `Engine HeightClosing Uniform (axis ${axis})`,
+        }))
         this.pipelineTiltColorBase = mipsPipeline('fs_color_base', 'rgba16float')
         this.pipelineTiltColorDown = mipsPipeline('fs_color_down', 'rgba16float')
         const tiltUniform = (label: string) => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, label })
@@ -3731,6 +3757,7 @@ export class Engine {
             horizonOcclusionRadius: Math.max(0.01, Math.min(0.5, renderOptions.horizonOcclusionRadius ?? 0.1)),
             indirectLightStrength: this.castShadowSupported ? Math.max(0, Math.min(2, renderOptions.indirectLightStrength ?? 0)) : 0,
         }
+        this.reliefClosing = Math.max(0, Math.min(0.05, renderOptions.reliefClosing ?? 0))
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, packColorUniforms(colorUniforms))
         this.heightUniformSignature = heightUniformSignature(colorUniforms)
 
@@ -5827,13 +5854,15 @@ export class Engine {
         if (!pipeline || !this.castShadowTextureView || !this.bindGroupColorCastHeight) return
         // Everything the raster depends on: raster, field content, palette /
         // bindings, and the non-volatile colour uniforms.
+        const closingRadius = this.heightClosingRadius(width, height, rotation)
         const key = [width, height, rotation ? 1 : 0, this.rawFieldVersion, this.resolvedDisplayVersion,
-            this.frozenDisplayVersion, this.heightInputsVersion, this.heightPathSignature, this.heightUniformSignature].join('|')
+            this.frozenDisplayVersion, this.heightInputsVersion, this.heightPathSignature, this.heightUniformSignature, closingRadius].join('|')
         if (reuse && !this.disableHeightReuse && key === this.castHeightKey) return
         this.castHeightKey = key
+        const raw = closingRadius > 0 ? this.ensureHeightClosingTextures() : undefined
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: this.castShadowLevelViews[0],
+                view: raw ? raw.createView() : this.castShadowLevelViews[0],
                 clearValue: { r: CAST_SHADOW_NO_SURFACE, g: 0, b: 0, a: 1 },
                 loadOp: 'clear',
                 storeOp: 'store',
@@ -5847,7 +5876,83 @@ export class Engine {
         pass.setBindGroup(0, this.bindGroupColorCastHeight)
         pass.draw(6, 1, 0, 0)
         pass.end()
+        if (raw) this.encodeHeightClosing(encoder, raw, closingRadius, 1 / this.heightRasterPixelsPerUnit(width, height, rotation))
         this.encodeCastShadowMaxPyramid(encoder)
+    }
+
+    /**
+     * Closing radius r in raster pixels: reliefClosing is in view half-heights
+     * (the screen raster spans 2 of them vertically, the neutral rotation
+     * square 2·sqrt(aspect² + 1)). Capped at 16 pixels (the taps span 2r).
+     */
+    private heightClosingRadius(width: number, height: number, rotation: boolean): number {
+        if (this.reliefClosing <= 0 || !this.pipelineHeightErodeFinal) return 0
+        return Math.min(16, Math.round(this.reliefClosing * this.heightRasterPixelsPerUnit(width, height, rotation)))
+    }
+
+    private heightRasterPixelsPerUnit(width: number, height: number, rotation: boolean): number {
+        const aspect = this.width / Math.max(this.height, 1)
+        return rotation ? width / (2 * Math.sqrt(aspect * aspect + 1)) : height / 2
+    }
+
+    /** Raw height raster and two r32float temporaries, the size of the height raster. */
+    private ensureHeightClosingTextures(): GPUTexture {
+        const { width, height } = this.castShadowTexture!
+        const fits = (t?: GPUTexture) => t && t.width === width && t.height === height
+        if (!fits(this.heightRawTexture)) {
+            this.heightRawTexture?.destroy()
+            this.heightRawTexture = this.device.createTexture({
+                size: { width, height }, format: CAST_SHADOW_HEIGHT_FORMAT,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: 'Engine Height Raw',
+            })
+        }
+        if (!this.heightClosingTemps.every(fits) || this.heightClosingTemps.length !== 2) {
+            this.heightClosingTemps.forEach(t => t.destroy())
+            this.heightClosingTemps = [0, 1].map(i => this.device.createTexture({
+                size: { width, height }, format: 'r32float',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING, label: `Engine Height Closing ${i}`,
+            }))
+        }
+        return this.heightRawTexture!
+    }
+
+    /**
+     * raw → max x → max y → min x → min y (+ holes, albedo) into height level 0.
+     * Parabola c·d² rising by one radius of view units over one radius
+     * (h is in view half-heights, `unitsPerPixel` per raster pixel): the
+     * bridges it builds slope by at most 2 at their rim; taps span 2r, where
+     * the penalty is already 4 radii.
+     */
+    private encodeHeightClosing(encoder: GPUCommandEncoder, raw: GPUTexture, radius: number, unitsPerPixel: number): void {
+        const [a, b] = this.heightClosingTemps
+        const curvature = unitsPerPixel / radius
+        for (const [axis, buffer] of this.heightClosingUniforms.entries()) {
+            const data = new ArrayBuffer(16)
+            new Int32Array(data, 0, 2).set([2 * radius, axis])
+            new Float32Array(data, 8, 1)[0] = curvature
+            this.device.queue.writeBuffer(buffer, 0, data)
+        }
+        const steps: [GPURenderPipeline, GPUTexture, GPUTextureView, number][] = [
+            [this.pipelineHeightDilate!, raw, a.createView(), 0],
+            [this.pipelineHeightDilate!, a, b.createView(), 1],
+            [this.pipelineHeightErode!, b, a.createView(), 0],
+            [this.pipelineHeightErodeFinal!, a, this.castShadowLevelViews[0], 1],
+        ]
+        for (const [pipeline, source, target, axis] of steps) {
+            const pass = encoder.beginRenderPass({
+                colorAttachments: [{ view: target, clearValue: { r: CAST_SHADOW_NO_SURFACE, g: 0, b: 0, a: 1 }, loadOp: 'clear', storeOp: 'store' }],
+                label: `Engine Height Closing (axis ${axis})`,
+            })
+            pass.setPipeline(pipeline)
+            const entries: GPUBindGroupEntry[] = [
+                { binding: 0, resource: source.createView() },
+                { binding: 1, resource: { buffer: this.heightClosingUniforms[axis] } },
+            ]
+            if (pipeline === this.pipelineHeightErodeFinal) entries.push({ binding: 2, resource: raw.createView() })
+            pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }))
+            pass.draw(3, 1, 0, 0)
+            pass.end()
+        }
     }
 
     /** Maximum pyramid of the height raster, rebuilt with it (whole texture: the clear covers it all). */
