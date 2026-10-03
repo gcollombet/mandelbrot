@@ -2,18 +2,18 @@ import { nextTick, ref } from 'vue'
 import type { MandelbrotParams } from './Mandelbrot'
 import type { ModulatorBank } from './studioAudio'
 import {
-  addStudioKeyframe, blendedLook, cameraSegmentAt, discreteLookFields, lookStateAt,
+  addStudioKeyframe, blendedLook, cameraPathSpec, discreteLookFields, lookStateAt, rampedTime,
   snapshotStudioCamera, snapshotStudioLook,
   type StudioKeyframe, type StudioLook, type StudioParcours,
 } from './studioParcours'
 
 // ── Studio player: turns the parcours evaluator into engine and navigator calls ──
 //
-// Camera: every camera segment is one navigator EXPORT transition (linear in
-// the supplied time, exponential scale, centre linear in scale, unwrapped
-// angle), placed at an absolute local time through the controller's export
-// clock. That is the video export's own deterministic path, so the preview
-// and a future export see the same camera for the same parcours time.
+// Camera: the camera keyframes are handed to the navigator as ONE path
+// (camera_path.rs: per-leg exponential scale and centre linear in scale, as
+// the two-point export, with each interior corner rounded over a window in
+// DBig), placed at an absolute camera time through the controller's export
+// clock. Preview and export evaluate the same path at the same time.
 //
 // Look: continuous fields go through `interpolatePresetAppearance`, the colour
 // stops through the engine's GPU preset transition (textures resolved on the
@@ -30,6 +30,9 @@ export interface StudioNavigator {
   scale(scale: string): void
   angle(angle: number): void
   start_export_transition(cx: string, cy: string, scale: string, angle: number, duration: number): void
+  /** Arm a multi-keyframe path (`cx|cy|scale|angle|time;…`), corners rounded over `cornerSeconds`. */
+  start_export_path(spec: string, cornerSeconds: number): boolean
+  has_export_path(): boolean
   step_at_transition_time(width: number | undefined, height: number | undefined, elapsed: number): unknown
   get_params(): unknown
 }
@@ -87,9 +90,8 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   let parcours: StudioParcours | null = null
   let frame: ReturnType<typeof setTimeout> | null = null
   let wallStart = 0, timeAtStart = 0
-  // Camera segment currently handed to the navigator and its local clock.
+  // Whether the navigator currently holds the parcours' camera path.
   let cameraKey = ''
-  let cameraClock: { parcoursTime: number; localElapsed: number } | null = null
   // Look segment the GPU transition is prepared for.
   let lookKey = ''
   let lookPrepared = false
@@ -151,61 +153,37 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   // ── Camera ──
 
   /** Snap the navigator onto the exact camera of parcours time `t` and, when
-   *  playing, hand it the rest of the segment as an export transition. */
-  function placeCamera(t: number, continueSegment: boolean) {
+   *  playing, leave the path armed so the export clock drives it. */
+  function placeCamera(t: number, continuePath: boolean) {
     if (!parcours) return
     const controller = deps.getController(), navigator = controller?.getNavigator()
     if (!controller || !navigator) return
-    const segment = cameraSegmentAt(parcours, t)
-    if (!segment) return
-    navigator.cancel_transition()
-    navigator.origin(segment.from.cx, segment.from.cy)
-    navigator.scale(segment.from.scale)
-    navigator.angle(segment.from.angle)
-    if (segment.duration > 0 && segment.localElapsed > 0) {
-      // Let the navigator's own deep-safe interpolation compute the in-between
-      // point, then read it back as decimal strings.
-      navigator.start_export_transition(segment.to.cx, segment.to.cy, segment.to.scale, segment.to.angle, segment.duration)
-      navigator.step_at_transition_time(undefined, undefined, Math.min(segment.localElapsed, segment.duration))
-    }
-    const here = readParams(navigator) ?? segment.from
-    // Teleport with a fresh reference orbit at the exact point (cold-start state).
-    controller.resetReferenceTo(here.cx, here.cy, here.scale, here.angle)
-    cameraKey = `${segment.index}`
-    if (continueSegment && segment.duration > segment.localElapsed) {
-      navigator.start_export_transition(segment.to.cx, segment.to.cy, segment.to.scale, segment.to.angle, segment.duration - segment.localElapsed)
-      cameraClock = { parcoursTime: t, localElapsed: 0 }
-      controller.setExportTime(0, t)
+    const path = cameraPathSpec(parcours)
+    if (!path) return
+    const cameraTime = rampedTime(parcours, t)
+    // The navigator's own deep-safe path evaluation gives the point; read it
+    // back as decimal strings and teleport there with a fresh reference orbit
+    // (cold-start state). The teleport cancels the path.
+    if (!navigator.start_export_path(path.spec, parcours.cornerSeconds)) return
+    navigator.step_at_transition_time(undefined, undefined, cameraTime)
+    const here = readParams(navigator)
+    if (here) controller.resetReferenceTo(here.cx, here.cy, here.scale, here.angle)
+    if (continuePath) {
+      navigator.start_export_path(path.spec, parcours.cornerSeconds)
+      cameraKey = path.spec
+      controller.setExportTime(cameraTime, t)
     } else {
-      cameraClock = null
-      controller.setExportTime(continueSegment ? 0 : null, t)
+      cameraKey = ''
+      controller.setExportTime(null, t)
     }
   }
 
   function driveCamera(t: number) {
     if (!parcours) return
-    const controller = deps.getController()
-    if (!controller) return
-    const segment = cameraSegmentAt(parcours, t)
-    if (!segment) return
-    const key = `${segment.index}`
-    if (key !== cameraKey || !cameraClock) {
-      // New segment: the previous transition landed exactly on its target,
-      // which is this segment's start. Re-anchor and hand over the next leg.
-      placeCamera(t, true)
-      return
-    }
-    // Camera time elapsed since the hand-over, in the segment's own clock.
-    cameraClock.localElapsed = Math.max(0, rampDelta(cameraClock.parcoursTime, t))
-    controller.setExportTime(cameraClock.localElapsed, t)
-  }
-
-  /** Camera-time distance between two parcours times (ramps applied). */
-  function rampDelta(fromParcoursTime: number, toParcoursTime: number): number {
-    if (!parcours) return toParcoursTime - fromParcoursTime
-    const a = cameraSegmentAt(parcours, fromParcoursTime), b = cameraSegmentAt(parcours, toParcoursTime)
-    if (!a || !b || a.index !== b.index) return toParcoursTime - fromParcoursTime
-    return b.localElapsed - a.localElapsed
+    const controller = deps.getController(), navigator = controller?.getNavigator()
+    if (!controller || !navigator) return
+    if (!cameraKey || !navigator.has_export_path()) { placeCamera(t, true); return }
+    controller.setExportTime(rampedTime(parcours, t), t)
   }
 
   // ── Look ──
@@ -345,7 +323,6 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     }
     releaseTextures()
     driving.value = false
-    cameraClock = null
     cameraKey = ''
   }
 
@@ -443,8 +420,7 @@ export type StudioFrameDriver = {
 }
 
 export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: StudioParcours, audio?: { bank: ModulatorBank } | null): StudioFrameDriver {
-  let cameraIndex = -1
-  let cameraSegmentActive = false
+  let pathArmed = false
   let lookKey = ''
   let lookPreparedKey = ''
   let heldTextures: StudioTextures | null = null
@@ -480,22 +456,15 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
       }
     }
 
-    // Camera: one export transition per segment, re-armed at every hand-over.
-    const segment = cameraSegmentAt(parcours, t)
-    if (segment) {
-      const needsPlacement = segment.index !== cameraIndex || (segment.duration > 0) !== cameraSegmentActive
-      if (needsPlacement) {
-        navigator.cancel_transition()
-        navigator.origin(segment.from.cx, segment.from.cy)
-        navigator.scale(segment.from.scale)
-        navigator.angle(segment.from.angle)
-        if (segment.duration > 0) {
-          navigator.start_export_transition(segment.to.cx, segment.to.cy, segment.to.scale, segment.to.angle, segment.duration)
-        }
-        cameraIndex = segment.index
-        cameraSegmentActive = segment.duration > 0
+    // Camera: the whole parcours is one navigator path, armed once; every
+    // frame is then an absolute camera time (ramps applied).
+    const path = cameraPathSpec(parcours)
+    if (path) {
+      if (!pathArmed || !navigator.has_export_path()) {
+        if (!navigator.start_export_path(path.spec, parcours.cornerSeconds)) throw new Error('Studio export: camera path rejected by the navigator')
+        pathArmed = true
       }
-      controller.setExportTime(segment.duration > 0 ? Math.min(segment.localElapsed, segment.duration) : 0, t)
+      controller.setExportTime(rampedTime(parcours, t), t)
     } else {
       controller.setExportTime(0, t)
     }

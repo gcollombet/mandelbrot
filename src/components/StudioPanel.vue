@@ -568,6 +568,7 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
         <DenseField :model-value="parcours.easeInSeconds" :label="t('studioPanel.settings.easeIn')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeInSeconds = $event; afterEdit()" />
         <DenseField :model-value="parcours.easeOutSeconds" :label="t('studioPanel.settings.easeOut')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeOutSeconds = $event; afterEdit()" />
         <DenseToggle :model-value="parcours.retime" :label="t('studioPanel.settings.retime')" :desc="t('studioPanel.settings.retimeDesc')" @update:model-value="parcours.retime = $event; afterEdit()" />
+        <DenseField :model-value="parcours.cornerSeconds" :label="t('studioPanel.settings.corner')" :min="0" :max="5" :step="0.1" f="p1" unit="s" :default="1" :desc="t('studioPanel.settings.cornerDesc')" @update:model-value="parcours.cornerSeconds = $event; afterEdit()" />
 
         <h3>{{ t('studioPanel.audio.title') }}</h3>
         <p v-if="audioBusy" class="empty">{{ t('studioPanel.audio.importing') }}</p>

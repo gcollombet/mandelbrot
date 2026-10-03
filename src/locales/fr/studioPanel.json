@@ -68,7 +68,9 @@
     "easeIn": "Rampe d'entrée",
     "easeOut": "Rampe de sortie",
     "retime": "Re-timing perceptif",
-    "retimeDesc": "Répartit les durées caméra pour une vitesse perçue constante (décades de zoom, déplacement, angle)."
+    "retimeDesc": "Répartit les durées caméra pour une vitesse perçue constante (décades de zoom, déplacement, angle).",
+    "corner": "Lissage des coins",
+    "cornerDesc": "Fenêtre, de part et d’autre de chaque keyframe caméra, sur laquelle les deux segments se fondent (vitesse et direction continues)."
   },
   "discrete": {
     "texture": "texture",

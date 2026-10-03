@@ -61,6 +61,9 @@ export type StudioParcours = {
   easeOutSeconds: number
   /** Redistribute camera keyframe times for a constant perceived speed. */
   retime: boolean
+  /** Half-window, in seconds, over which each interior camera corner is
+   *  rounded by the navigator (camera_path.rs). 0 keeps corners sharp. */
+  cornerSeconds: number
   /** Imported music (studioAudioStore.ts); the file stays local. */
   audio?: StudioAudioRef
   /** Music features driving parameters on top of the keyframes. */
@@ -149,6 +152,7 @@ export function validateStudioParcours(value: unknown): StudioParcours {
     easeInSeconds: clamp(finite(p.easeInSeconds, 2), 0, durationSeconds / 2),
     easeOutSeconds: clamp(finite(p.easeOutSeconds, 2), 0, durationSeconds / 2),
     retime: p.retime === true,
+    cornerSeconds: clamp(finite(p.cornerSeconds, 1), 0, 10),
     modulators: validateModulators(p.modulators),
     ...(validateAudioRef(p.audio) ? { audio: validateAudioRef(p.audio) } : {}),
   }
@@ -156,7 +160,7 @@ export function validateStudioParcours(value: unknown): StudioParcours {
 
 export function newStudioParcours(name = t('studioPanel.newName')): StudioParcours {
   return { version: STUDIO_PARCOURS_VERSION, id: crypto.randomUUID(), name, durationSeconds: 30, keyframes: [],
-    easeInSeconds: 2, easeOutSeconds: 2, retime: false, modulators: [] }
+    easeInSeconds: 2, easeOutSeconds: 2, retime: false, cornerSeconds: 1, modulators: [] }
 }
 
 /** Insert a keyframe at `time`, merging into one already standing there. The
@@ -251,6 +255,21 @@ export function cameraSegmentAt(parcours: StudioParcours, time: number): CameraS
     if (u <= ks[i + 1].time) return { from: ks[i].camera, to: ks[i + 1].camera, localElapsed: u - ks[i].time, duration: ks[i + 1].time - ks[i].time, index: i }
   }
   return { from: last.camera, to: last.camera, localElapsed: 0, duration: 0, index: ks.length - 1 }
+}
+
+/** The camera keyframes as the navigator's path spec, `cx|cy|scale|angle|time;…`
+ *  in camera time (retimed when asked). Times are made strictly increasing:
+ *  two keys the retiming put on the same instant get a millisecond apart. */
+export function cameraPathSpec(parcours: StudioParcours): { spec: string; count: number; duration: number } | null {
+  const keys = cameraKeyframes(parcours)
+  if (!keys.length) return null
+  let last = -Infinity
+  const entries = keys.map(k => {
+    const time = Math.max(k.time, last + 0.001)
+    last = time
+    return `${k.camera.cx}|${k.camera.cy}|${k.camera.scale}|${k.camera.angle}|${time}`
+  })
+  return { spec: entries.join(';'), count: keys.length, duration: last - keys[0].time }
 }
 
 export function lookKeyframes(parcours: StudioParcours): (StudioKeyframe & { look: StudioLook })[] {

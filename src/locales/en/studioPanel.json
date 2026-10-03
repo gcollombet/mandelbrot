@@ -68,7 +68,9 @@
     "easeIn": "Ease in",
     "easeOut": "Ease out",
     "retime": "Perceptual retiming",
-    "retimeDesc": "Redistributes camera durations for a constant perceived speed (zoom decades, pan, angle)."
+    "retimeDesc": "Redistributes camera durations for a constant perceived speed (zoom decades, pan, angle).",
+    "corner": "Corner smoothing",
+    "cornerDesc": "Window on each side of every camera keyframe over which the two legs blend (continuous speed and direction)."
   },
   "discrete": {
     "texture": "texture",
