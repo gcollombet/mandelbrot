@@ -7,6 +7,7 @@ import { interpolatePresetAppearance, TRANSITION_DEFAULTS } from './presetTransi
 import { log10FromDecimalString } from './floatexp'
 import type { VideoPathLocation } from './videoPath'
 import { canonicalDecimal, canonicalScale } from './expmap/decimal'
+import { validateAudioRef, validateModulators, type StudioAudioRef, type StudioModulator } from './studioAudio'
 
 // ── Studio parcours: a keyframe timeline indexed by TIME ──
 //
@@ -60,6 +61,10 @@ export type StudioParcours = {
   easeOutSeconds: number
   /** Redistribute camera keyframe times for a constant perceived speed. */
   retime: boolean
+  /** Imported music (studioAudioStore.ts); the file stays local. */
+  audio?: StudioAudioRef
+  /** Music features driving parameters on top of the keyframes. */
+  modulators: StudioModulator[]
 }
 
 export type CameraSegment = {
@@ -144,12 +149,14 @@ export function validateStudioParcours(value: unknown): StudioParcours {
     easeInSeconds: clamp(finite(p.easeInSeconds, 2), 0, durationSeconds / 2),
     easeOutSeconds: clamp(finite(p.easeOutSeconds, 2), 0, durationSeconds / 2),
     retime: p.retime === true,
+    modulators: validateModulators(p.modulators),
+    ...(validateAudioRef(p.audio) ? { audio: validateAudioRef(p.audio) } : {}),
   }
 }
 
 export function newStudioParcours(name = t('studioPanel.newName')): StudioParcours {
   return { version: STUDIO_PARCOURS_VERSION, id: crypto.randomUUID(), name, durationSeconds: 30, keyframes: [],
-    easeInSeconds: 2, easeOutSeconds: 2, retime: false }
+    easeInSeconds: 2, easeOutSeconds: 2, retime: false, modulators: [] }
 }
 
 /** Insert a keyframe at `time`, merging into one already standing there. The

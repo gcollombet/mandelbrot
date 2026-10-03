@@ -1,5 +1,6 @@
 import { nextTick, ref } from 'vue'
 import type { MandelbrotParams } from './Mandelbrot'
+import type { ModulatorBank } from './studioAudio'
 import {
   addStudioKeyframe, blendedLook, cameraSegmentAt, discreteLookFields, lookStateAt,
   snapshotStudioCamera, snapshotStudioLook,
@@ -73,6 +74,10 @@ export type StudioPlayerDeps = {
 
 export type StudioCaptureScope = 'both' | 'camera' | 'look'
 
+/** Decoded music bound to the parcours: the buffer plays in the preview, the
+ *  bank drives the modulators (precomputed envelopes, deterministic). */
+export type StudioAudioSource = { buffer: AudioBuffer; bank: ModulatorBank }
+
 export function createStudioPlayer(deps: StudioPlayerDeps) {
   const time = ref(0)
   const playing = ref(false)
@@ -91,11 +96,50 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   let lookGpuBlend = true
   let lookGeneration = 0
   let heldTextures: StudioTextures | null = null
+  // Music: a Web Audio source started at the parcours time on every play.
+  let audio: StudioAudioSource | null = null
+  let audioContext: AudioContext | null = null
+  let audioNode: AudioBufferSourceNode | null = null
 
   function setParcours(next: StudioParcours | null) {
     parcours = next
     cameraKey = ''
     lookKey = ''
+  }
+
+  function setAudio(next: StudioAudioSource | null) {
+    stopAudio()
+    audio = next
+    if (playing.value || recording.value) startAudio(time.value)
+  }
+
+  function startAudio(at: number) {
+    stopAudio()
+    if (!audio) return
+    try {
+      audioContext ??= new AudioContext()
+      if (audioContext.state === 'suspended') void audioContext.resume()
+      const node = audioContext.createBufferSource()
+      node.buffer = audio.buffer
+      node.connect(audioContext.destination)
+      if (at < audio.buffer.duration) node.start(0, Math.max(0, at))
+      audioNode = node
+    } catch (error) {
+      console.warn('Studio: audio playback unavailable', error)
+    }
+  }
+
+  function stopAudio() {
+    if (!audioNode) return
+    try { audioNode.stop() } catch { /* already stopped */ }
+    audioNode.disconnect()
+    audioNode = null
+  }
+
+  /** Music-driven offsets on top of the keyframe values for this time. */
+  function applyModulators(t: number) {
+    if (!audio || !parcours?.modulators.length) return
+    audio.bank.apply(deps.params.value, parcours.modulators, t)
   }
 
   function readParams(navigator: StudioNavigator): { cx: string; cy: string; scale: string; angle: number } | null {
@@ -235,12 +279,12 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     if (parcours && playing.value && t >= parcours.durationSeconds) {
       t = parcours.durationSeconds
       time.value = t
-      if (driving.value) { driveCamera(t); applyLook(t) }
+      if (driving.value) { driveCamera(t); applyLook(t); applyModulators(t) }
       pause()
       return
     }
     time.value = t
-    if (playing.value) { driveCamera(t); applyLook(t) }
+    if (playing.value) { driveCamera(t); applyLook(t); applyModulators(t) }
     // A recording that runs past the end stretches the parcours with it.
     else if (parcours && t > parcours.durationSeconds) parcours.durationSeconds = Math.round(t * 10) / 10
     frame = setTimeout(tick, TICK_MS)
@@ -268,6 +312,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     lookKey = ''
     placeCamera(time.value, true)
     applyLook(time.value)
+    startAudio(time.value)
     startClock()
   }
 
@@ -276,6 +321,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     const wasDriving = driving.value
     playing.value = false
     recording.value = false
+    stopAudio()
     if (frame !== null) { clearTimeout(frame); frame = null }
     const controller = deps.getController(), navigator = controller?.getNavigator()
     if (controller && wasDriving) {
@@ -313,6 +359,7 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
       cameraKey = ''
       placeCamera(clamped, true)
       applyLook(clamped)
+      startAudio(clamped)
       startClock()
       return
     }
@@ -344,12 +391,14 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
     if (controller?.isExporting()) return
     if (playing.value) pause()
     recording.value = true
+    startAudio(time.value)
     startClock()
   }
 
   function stopRecording() {
     if (!recording.value) return
     recording.value = false
+    stopAudio()
     if (frame !== null) { clearTimeout(frame); frame = null }
   }
 
@@ -367,9 +416,12 @@ export function createStudioPlayer(deps: StudioPlayerDeps) {
   function destroy() {
     pause()
     setParcours(null)
+    audio = null
+    void audioContext?.close().catch(() => undefined)
+    audioContext = null
   }
 
-  return { time, playing, recording, driving, setParcours, play, pause, seek, refresh, record, stopRecording, capture, destroy }
+  return { time, playing, recording, driving, setParcours, setAudio, play, pause, seek, refresh, record, stopRecording, capture, destroy }
 }
 
 export type StudioPlayer = ReturnType<typeof createStudioPlayer>
@@ -390,7 +442,7 @@ export type StudioFrameDriver = {
   finish(): void
 }
 
-export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: StudioParcours): StudioFrameDriver {
+export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: StudioParcours, audio?: { bank: ModulatorBank } | null): StudioFrameDriver {
   let cameraIndex = -1
   let cameraSegmentActive = false
   let lookKey = ''
@@ -489,6 +541,8 @@ export function createStudioFrameDriver(deps: StudioPlayerDeps, parcours: Studio
         else Object.assign(params, discreteLookFields(state.w >= 0.5 ? state.b : state.a))
       }
     }
+    // Music: deterministic offsets from the precomputed envelopes.
+    if (audio && parcours.modulators.length) audio.bank.apply(params, parcours.modulators, t)
     // Let the params reach the renderer's props before the frame is drawn.
     await nextTick()
   }

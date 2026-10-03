@@ -11,9 +11,12 @@ import {
   type StudioKeyframe, type StudioLook, type StudioParcours,
 } from '../studioParcours'
 import { deleteStudioParcours, readStudioParcoursRecords, saveStudioParcours, type StudioParcoursRecord } from '../studioParcoursStore'
-import { publishStudioParcours, recallStudioDraft, rememberStudioDraft } from '../studioDraft'
-import { createStudioPlayer, type StudioController, type StudioEngine, type StudioTextures } from '../studioPlayer'
-import { DenseField, DenseSeg, DenseToggle } from './dense'
+import { createStudioPlayer, type StudioAudioSource, type StudioController, type StudioEngine, type StudioTextures } from '../studioPlayer'
+import { AUDIO_FEATURES, type AudioAnalysis } from '../audioAnalysis'
+import { buildMusicParcours, ModulatorBank, MODULATOR_TARGETS, newModulator, MODULATOR_MAX, type StudioModulator } from '../studioAudio'
+import { decodeStudioAudio, getStudioAudioRecord, importStudioAudio } from '../studioAudioStore'
+import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio } from '../studioDraft'
+import { DenseField, DenseSeg, DenseSelect, DenseToggle } from './dense'
 
 // ── Studio: a Resolve-style timeline docked under the live view ──
 // Pure UI over studioParcours.ts (model) and studioPlayer.ts (engine wiring).
@@ -45,6 +48,82 @@ const player = createStudioPlayer({
 })
 player.setParcours(parcours)
 const { time, playing, recording } = player
+
+// ── Music (studioAudioStore.ts): decoded buffer + analysis + modulator bank ──
+const audio = ref<{ analysis: AudioAnalysis; source: StudioAudioSource; name: string } | null>(studioExportAudio.value && parcours.audio
+  ? null : null)
+const audioBusy = ref(false)
+const audioInput = ref<HTMLInputElement | null>(null)
+const FEATURE_OPTIONS = computed(() => AUDIO_FEATURES.map(value => ({ value, label: t(`studioPanel.features.${value}`) })))
+const TARGET_OPTIONS = computed(() => MODULATOR_TARGETS.map(value => ({ value, label: t(`studioPanel.targets.${value}`) })))
+const audioSummary = computed(() => audio.value
+  ? t('studioPanel.audio.loaded', { name: audio.value.name, duration: formatSeconds(audio.value.analysis.durationSeconds), bpm: audio.value.analysis.bpm, sections: audio.value.analysis.sections.length + 1 })
+  : '')
+
+function bindAudio(decoded: { buffer: AudioBuffer; analysis: AudioAnalysis; name: string } | null) {
+  if (!decoded) {
+    audio.value = null
+    player.setAudio(null)
+    studioExportAudio.value = null
+    return
+  }
+  const source: StudioAudioSource = { buffer: decoded.buffer, bank: new ModulatorBank(decoded.analysis) }
+  audio.value = { analysis: decoded.analysis, source, name: decoded.name }
+  player.setAudio(source)
+  studioExportAudio.value = source
+  invalidate()
+}
+
+async function importAudio(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file) return
+  audioBusy.value = true
+  try {
+    const decoded = await importStudioAudio(file)
+    parcours.audio = { id: decoded.record.id, name: decoded.record.name, durationSeconds: decoded.buffer.duration }
+    bindAudio({ buffer: decoded.buffer, analysis: decoded.analysis, name: decoded.record.name })
+    if (!parcours.keyframes.length) parcours.durationSeconds = Math.max(1, Math.round(decoded.buffer.duration * 10) / 10)
+    flash(audioSummary.value)
+  } catch (e) { fail(e) }
+  finally { audioBusy.value = false; if (audioInput.value) audioInput.value.value = '' }
+}
+
+/** Reload the parcours' music from the store (after a load or a reopen). */
+async function restoreAudio() {
+  const ref_ = parcours.audio
+  if (!ref_) { bindAudio(null); return }
+  if (audio.value && studioExportAudio.value && parcours.audio && audio.value.name === ref_.name) return
+  audioBusy.value = true
+  try {
+    const record = await getStudioAudioRecord(ref_.id)
+    if (!record) { bindAudio(null); error.value = t('studioPanel.audio.missing', { name: ref_.name }); return }
+    const decoded = await decodeStudioAudio(record)
+    bindAudio({ buffer: decoded.buffer, analysis: decoded.analysis, name: record.name })
+  } catch (e) { fail(e) }
+  finally { audioBusy.value = false }
+}
+
+function removeAudio() {
+  delete parcours.audio
+  bindAudio(null)
+  afterEdit()
+}
+
+function generateFromMusic() {
+  if (!audio.value) return
+  player.pause()
+  const result = buildMusicParcours(parcours, audio.value.analysis, props.params)
+  selectedId.value = parcours.keyframes[0]?.id ?? null
+  afterEdit()
+  flash(t('studioPanel.audio.generated', { duration: formatSeconds(result.duration), added: result.added, sections: result.sections }))
+}
+
+function addModulator() {
+  if (parcours.modulators.length >= MODULATOR_MAX) return
+  parcours.modulators.push(newModulator())
+}
+function removeModulator(id: string) { parcours.modulators = parcours.modulators.filter(m => m.id !== id) }
+function updateModulator(m: StudioModulator, patch: Partial<StudioModulator>) { Object.assign(m, patch); invalidate() }
 if (draft) time.value = Math.min(draft.time, parcours.durationSeconds)
 
 const selected = computed(() => parcours.keyframes.find(k => k.id === selectedId.value) ?? null)
@@ -63,6 +142,7 @@ function replaceParcours(next: StudioParcours) {
   selectedId.value = parcours.keyframes[0]?.id ?? null
   player.pause()
   time.value = 0
+  void restoreAudio()
   invalidate()
 }
 function newParcours() { savedId.value = ''; replaceParcours(newStudioParcours(t('studioPanel.newName'))) }
@@ -170,7 +250,7 @@ defineExpose({ handleKey })
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 const RULER = 20, PAD = 10
 const TRACKS = [
-  { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 },
+  { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 }, { id: 'audio', h: 56 }, { id: 'modulator', h: 28 },
 ] as const
 let frame: number | null = null
 let drag: { kind: 'head' } | { kind: 'key'; id: string } | null = null
@@ -297,6 +377,41 @@ function draw() {
     if (JSON.stringify(prev.colorStops) !== JSON.stringify(k.look.colorStops)) labels.push(t('studioPanel.discrete.stops'))
     c.fillStyle = ink3; c.fillText(labels.join(' · '), x + 5, (r.discrete[0] + r.discrete[1]) / 2)
   })
+  // Audio: loudness waveform, section boundaries, beat grid (every 4 beats).
+  {
+    const y0 = r.audio[0], hh = r.audio[1] - r.audio[0], mid = y0 + hh / 2
+    const audioColor = 'oklch(0.72 0.17 350)'
+    if (audio.value) {
+      const a = audio.value.analysis, rms = a.features.rms
+      c.fillStyle = audioColor; c.globalAlpha = 0.55
+      for (let x = PAD; x <= w - PAD; x += 1) {
+        const seconds = tOf(x, w)
+        if (seconds > a.durationSeconds) break
+        const v = rms[Math.min(rms.length - 1, Math.floor(seconds * a.rate))] ?? 0
+        c.fillRect(x, mid - v * (hh / 2 - 6), 1, Math.max(1, v * (hh - 12)))
+      }
+      c.globalAlpha = 0.35; c.fillStyle = ink3
+      a.beats.forEach((b, i) => { if (i % 4 === 0 && b <= duration) c.fillRect(xOf(b, w), y0 + hh - 6, 1, 6) })
+      c.globalAlpha = 1; c.fillStyle = audioColor
+      for (const sct of a.sections) if (sct <= duration) c.fillRect(xOf(sct, w), y0, 1.5, hh)
+      c.fillStyle = ink3; c.fillText(`${a.bpm} bpm · ${a.sections.length + 1} ${t('studioPanel.audio.title').toLowerCase()}`, PAD + 4, y0 + 8)
+    } else { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyAudio'), PAD + 4, mid) }
+  }
+  // Modulator: envelope of the first enabled one.
+  {
+    const y0 = r.modulator[0], hh = r.modulator[1] - r.modulator[0]
+    const m = parcours.modulators.find(x => x.enabled)
+    if (m && audio.value) {
+      c.strokeStyle = 'oklch(0.75 0.13 200)'; c.lineWidth = 1; c.beginPath()
+      for (let x = PAD; x <= w - PAD; x += 1) {
+        const v = audio.value.source.bank.valueAt(m, tOf(x, w))
+        const yy = y0 + hh - 3 - v * (hh - 8)
+        if (x === PAD) c.moveTo(x, yy); else c.lineTo(x, yy)
+      }
+      c.stroke()
+      c.fillStyle = ink3; c.fillText(`${t(`studioPanel.features.${m.feature}`)} → ${t(`studioPanel.targets.${m.target}`)} ×${m.amount.toFixed(2)} · A ${m.attackMs} ms · R ${m.releaseMs} ms`, PAD + 4, y0 + 8)
+    } else { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyModulator'), PAD + 4, y0 + hh / 2) }
+  }
   // Playhead
   const x = xOf(Math.min(time.value, duration), w)
   c.fillStyle = recording.value ? red : ink
@@ -352,6 +467,7 @@ function throttledSeek(value: number, force: boolean) {
 let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   void refreshLibrary()
+  void restoreAudio()
   resizeObserver = new ResizeObserver(() => invalidate())
   if (canvasRef.value?.parentElement) resizeObserver.observe(canvasRef.value.parentElement)
   invalidate()
@@ -416,6 +532,8 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
           <div class="hd" style="height:64px"><span class="dot cam"></span>{{ t('studioPanel.tracks.camera') }}</div>
           <div class="hd" style="height:44px"><span class="dot look"></span>{{ t('studioPanel.tracks.look') }}</div>
           <div class="hd" style="height:24px"><span class="dot disc"></span>{{ t('studioPanel.tracks.discrete') }}</div>
+          <div class="hd" style="height:56px"><span class="dot audio"></span>{{ t('studioPanel.tracks.audio') }}</div>
+          <div class="hd" style="height:28px"><span class="dot mod"></span>{{ t('studioPanel.tracks.modulator') }}</div>
         </div>
         <div class="studio-canvas">
           <canvas ref="canvasRef" :aria-label="t('studioPanel.tracks.ariaTimeline')" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp"></canvas>
@@ -450,6 +568,40 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
         <DenseField :model-value="parcours.easeInSeconds" :label="t('studioPanel.settings.easeIn')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeInSeconds = $event; afterEdit()" />
         <DenseField :model-value="parcours.easeOutSeconds" :label="t('studioPanel.settings.easeOut')" :min="0" :max="parcours.durationSeconds / 2" :step="0.1" f="p1" unit="s" @update:model-value="parcours.easeOutSeconds = $event; afterEdit()" />
         <DenseToggle :model-value="parcours.retime" :label="t('studioPanel.settings.retime')" :desc="t('studioPanel.settings.retimeDesc')" @update:model-value="parcours.retime = $event; afterEdit()" />
+
+        <h3>{{ t('studioPanel.audio.title') }}</h3>
+        <p v-if="audioBusy" class="empty">{{ t('studioPanel.audio.importing') }}</p>
+        <template v-else-if="audio">
+          <p class="readout audio-line"><span>{{ audioSummary }}</span></p>
+          <button class="sbtn" type="button" :title="t('studioPanel.audio.generateHint')" @click="generateFromMusic">{{ t('studioPanel.audio.generate') }}</button>
+          <div class="row2">
+            <button class="sbtn" type="button" @click="audioInput?.click()">{{ t('studioPanel.audio.import') }}</button>
+            <button class="sbtn sbtn-danger" type="button" style="margin-top:0" @click="removeAudio">{{ t('studioPanel.audio.remove') }}</button>
+          </div>
+        </template>
+        <template v-else>
+          <p class="empty">{{ t('studioPanel.audio.none') }}</p>
+          <button class="sbtn" type="button" @click="audioInput?.click()">{{ t('studioPanel.audio.import') }}</button>
+        </template>
+        <input ref="audioInput" type="file" accept="audio/*" hidden @change="importAudio" />
+
+        <h3>{{ t('studioPanel.modulators.title') }} <small>{{ parcours.modulators.length }}/{{ MODULATOR_MAX }}</small></h3>
+        <p v-if="!audio" class="empty">{{ t('studioPanel.modulators.needAudio') }}</p>
+        <template v-else>
+          <div v-for="m in parcours.modulators" :key="m.id" class="modrow" :class="{ off: !m.enabled }">
+            <div class="modhead">
+              <label class="modtoggle"><input type="checkbox" :checked="m.enabled" @change="updateModulator(m, { enabled: ($event.target as HTMLInputElement).checked })" /> <span>{{ t(`studioPanel.features.${m.feature}`) }} → {{ t(`studioPanel.targets.${m.target}`) }}</span></label>
+              <button class="tbtn" type="button" :aria-label="t('common.delete')" @click="removeModulator(m.id)"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <DenseSelect :model-value="m.feature" :label="t('studioPanel.modulators.feature')" :options="FEATURE_OPTIONS" @update:model-value="updateModulator(m, { feature: $event as StudioModulator['feature'] })" />
+            <DenseSelect :model-value="m.target" :label="t('studioPanel.modulators.target')" :options="TARGET_OPTIONS" @update:model-value="updateModulator(m, { target: $event as StudioModulator['target'] })" />
+            <DenseField :model-value="m.amount" :label="t('studioPanel.modulators.amount')" :min="-2" :max="2" :step="0.05" f="p2" :default="0.6" @update:model-value="updateModulator(m, { amount: $event })" />
+            <DenseField :model-value="m.attackMs" :label="t('studioPanel.modulators.attack')" :min="0" :max="2000" :step="5" f="p0" unit="ms" @update:model-value="updateModulator(m, { attackMs: $event })" />
+            <DenseField :model-value="m.releaseMs" :label="t('studioPanel.modulators.release')" :min="0" :max="5000" :step="10" f="p0" unit="ms" @update:model-value="updateModulator(m, { releaseMs: $event })" />
+          </div>
+          <p v-if="!parcours.modulators.length" class="empty">{{ t('studioPanel.modulators.empty') }}</p>
+          <button class="sbtn" type="button" :disabled="parcours.modulators.length >= MODULATOR_MAX" @click="addModulator"><i class="fa-solid fa-plus"></i> {{ t('studioPanel.modulators.add') }}</button>
+        </template>
       </aside>
     </div>
   </div>
@@ -487,6 +639,15 @@ const cameraTimeLabel = computed(() => formatTimecode(rampedTime(parcours, time.
 .studio-heads .hd { display: flex; align-items: center; gap: 7px; padding: 0 8px; border-bottom: 1px solid var(--line-soft); font-size: 11.5px; font-weight: 600; color: var(--ink-2); }
 .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .dot.cam { background: oklch(0.72 0.15 245); } .dot.look { background: oklch(0.72 0.16 320); } .dot.disc { background: oklch(0.78 0.14 75); }
+.dot.audio { background: oklch(0.72 0.17 350); } .dot.mod { background: oklch(0.75 0.13 200); }
+.audio-line span { color: var(--ink); font-family: var(--mono); font-size: 11px; white-space: normal; }
+.modrow { border: 1px solid var(--line-soft); border-radius: 8px; padding: 4px 6px 6px; margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+.modrow.off { opacity: .55; }
+.modhead { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; font-weight: 600; }
+.modtoggle { display: flex; align-items: center; gap: 6px; cursor: pointer; min-width: 0; }
+.modtoggle input { accent-color: oklch(0.75 0.13 200); margin: 0; }
+.modtoggle span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row2 { display: flex; gap: 6px; }
 .studio-canvas { position: relative; overflow: hidden; }
 .studio-canvas canvas { display: block; width: 100%; touch-action: none; cursor: crosshair; }
 .studio-insp { border-left: 1px solid var(--line-soft); padding: 6px 10px 10px; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }

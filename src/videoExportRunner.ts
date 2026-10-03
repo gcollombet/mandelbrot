@@ -7,6 +7,7 @@ import { hdrInputFrame } from './hdrVideo'
 
 import { motionProgress, motionSettings, validateMotion, type ExpmapMotion } from './expmap/motion'
 import type { StudioFrameDriver } from './studioPlayer'
+import { trimAudioBuffer } from './videoAudioTrack'
 import { createVideoSink, type Mp4Codec, type VideoDestination } from './videoEncoderSink'
 import { runVideoExport, elapsedForFrame, totalFramesFor } from './videoExportSession'
 import {
@@ -100,6 +101,8 @@ export type VideoExportRequest = {
    *  keyframes (validation, diagnostics) and `motion` is ignored, the
    *  parcours carries its own ramps. Monolithic rendering only. */
   studio?: StudioFrameDriver
+  /** Soundtrack to mux, trimmed to the film by the runner. */
+  audio?: AudioBuffer
   output: VideoOutputSpec
   codec: Mp4Codec
   /** Jittered AA samples per emitted frame. 1 = off. */
@@ -220,11 +223,13 @@ export async function runVideoExportToWebm(
       hdrQuantizer: output.dynamicRange === 'hdr' ? output.hdrQuantizer : undefined,
       destination: request.destination,
       hardwareAcceleration: 'prefer-hardware',
+      audio: request.audio ? trimAudioBuffer(request.audio, request.durationSeconds) : undefined,
     })
   } catch (error) {
     deps.engine.endVideoExportSession()
     throw error
   }
+  if (request.audio && !sink.audioCodec) request.onWarning?.(t('video.runner.audioUnavailable'))
 
   try {
     // Place the camera explicitly rather than inheriting whatever the

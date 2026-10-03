@@ -17,7 +17,7 @@ import type { Engine } from '../Engine';
 import ExpmapVideoPanel from './ExpmapVideoPanel.vue';
 import ShaderExpmapPanel from './ShaderExpmapPanel.vue';
 import { expmapVideoSelected, shaderExpmapVideoSelected, expmapBusy } from '../expmap/runtime';
-import { studioExportParcours, studioVideoSelected } from '../studioDraft';
+import { studioExportAudio, studioExportParcours, studioVideoSelected } from '../studioDraft';
 import { cameraKeyframes, formatSeconds, type StudioParcours } from '../studioParcours';
 import {
   describeOutputWarnings,
@@ -86,6 +86,7 @@ const emit = defineEmits<{
     startLocation: VideoPathLocation;
     /** Studio parcours source: camera and look driven by its keyframes. */
     studio?: StudioParcours;
+    audio?: import('../studioPlayer').StudioAudioSource | null;
     endLocation: VideoPathLocation;
   }): void;
   (e: 'cancel'): void;
@@ -378,7 +379,7 @@ function start() {
     tiledMemoryBudgetMiB: tiledMemoryBudgetMiB.value,
     startLocation: studio ? studioEndpoints.value!.from : effectiveStart.value,
     endLocation: studio ? studioEndpoints.value!.to : effectiveEnd.value,
-    ...(studio ? { studio } : {}),
+    ...(studio ? { studio, audio: studioExportAudio.value } : {}),
   });
 }
 </script>

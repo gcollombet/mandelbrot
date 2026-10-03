@@ -10,6 +10,7 @@ import { t } from './i18n'
 // without thought. Only the codec is a choice, because that is where the real
 // trade-off lives — AV1 for compression, H.264 for compatibility.
 
+import { attachAudioTrack } from './videoAudioTrack'
 import {
   AppendOnlyStreamTarget,
   BufferTarget,
@@ -71,6 +72,8 @@ export type VideoEncodeSettings = {
   keyFrameIntervalSeconds?: number
   /** Minimum fragment length when streaming. Shorter = less lost on an abort. */
   minimumFragmentSeconds?: number
+  /** Soundtrack, already trimmed to the film's length (videoAudioTrack.ts). */
+  audio?: AudioBuffer
 }
 
 export type VideoEncoderSink = {
@@ -98,6 +101,8 @@ export type VideoEncoderSink = {
   readonly framesEncoded: number
   /** Effective constant-quality quantizer, undefined when variable bitrate was used. */
   readonly quantizer?: number
+  /** Codec of the muxed soundtrack, undefined when the file has none. */
+  readonly audioCodec?: string
 }
 
 export type EncoderPreference = NonNullable<VideoEncodeSettings['hardwareAcceleration']>
@@ -197,13 +202,16 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   })
 
   output.addVideoTrack(source, { frameRate: settings.fps })
+  const audio = await attachAudioTrack(output, settings.audio)
   await output.start()
+  if (audio) await audio.feed()
 
   let framesEncoded = 0
   let finished = false
 
   return {
     get codec() { return codec },
+    get audioCodec() { return audio?.codec },
     get streaming() { return streaming },
     get fileExtension() { return VIDEO_FILE_EXTENSION },
     get framesEncoded() { return framesEncoded },

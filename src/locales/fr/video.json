@@ -25,7 +25,8 @@
     "hdrCaptureUnavailable": "Capture HDR vidéo indisponible.",
     "cancelled": "Export annulé",
     "interrupted": "Export interrompu",
-    "studioMonolithicOnly": "Un parcours Studio s'exporte en rendu monolithique uniquement."
+    "studioMonolithicOnly": "Un parcours Studio s'exporte en rendu monolithique uniquement.",
+    "audioUnavailable": "Aucun encodeur audio disponible : la vidéo est exportée sans sa musique."
   },
   "session": {
     "frameTimeout": "Export vidéo interrompu : l’image {frame} n’a pas convergé après {pumps} passes de rendu. Aucune image partiellement convergée n’a été émise.",

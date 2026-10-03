@@ -369,7 +369,7 @@ if (import.meta.env.DEV) {
   w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
   // Studio export dry run: the real export loop and frame driver, no encoder.
   // Returns the camera and look placed for every frame, for determinism checks.
-  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number } = {}) => {
+  w.__studioExport = async (parcours: StudioParcours, opts: { fps?: number; maxPumpsPerFrame?: number; width?: number; height?: number } = {}) => {
     const ctrl = mandelbrotCtrlRef.value, engine = mandelbrotEngine.value;
     if (!ctrl || !engine) throw new Error('engine not ready');
     const valid = validateStudioParcours(parcours);
@@ -378,18 +378,24 @@ if (import.meta.env.DEV) {
       params: mandelbrotParams, resolveTextures: resolveStudioTextures,
     }, valid);
     const frames: Record<string, unknown>[] = [];
-    const result = await runVideoExport({
-      setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else await driver.placeFrame(t); },
-      drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
-      isFrameReady: () => engine.videoFrameReady(),
-      emitFrame: async (frame) => {
-        const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
-        frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
-          paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
-          stops: mandelbrotParams.value.colorStops.length, transition: engine.isPresetTransitionActive });
-      },
-    }, { fps: opts.fps ?? 10, durationSeconds: valid.durationSeconds, maxPumpsPerFrame: opts.maxPumpsPerFrame ?? 4000 });
-    return { result, frames };
+    // Same session as a real export: output size, batch target and AA gate.
+    await engine.beginVideoExportSession({ magnificationThreshold: 4, outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1, batchTargetFps: 1 });
+    try {
+      const result = await runVideoExport({
+        setExportTime: async (t) => { if (t === null) { ctrl.setExportTime?.(null); driver.finish(); } else { await driver.placeFrame(t); engine.beginExportFrameAa(); } },
+        drawOnce: async () => { await ctrl.drawOnce?.(); await engine.waitForSubmittedWork(); },
+        isFrameReady: () => engine.videoFrameReady(),
+        emitFrame: async (frame) => {
+          const [cx, cy, scale, angle] = ctrl.getParams?.() ?? ['', '', '', ''];
+          frames.push({ index: frame.index, elapsed: frame.elapsedSeconds, pumps: frame.pumps, cx, cy, scale, angle: Number(angle),
+            paletteOffset: mandelbrotParams.value.paletteOffset, reliefDepth: mandelbrotParams.value.reliefDepth,
+            stops: mandelbrotParams.value.colorStops.length, transition: engine.isPresetTransitionActive });
+        },
+      }, { fps: opts.fps ?? 10, durationSeconds: valid.durationSeconds, maxPumpsPerFrame: opts.maxPumpsPerFrame ?? 4000 });
+      return { result, frames };
+    } finally {
+      engine.endVideoExportSession();
+    }
   };
 }
 

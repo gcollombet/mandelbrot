@@ -2836,6 +2836,7 @@ async function startVideoExport(payload: {
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
   studio?: StudioParcours;
+  audio?: { buffer: AudioBuffer; bank: import('../studioAudio').ModulatorBank } | null;
 }) {
   if (videoExportRunning.value || expmapBusy.value || !props.engine || !props.mandelbrotCtrl) return;
   expmapOpenDocument.value = null;
@@ -2893,8 +2894,9 @@ async function startVideoExport(payload: {
             getController: () => props.mandelbrotCtrl as unknown as StudioController | null,
             params: { get value() { return model.value; } },
             resolveTextures: resolveStudioTextures,
-          }, payload.studio)
+          }, payload.studio, payload.audio)
           : undefined,
+        audio: payload.studio && payload.audio ? payload.audio.buffer : undefined,
         output: payload.output,
         codec: payload.codec,
         aaSamplesPerFrame: payload.aaSamplesPerFrame,

@@ -37,7 +37,11 @@
     "discrete": "Discrete",
     "emptyCamera": "No camera keyframe yet: press K to pin the current view",
     "emptyLook": "No look keyframe",
-    "ariaTimeline": "Timeline tracks"
+    "ariaTimeline": "Timeline tracks",
+    "audio": "Audio",
+    "modulator": "Modulator",
+    "emptyAudio": "No music imported",
+    "emptyModulator": "No active modulator"
   },
   "inspector": {
     "title": "Keyframe",
@@ -77,5 +81,55 @@
     "invalidDuration": "Invalid parcours duration.",
     "invalidKeyframe": "Invalid keyframe.",
     "tooManyKeyframes": "At most {max} keyframes per parcours."
+  },
+  "audio": {
+    "title": "Music",
+    "import": "Import music…",
+    "importing": "Analysing…",
+    "none": "No music. Import an audio file: it stays on this device.",
+    "loaded": "{name} · {duration} · {bpm} bpm · {sections} sections",
+    "remove": "Remove",
+    "generate": "Generate from the music",
+    "generated": "Duration {duration}, {added} look keyframes added over {sections} sections",
+    "missing": "The music “{name}” is no longer in the library.",
+    "generateHint": "Duration = the music, one look keyframe per section (the current look, to edit), camera speed from energy."
+  },
+  "modulators": {
+    "title": "Modulators",
+    "add": "Add a modulator",
+    "feature": "Source",
+    "target": "Target",
+    "amount": "Amount",
+    "attack": "Attack",
+    "release": "Release",
+    "describe": "{feature} → {target} ×{amount}",
+    "empty": "Rhythmic events modulate parameters; they are never keyframes.",
+    "needAudio": "Import music to enable modulators."
+  },
+  "features": {
+    "rms": "Loudness (RMS)",
+    "kick": "Kick",
+    "snare": "Snare",
+    "hats": "Hi-hats",
+    "centroid": "Brightness",
+    "onset": "Transients"
+  },
+  "targets": {
+    "reliefDepth": "Relief",
+    "gradeSaturation": "Saturation",
+    "gradeContrast": "Contrast",
+    "paletteOffset": "Palette offset",
+    "heightPaletteShift": "Height palette shift",
+    "varnishStrength": "Varnish",
+    "microBumpStrength": "Micro bump",
+    "displacementAmount": "Displacement",
+    "protrusionPhase": "Protrusion phase",
+    "phaseColoringStrength": "Phase coloring",
+    "orbitTrapStrength": "Orbit trap",
+    "castShadowStrength": "Cast shadows",
+    "localShadowStrength": "Local shadows",
+    "ambientOcclusionStrength": "Ambient occlusion",
+    "tessellationLevel": "Tessellation",
+    "lightAngle": "Light angle"
   }
 }
