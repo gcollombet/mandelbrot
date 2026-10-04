@@ -246,19 +246,49 @@
     },
     "applied": "« {name} » appliqué à {count} keyframe(s)",
     "fill": {
-      "title": "Remplir depuis les marqueurs",
+      "title": "Répartir sur les keyframes",
       "order": "Ordre",
       "sequence": "Dans l'ordre",
       "shuffle": "Aléatoire, sans répétition",
       "cut": "Coupes",
-      "hint": "Pose un keyframe par marqueur avec les éléments de cette sous-liste. Avec une plage de boucle (I / O), seuls ses marqueurs sont utilisés.",
-      "run": "Poser sur {count} marqueur(s)",
-      "done": "{count} keyframe(s) posé(s)"
+      "hint": "Distribue les éléments de cette sous-liste sur les keyframes existants de la piste : ceux sélectionnés s'il y en a plusieurs, sinon tous (ou ceux de la plage de boucle I / O). « Coupes » rend chaque keyframe double : le plan reste fixe puis coupe.",
+      "run": "Répartir sur {count} keyframe(s)",
+      "done": "{count} keyframe(s) mis à jour",
+      "none": {
+        "place": "Aucun keyframe caméra à remplir : posez-en d'abord (Maj+K).",
+        "look": "Aucun keyframe look à remplir : posez-en d'abord (Alt+K)."
+      }
     },
     "sources": {
       "palettes": "Palettes",
       "scenes": "Scènes"
     },
     "addSceneTitle": "Ajouter la palette de la scène « {name} »"
+  },
+  "auto": {
+    "title": "Keyframes automatiques",
+    "detector": "Détecteur",
+    "detectorDesc": "Ce qui déclenche un keyframe. Les instants détectés s'affichent en jaune sur la piste audio.",
+    "detectors": {
+      "kick": "Graves (basse, grosse caisse)",
+      "onset": "Attaques (toutes notes)",
+      "snare": "Caisse claire",
+      "hats": "Charleston",
+      "rms": "Pics de volume",
+      "beats": "Temps (tempo)",
+      "sections": "Sections"
+    },
+    "sensitivity": "Sensibilité",
+    "beatDivision": "Tous les N temps",
+    "minGap": "Écart minimal",
+    "track": "Piste",
+    "tracks": {
+      "camera": "Caméra",
+      "look": "Look",
+      "both": "Les deux"
+    },
+    "hint": "Pose un keyframe à chaque instant détecté (dans la plage de boucle I / O s'il y en a une) : la vue courante pour la caméra, le look en place pour le look. Les instants qui ont déjà un keyframe sont laissés tels quels.",
+    "run": "Poser {count} keyframe(s)",
+    "done": "{count} keyframe(s) posés, {skipped} instant(s) déjà occupés"
   }
 }

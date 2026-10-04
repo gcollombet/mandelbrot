@@ -19,7 +19,8 @@ import {
 const props = defineProps<{
   params: MandelbrotParams
   engine: { getSnapshotPng(size: number): Promise<string> } | null
-  markerCount: number
+  /** How many keyframes a distribution would land on, per kind. */
+  targetCounts: Record<BinKind, number>
 }>()
 const emit = defineEmits<{
   apply: [item: BinItem]
@@ -221,8 +222,8 @@ onMounted(() => {
         </select>
         <label class="bin-check"><input v-model="cut" type="checkbox" /> {{ t('studioPanel.bin.fill.cut') }}</label>
       </div>
-      <button class="bbtn wide" type="button" :disabled="!items.length || !markerCount" :title="t('studioPanel.bin.fill.hint')" @click="fill">
-        <i class="fa-solid fa-wand-magic-sparkles"></i> {{ t('studioPanel.bin.fill.run', { count: markerCount }) }}
+      <button class="bbtn wide" type="button" :disabled="!items.length || !targetCounts[kind]" :title="t('studioPanel.bin.fill.hint')" @click="fill">
+        <i class="fa-solid fa-wand-magic-sparkles"></i> {{ t('studioPanel.bin.fill.run', { count: targetCounts[kind] }) }}
       </button>
     </div>
   </div>

@@ -246,19 +246,49 @@
     },
     "applied": "“{name}” applied to {count} keyframe(s)",
     "fill": {
-      "title": "Fill from markers",
+      "title": "Distribute over keyframes",
       "order": "Order",
       "sequence": "In order",
       "shuffle": "Shuffled, no repeats",
       "cut": "Cuts",
-      "hint": "Pins one keyframe per marker with the items of this collection. With a loop range (I / O), only its markers are used.",
-      "run": "Pin on {count} marker(s)",
-      "done": "{count} keyframe(s) pinned"
+      "hint": "Hands the items of this collection out over the track's existing keyframes: the selected ones when several are selected, otherwise all of them (or those inside the I / O loop range). “Cuts” makes each keyframe double: the plan holds still, then cuts.",
+      "run": "Distribute over {count} keyframe(s)",
+      "done": "{count} keyframe(s) updated",
+      "none": {
+        "place": "No camera keyframe to fill: pin some first (Shift+K).",
+        "look": "No look keyframe to fill: pin some first (Alt+K)."
+      }
     },
     "sources": {
       "palettes": "Palettes",
       "scenes": "Scenes"
     },
     "addSceneTitle": "Add the palette of the scene “{name}”"
+  },
+  "auto": {
+    "title": "Automatic keyframes",
+    "detector": "Detector",
+    "detectorDesc": "What triggers a keyframe. The detected instants show in yellow on the audio track.",
+    "detectors": {
+      "kick": "Lows (bass, kick)",
+      "onset": "Attacks (any note)",
+      "snare": "Snare",
+      "hats": "Hi-hats",
+      "rms": "Loudness peaks",
+      "beats": "Beats (tempo)",
+      "sections": "Sections"
+    },
+    "sensitivity": "Sensitivity",
+    "beatDivision": "Every N beats",
+    "minGap": "Minimum gap",
+    "track": "Track",
+    "tracks": {
+      "camera": "Camera",
+      "look": "Look",
+      "both": "Both"
+    },
+    "hint": "Pins a keyframe on every detected instant (inside the I / O loop range when there is one): the current view for the camera, the look in place for the look. Instants that already have a keyframe are left alone.",
+    "run": "Pin {count} keyframe(s)",
+    "done": "{count} keyframe(s) pinned, {skipped} instant(s) already taken"
   }
 }

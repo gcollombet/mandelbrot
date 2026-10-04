@@ -23,6 +23,7 @@ import { decodeStudioAudio, getStudioAudioRecord, importStudioAudio } from '../s
 import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio, studioLookClipboard } from '../studioDraft'
 import { DenseField, DenseSeg, DenseSelect, DenseToggle } from './dense'
 import StudioBin from './StudioBin.vue'
+import { AUTO_KEY_DETECTORS, detectAutoKeyTimes, isPeakDetector, type AutoKeyDetector } from '../studioAutoKeys'
 import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../presetStore'
 import { binDrag, cameraThumbKey, distributeBinItems, placeThumbs, rememberPlaceThumb, shrinkThumbnail, type BinItem, type BinOrder } from '../studioBin'
 
@@ -580,23 +581,88 @@ function keyframeFromItem(item: BinItem, at: number): StudioKeyframe | undefined
   }
   return undefined
 }
-/** One keyframe per marker (inside the loop range when there is one), items
- *  handed out in order or shuffled; `cut` makes them double, plans held still. */
+/** The keyframes a distribution lands on: the selected ones of the track when
+ *  several are selected, otherwise every keyframe of the track (inside the
+ *  loop range when there is one), in time order. */
+function fillTargets(track: StudioTrack): StudioKeyframe[] {
+  const cams = cameraKeyframes(parcours)
+  const at = (k: StudioKeyframe) => keyframeDisplayTime(parcours, k, cams)
+  const picked = selection.value.filter(k => keyframeTrack(k) === track)
+  const range = loopRange.value
+  const keys = picked.length > 1 ? picked
+    : parcours.keyframes.filter(k => keyframeTrack(k) === track && (!range || (at(k) >= range[0] - 1e-3 && at(k) <= range[1] + 1e-3)))
+  return [...keys].sort((a, b) => at(a) - at(b))
+}
+const fillCounts = computed(() => ({ place: fillTargets('camera').length, look: fillTargets('look').length }))
+/** Hand the items out over the existing keyframes, in order or shuffled.
+ *  `cut` makes each one double, its arrival side on the keyframe before it:
+ *  every plan holds still, then cuts. */
 function fillFromBin(request: { items: BinItem[]; order: BinOrder; cut: boolean }) {
-  const times = fillTimes.value
-  if (!times.length || !request.items.length) return
+  const kind = request.items[0]?.kind
+  if (!kind) return
+  const targets = fillTargets(kind === 'place' ? 'camera' : 'look')
+  if (!targets.length) { flash(t(`studioPanel.bin.fill.none.${kind}`)); return }
   player.pause()
   recordEdit()
   try {
-    const picks = distributeBinItems(request.items, times.length, request.order)
-    const created: StudioKeyframe[] = []
-    times.forEach((at, i) => { const k = keyframeFromItem(picks[i], at); if (k && !created.includes(k)) created.push(k) })
-    if (request.cut) splitInto(created)
-    multi.clear()
-    selectedId.value = created[0]?.id ?? null
-    for (const k of created) multi.add(k.id)
-    flash(t('studioPanel.bin.fill.done', { count: created.length }))
+    const picks = distributeBinItems(request.items, targets.length, request.order)
+    targets.forEach((k, i) => writeBinItem(k, picks[i], 'out'))
+    if (request.cut) {
+      // The arrival sides follow the new neighbours, older ones included.
+      for (const k of targets) { delete k.cameraIn; delete k.lookIn }
+      splitInto(targets)
+    }
+    if (kind === 'look') pending.look = null; else pending.camera = null
+    flash(t('studioPanel.bin.fill.done', { count: targets.length }))
   } catch (e) { fail(e) }
+  afterEdit()
+}
+
+// ── Automatic keyframes from the music (studioAutoKeys.ts) ──
+// A detector lists instants; they show as ticks on the audio track while the
+// settings are tuned, then one click pins a keyframe on each.
+const auto = reactive<{ detector: AutoKeyDetector; sensitivity: number; minGap: number; beatDivision: number; track: 'camera' | 'look' | 'both' }>(
+  { detector: 'kick', sensitivity: 0.5, minGap: 0.3, beatDivision: 1, track: 'camera' })
+const DETECTOR_OPTIONS = computed(() => AUTO_KEY_DETECTORS.map(value => ({ value, label: t(`studioPanel.auto.detectors.${value}`) })))
+const AUTO_TRACK_OPTIONS = computed(() => (['camera', 'look', 'both'] as const).map(value => ({ value, label: t(`studioPanel.auto.tracks.${value}`) })))
+const autoTimes = computed(() => {
+  if (!audio.value) return []
+  const range = loopRange.value
+  return detectAutoKeyTimes(audio.value.analysis, {
+    detector: auto.detector, sensitivity: auto.sensitivity, minGapSeconds: Math.max(STUDIO_KEYFRAME_MIN_GAP, auto.minGap), beatDivision: auto.beatDivision,
+    from: range?.[0] ?? 0, to: range?.[1] ?? parcours.durationSeconds,
+  })
+})
+watch(autoTimes, () => invalidate())
+/** Pin a keyframe on every detected instant: the current view for the camera,
+ *  the look the parcours has there for the look. An instant that already has
+ *  a keyframe of the track is left alone. */
+function addAutoKeyframes() {
+  const times = autoTimes.value
+  if (!times.length) return
+  player.pause()
+  recordEdit()
+  const camera = snapshotStudioCamera(props.params), currentLook = snapshotStudioLook(props.params)
+  const created: StudioKeyframe[] = []
+  let skipped = 0
+  try {
+    for (const at of times) {
+      if (auto.track !== 'look') {
+        const cameraTime = rampedTime(parcours, at)
+        if (parcours.keyframes.some(k => k.camera && Math.abs(k.time - cameraTime) < STUDIO_KEYFRAME_MIN_GAP)) skipped++
+        else created.push(...addStudioKeyframe(parcours, at, { camera }, cameraTime))
+      }
+      if (auto.track !== 'camera') {
+        if (parcours.keyframes.some(k => k.look && Math.abs(k.time - at) < STUDIO_KEYFRAME_MIN_GAP)) skipped++
+        else created.push(...addStudioKeyframe(parcours, at, { look: lookStateAt(parcours, at)?.a ?? currentLook }))
+      }
+    }
+    flash(t('studioPanel.auto.done', { count: created.length, skipped }))
+  } catch (e) { fail(e) }
+  // Selected, so the bin can be distributed over them straight away.
+  multi.clear()
+  selectedId.value = created[0]?.id ?? selectedId.value
+  for (const k of created) multi.add(k.id)
   afterEdit()
 }
 
@@ -623,11 +689,6 @@ function setLoop(edge: 'in' | 'out') {
 }
 function clearLoop() { loop.in = null; loop.out = null; invalidate() }
 watch(time, value => { const range = loopRange.value; if (range && playing.value && value >= range[1]) player.seek(range[0]) })
-const fillTimes = computed(() => {
-  const range = loopRange.value
-  return parcours.markers.map(m => m.time).filter(at => !range || (at >= range[0] - 1e-6 && at <= range[1] + 1e-6)).sort((a, b) => a - b)
-})
-
 // ── Keyboard (called by the viewer while the studio is open) ──
 function handleKey(e: KeyboardEvent): boolean {
   const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase()
@@ -932,6 +993,9 @@ function drawTracks(c: CanvasRenderingContext2D, w: number, h: number) {
       a.beats.forEach((b, i) => { if (i % 4 === 0 && b <= duration) c.fillRect(xOf(b, w), y0 + hh - 6, 1, 6) })
       c.globalAlpha = 1; c.fillStyle = audioColor
       for (const sct of a.sections) if (sct <= duration) c.fillRect(xOf(sct, w), y0, 1.5, hh)
+      // Instants the automatic keyframes would land on.
+      c.fillStyle = 'oklch(0.85 0.16 95)'
+      for (const at of autoTimes.value) { const ax = xOf(at, w); if (ax >= 0 && ax <= w) c.fillRect(ax - 0.5, y0 + 2, 1.5, 9) }
       c.fillStyle = ink3; c.fillText(`${a.bpm} bpm · ${a.sections.length + 1} ${t('studioPanel.audio.title').toLowerCase()}`, PAD + 4, y0 + 8)
     } else { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyAudio'), PAD + 4, mid) }
   }
@@ -1378,7 +1442,7 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           <button type="button" role="tab" :aria-selected="inspTab === 'inspector'" @click="inspTab = 'inspector'"><i class="fa-solid fa-sliders"></i> {{ t('studioPanel.tabs.inspector') }}</button>
           <button type="button" role="tab" :aria-selected="inspTab === 'bin'" @click="inspTab = 'bin'"><i class="fa-solid fa-box-open"></i> {{ t('studioPanel.tabs.bin') }}</button>
         </div>
-        <StudioBin v-show="inspTab === 'bin'" :params="props.params" :engine="(props.engine as any)" :marker-count="fillTimes.length" @apply="applyBinItem" @fill="fillFromBin" @error="fail" />
+        <StudioBin v-show="inspTab === 'bin'" :params="props.params" :engine="(props.engine as any)" :target-counts="fillCounts" @apply="applyBinItem" @fill="fillFromBin" @error="fail" />
         <template v-if="inspTab === 'inspector'">
         <!-- Edit state: where live edits go (studioPanel § editing linked to the keyframe). -->
         <section v-if="editing && (pending.camera || pending.look || cameraKeyAtPlayhead || lookKeyAtPlayhead)" class="edit-state">
@@ -1468,6 +1532,13 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
         <template v-else-if="audio">
           <p class="readout audio-line"><span>{{ audioSummary }}</span></p>
           <button class="sbtn" type="button" :title="t('studioPanel.audio.generateHint')" @click="generateFromMusic">{{ t('studioPanel.audio.generate') }}</button>
+          <h3>{{ t('studioPanel.auto.title') }} <small>{{ autoTimes.length }}</small></h3>
+          <DenseSelect :model-value="auto.detector" :label="t('studioPanel.auto.detector')" :options="DETECTOR_OPTIONS" :desc="t('studioPanel.auto.detectorDesc')" @update:model-value="auto.detector = $event as AutoKeyDetector" />
+          <DenseField v-if="isPeakDetector(auto.detector)" :model-value="auto.sensitivity" :label="t('studioPanel.auto.sensitivity')" :min="0" :max="1" :step="0.01" f="p2" :default="0.5" @update:model-value="auto.sensitivity = $event" />
+          <DenseField v-if="auto.detector === 'beats'" :model-value="auto.beatDivision" :label="t('studioPanel.auto.beatDivision')" :min="1" :max="16" :step="1" f="p0" :default="1" @update:model-value="auto.beatDivision = $event" />
+          <DenseField :model-value="auto.minGap" :label="t('studioPanel.auto.minGap')" :min="STUDIO_KEYFRAME_MIN_GAP" :max="8" :step="0.05" f="p2" unit="s" :default="0.3" @update:model-value="auto.minGap = $event" />
+          <DenseSeg :model-value="auto.track" :label="t('studioPanel.auto.track')" :options="AUTO_TRACK_OPTIONS" @update:model-value="auto.track = $event as typeof auto.track" />
+          <button class="sbtn sbtn-primary" type="button" :disabled="!autoTimes.length" :title="t('studioPanel.auto.hint')" @click="addAutoKeyframes"><i class="fa-solid fa-wand-magic-sparkles"></i> {{ t('studioPanel.auto.run', { count: autoTimes.length }) }}</button>
           <div class="row2">
             <button class="sbtn" type="button" @click="audioInput?.click()">{{ t('studioPanel.audio.import') }}</button>
             <button class="sbtn sbtn-danger" type="button" style="margin-top:0" @click="removeAudio">{{ t('studioPanel.audio.remove') }}</button>
