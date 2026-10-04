@@ -187,5 +187,73 @@
   "markers": {
     "add": "Add a marker at the playhead (M). Double-click to rename, empty name to delete.",
     "placeholder": "Marker name"
+  },
+  "tabs": {
+    "inspector": "Inspector",
+    "bin": "Bin"
+  },
+  "double": {
+    "split": "Split",
+    "merge": "Merge",
+    "side": "Keyframe side",
+    "splitDesc": "Double keyframe: an arrival side (where the previous plan ends) and a departure side (where the next one starts), with a cut between them. The arrival side starts as the previous keyframe: the plan holds still, then cuts.",
+    "mergeDesc": "Back to a single keyframe: the arrival side is removed.",
+    "sideIn": "Arrival",
+    "sideOut": "Departure",
+    "sideInDesc": "Left side: the state the previous plan glides to. Your edits go to this side.",
+    "sideOutDesc": "Right side: the state the next plan leaves from. Your edits go to this side."
+  },
+  "batch": {
+    "title": "{count} keyframes selected",
+    "hint": "Shift+click adds a keyframe, Shift+drag draws a box, Ctrl/Cmd+A takes the whole track. Dragging moves the group.",
+    "delete": "Delete the {count} keyframes"
+  },
+  "places": {
+    "title": "Places",
+    "empty": "No saved scene. Save scenes to find them here.",
+    "applyTitle": "Put this keyframe's camera on “{name}”"
+  },
+  "bin": {
+    "defaultCollection": "My bin",
+    "collection": "Collection",
+    "collectionName": "Collection name",
+    "newCollection": "New collection",
+    "renameCollection": "Rename the collection",
+    "deleteCollection": "Delete the collection",
+    "confirmDelete": "Delete “{name}” and its {count} items?",
+    "full": "The collection is full ({max} items).",
+    "currentLook": "Current look",
+    "kinds": {
+      "place": "Places",
+      "look": "Palettes"
+    },
+    "tileTitle": "{name} — drag onto the timeline, or click to apply to the selected keyframes",
+    "empty": {
+      "place": "No place. Add the current view or pick from your saved scenes.",
+      "look": "No palette. Add the current look or pick from your palettes."
+    },
+    "addCurrent": {
+      "place": "Current view",
+      "look": "Current look"
+    },
+    "fromLibrary": "Library",
+    "addTitle": "Add “{name}” to the bin",
+    "noPresets": "No saved scene.",
+    "noPalettes": "No saved palette.",
+    "selectFirst": {
+      "place": "Select a camera keyframe first, or drag the place onto the timeline.",
+      "look": "Select a look keyframe first, or drag the palette onto the timeline."
+    },
+    "applied": "“{name}” applied to {count} keyframe(s)",
+    "fill": {
+      "title": "Fill from markers",
+      "order": "Order",
+      "sequence": "In order",
+      "shuffle": "Shuffled, no repeats",
+      "cut": "Cuts",
+      "hint": "Pins one keyframe per marker with the items of this collection. With a loop range (I / O), only its markers are used.",
+      "run": "Pin on {count} marker(s)",
+      "done": "{count} keyframe(s) pinned"
+    }
   }
 }

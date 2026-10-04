@@ -10,7 +10,7 @@ import {
   keyframeDisplayTime, keyframeTimes, keyframeTrack, lookKeyframes, lookStateAt, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, removeStudioKeyframe, snapshotStudioCamera, snapshotStudioLook, validateStudioParcours,
   STUDIO_CAMERA_EASES, STUDIO_MAX_DURATION, STUDIO_MIN_DURATION,
-  STUDIO_MAX_MARKERS, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
+  STUDIO_MAX_MARKERS, STUDIO_LOOK_REST_SECONDS, STUDIO_KEYFRAME_MIN_GAP, addStudioKeyframe, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
 } from '../studioParcours'
 import { StudioHistory } from '../studioHistory'
 import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
@@ -22,6 +22,9 @@ import { buildMusicParcours, ModulatorBank, MODULATOR_TARGETS, newModulator, MOD
 import { decodeStudioAudio, getStudioAudioRecord, importStudioAudio } from '../studioAudioStore'
 import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio, studioLookClipboard } from '../studioDraft'
 import { DenseField, DenseSeg, DenseSelect, DenseToggle } from './dense'
+import StudioBin from './StudioBin.vue'
+import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../presetStore'
+import { binDrag, cameraThumbKey, distributeBinItems, placeThumbs, rememberPlaceThumb, shrinkThumbnail, type BinItem, type BinOrder } from '../studioBin'
 
 // ── Studio: a Resolve-style timeline docked under the live view ──
 // Pure UI over studioParcours.ts (model) and studioPlayer.ts (engine wiring).
@@ -169,16 +172,72 @@ function updateModulator(m: StudioModulator, patch: Partial<StudioModulator>) { 
 if (draft) time.value = Math.min(draft.time, parcours.durationSeconds)
 
 const selected = computed(() => parcours.keyframes.find(k => k.id === selectedId.value) ?? null)
+// Multiple selection: `selectedId` stays the keyframe the inspector shows,
+// `multi` holds the others picked with Shift/Ctrl + click or a Shift + drag box.
+const multi = reactive(new Set<string>())
+const selection = computed(() => parcours.keyframes.filter(k => k.id === selectedId.value || multi.has(k.id)))
+watch(selectedId, id => { if (!id || !multi.has(id)) multi.clear() })
+const sameTrackSelection = computed(() => selected.value ? selection.value.filter(k => keyframeTrack(k) === keyframeTrack(selected.value!)) : [])
+
+// ── Double keyframes ──
+// A double keyframe has an arrival side (what the previous plan glides to)
+// and a departure side (what the next plan leaves from); the view cuts from
+// one to the other. The playhead picks the side: a few milliseconds before
+// the keyframe it rests on the arrival side, on the keyframe it shows the
+// departure side. Edits always go to the side on screen.
+type Side = 'in' | 'out'
+const IN_OFFSET = STUDIO_LOOK_REST_SECONDS / 2
+const isDouble = (k: StudioKeyframe) => !!(k.cameraIn || k.lookIn)
+function sideOf(k: StudioKeyframe): Side {
+  if (!isDouble(k)) return 'out'
+  const before = keyframeDisplayTime(parcours, k) - time.value
+  return before > 0.002 && before < 0.5 / FPS ? 'in' : 'out'
+}
+const selectedSide = computed<Side>(() => selected.value ? sideOf(selected.value) : 'out')
+const cameraOf = (k: StudioKeyframe) => sideOf(k) === 'in' && k.cameraIn ? k.cameraIn : k.camera
+const lookOf = (k: StudioKeyframe) => sideOf(k) === 'in' && k.lookIn ? k.lookIn : k.look
+function setCamera(k: StudioKeyframe, camera: StudioCamera) { if (sideOf(k) === 'in' && k.cameraIn) k.cameraIn = camera; else k.camera = camera }
+function setLook(k: StudioKeyframe, look: StudioLook) { if (sideOf(k) === 'in' && k.lookIn) k.lookIn = look; else k.look = look }
+function selectSide(k: StudioKeyframe, side: Side) {
+  selectedId.value = k.id
+  if (!playing.value) seek(keyframeDisplayTime(parcours, k) - (side === 'in' && isDouble(k) ? IN_OFFSET : 0))
+}
+function previousOfTrack(k: StudioKeyframe): StudioKeyframe | null {
+  const track = parcours.keyframes.filter(x => keyframeTrack(x) === keyframeTrack(k)).sort((a, b) => a.time - b.time)
+  // By id: `k` may be the raw object while the list holds reactive proxies.
+  const i = track.findIndex(x => x.id === k.id)
+  return i > 0 ? track[i - 1] : null
+}
+/** Make keyframes double. The arrival side starts as the previous keyframe's
+ *  state: the plan before stays still, then cuts. */
+function splitInto(keys: readonly StudioKeyframe[]) {
+  const ids = new Set(keys.map(k => k.id))
+  for (const k of parcours.keyframes.filter(x => ids.has(x.id)).sort((a, b) => a.time - b.time)) {
+    const previous = previousOfTrack(k)
+    if (!previous) continue
+    if (k.camera && !k.cameraIn && previous.camera) k.cameraIn = copyPlain(previous.camera)
+    if (k.look && !k.lookIn && previous.look) k.lookIn = copyPlain(previous.look)
+  }
+}
+function splitSelection() { recordEdit(); splitInto(selection.value); afterEdit() }
+function mergeSelection() {
+  recordEdit()
+  for (const k of selection.value) { delete k.cameraIn; delete k.lookIn }
+  afterEdit()
+}
+const canSplit = computed(() => selection.value.some(k => !isDouble(k) && previousOfTrack(k)))
+const canMerge = computed(() => selection.value.some(isDouble))
 const cameraCount = computed(() => parcours.keyframes.filter(k => k.camera).length)
 const lookCount = computed(() => parcours.keyframes.filter(k => k.look).length)
 const EASE_OPTIONS = computed(() => STUDIO_CAMERA_EASES.map(value => ({ value, label: t(`studioPanel.eases.${value}`) })))
 const firstCameraId = computed(() => cameraKeyframes(parcours)[0]?.id ?? null)
 function setEase(value: StudioCameraEase) {
-  const k = selected.value
-  if (!k) return
+  if (!selected.value) return
   recordEdit()
-  if (value === 'linear') delete k.ease
-  else k.ease = value
+  for (const k of sameTrackSelection.value) {
+    if (value === 'linear') delete k.ease
+    else k.ease = value
+  }
   afterEdit()
 }
 const CURVE_OPTIONS = computed(() => (['linear', 'gaussian', 'square', 'exponential'] as const).map(value => ({ value, label: t(`studioPanel.curves.${value}`) })))
@@ -268,6 +327,7 @@ function addKeyframe(scope: 'both' | 'camera' | 'look' = 'both') {
     if (scope !== 'look') pending.camera = null
     if (scope !== 'camera') { pending.look = null; lookBaseline = lookSnapshotJson() }
     selectedId.value = created[created.length - 1].id
+    for (const k of created) if (k.camera) void snapThumb(k.camera)
     invalidate()
     flash(t('studioPanel.hints.keyframeAdded', { time: formatTimecode(time.value, FPS) }))
   } catch (e) { fail(e) }
@@ -276,8 +336,9 @@ function deleteSelected() {
   if (!selected.value) return
   recordEdit()
   const index = parcours.keyframes.findIndex(k => k.id === selected.value!.id)
-  removeStudioKeyframe(parcours, selected.value.id)
-  selectedId.value = parcours.keyframes[Math.max(0, index - 1)]?.id ?? null
+  for (const k of selection.value) removeStudioKeyframe(parcours, k.id)
+  multi.clear()
+  selectedId.value = parcours.keyframes[Math.max(0, Math.min(parcours.keyframes.length - 1, index - 1))]?.id ?? null
   afterEdit()
 }
 function afterEdit() { player.refresh(); invalidate() }
@@ -330,7 +391,7 @@ function checkLookEdit() {
   const target = lookKeyAtPlayhead.value
   if (target && !pending.look) {
     recordEdit(`look:${target.id}`)
-    target.look = JSON.parse(now)
+    setLook(target, JSON.parse(now))
     lookBaseline = now
   } else {
     pending.look = JSON.parse(now)
@@ -346,8 +407,9 @@ function checkCameraEdit() {
   const target = cameraKeyAtPlayhead.value
   if (target && !pending.camera) {
     recordEdit(`camera:${target.id}`)
-    target.camera = current
+    setCamera(target, current)
     player.placedCamera.value = current
+    void snapThumb(current)
   } else {
     pending.camera = current
   }
@@ -366,8 +428,8 @@ function applyPending(track: StudioTrack) {
   const target = track === 'look' ? lookKeyAtPlayhead.value : cameraKeyAtPlayhead.value
   if (!target) return
   recordEdit()
-  if (track === 'look' && pending.look) { target.look = copyPlain(pending.look); pending.look = null; lookBaseline = lookSnapshotJson() }
-  if (track === 'camera' && pending.camera) { target.camera = copyPlain(pending.camera); player.placedCamera.value = pending.camera; pending.camera = null }
+  if (track === 'look' && pending.look) { setLook(target, copyPlain(pending.look)); pending.look = null; lookBaseline = lookSnapshotJson() }
+  if (track === 'camera' && pending.camera) { setCamera(target, copyPlain(pending.camera)); player.placedCamera.value = pending.camera; pending.camera = null }
   selectedId.value = target.id
   invalidate()
   flash(t('studioPanel.edit.applied', { time: formatTimecode(time.value, FPS) }))
@@ -400,8 +462,10 @@ function setLookField(field: 'curve' | 'hold', value: unknown) {
   const k = selected.value
   if (!k) return
   recordEdit(`${field}:${k.id}`)
-  if (field === 'curve') k.curve = value as StudioKeyframe['curve']
-  else k.hold = value as number
+  for (const x of sameTrackSelection.value) {
+    if (field === 'curve') x.curve = value as StudioKeyframe['curve']
+    else x.hold = value as number
+  }
   afterEdit()
 }
 function setSetting<K extends 'easeInSeconds' | 'easeOutSeconds' | 'retime' | 'cornerSeconds'>(field: K, value: StudioParcours[K]) {
@@ -433,7 +497,7 @@ function applyPalette(p: PaletteRecord) {
   const k = selected.value
   if (!k?.look) return
   recordEdit()
-  k.look = snapshotStudioLook({ ...k.look, ...paletteRecordAppearance(p) })
+  for (const x of sameTrackSelection.value) setLook(x, snapshotStudioLook({ ...lookOf(x), ...paletteRecordAppearance(p) }))
   if (Math.abs(k.time - time.value) < HALF_FRAME) pending.look = null
   afterEdit()
   flash(t('studioPanel.palettes.applied', { name: p.name }))
@@ -441,20 +505,120 @@ function applyPalette(p: PaletteRecord) {
 function copyLook() {
   const k = selected.value
   if (!k?.look) return
-  studioLookClipboard.value = copyPlain(k.look)
+  studioLookClipboard.value = copyPlain(lookOf(k)!)
   flash(t('studioPanel.palettes.copied'))
 }
 function pasteLook() {
   const k = selected.value
   if (!k?.look || !studioLookClipboard.value) return
   recordEdit()
-  k.look = copyPlain(studioLookClipboard.value)
+  for (const x of sameTrackSelection.value) setLook(x, copyPlain(studioLookClipboard.value))
   afterEdit()
   flash(t('studioPanel.palettes.pasted'))
 }
 
 const depthOf = (scale: string) => { const d = -log10FromDecimalString(scale); return Number.isFinite(d) ? d : 0 }
-const selectedDepth = computed(() => selected.value?.camera ? depthOf(selected.value.camera.scale) : 0)
+const selectedDepth = computed(() => selected.value?.camera ? depthOf(cameraOf(selected.value)!.scale) : 0)
+
+// ── Thumbnails of camera keyframes (session memory, studioBin.ts) ──
+async function snapThumb(camera: StudioCamera) {
+  const engine = props.engine as unknown as { getSnapshotPng?(size: number): Promise<string> } | null
+  if (!engine?.getSnapshotPng) return
+  try { rememberPlaceThumb(camera, await shrinkThumbnail(await engine.getSnapshotPng(256))) } catch { /* no thumbnail */ }
+}
+const thumbImages = new Map<string, HTMLImageElement>()
+function thumbImage(camera: StudioCamera): HTMLImageElement | null {
+  const source = placeThumbs.get(cameraThumbKey(camera))
+  if (!source) return null
+  let image = thumbImages.get(source)
+  if (!image) { image = new Image(); image.onload = invalidate; image.src = source; thumbImages.set(source, image) }
+  return image.complete && image.naturalWidth ? image : null
+}
+watch(() => placeThumbs.size, () => invalidate())
+
+// ── Bin (StudioBin.vue): apply, drop and fill ──
+const inspTab = ref<'inspector' | 'bin'>('inspector')
+function writeBinItem(k: StudioKeyframe, item: BinItem, side: Side) {
+  if (item.kind === 'place' && item.camera && k.camera) {
+    const camera = copyPlain(item.camera)
+    if (side === 'in' && k.cameraIn) k.cameraIn = camera; else k.camera = camera
+    rememberPlaceThumb(camera, item.thumb)
+  } else if (item.kind === 'look' && item.look && k.look) {
+    const inSide = side === 'in' && !!k.lookIn
+    const look = snapshotStudioLook({ ...(inSide ? k.lookIn : k.look), ...copyPlain(item.look) })
+    if (inSide) k.lookIn = look; else k.look = look
+  }
+}
+/** A bin tile was clicked: put it on the selected keyframes of its track. */
+function applyBinItem(item: BinItem) {
+  const track: StudioTrack = item.kind === 'place' ? 'camera' : 'look'
+  const keys = selection.value.filter(k => keyframeTrack(k) === track)
+  if (!keys.length) { flash(t(`studioPanel.bin.selectFirst.${item.kind}`)); return }
+  recordEdit()
+  for (const k of keys) writeBinItem(k, item, keys.length === 1 ? sideOf(k) : 'out')
+  if (track === 'look') pending.look = null; else pending.camera = null
+  afterEdit()
+  flash(t('studioPanel.bin.applied', { name: item.name, count: keys.length }))
+}
+/** Pin a bin item as a new keyframe at parcours time `at`. */
+function keyframeFromItem(item: BinItem, at: number): StudioKeyframe | undefined {
+  if (item.kind === 'place' && item.camera) {
+    rememberPlaceThumb(item.camera, item.thumb)
+    return addStudioKeyframe(parcours, at, { camera: item.camera }, rampedTime(parcours, at))[0]
+  }
+  if (item.kind === 'look' && item.look) {
+    const base = lookStateAt(parcours, at)?.a ?? snapshotStudioLook(props.params)
+    return addStudioKeyframe(parcours, at, { look: snapshotStudioLook({ ...base, ...copyPlain(item.look) }) })[0]
+  }
+  return undefined
+}
+/** One keyframe per marker (inside the loop range when there is one), items
+ *  handed out in order or shuffled; `cut` makes them double, plans held still. */
+function fillFromBin(request: { items: BinItem[]; order: BinOrder; cut: boolean }) {
+  const times = fillTimes.value
+  if (!times.length || !request.items.length) return
+  player.pause()
+  recordEdit()
+  try {
+    const picks = distributeBinItems(request.items, times.length, request.order)
+    const created: StudioKeyframe[] = []
+    times.forEach((at, i) => { const k = keyframeFromItem(picks[i], at); if (k && !created.includes(k)) created.push(k) })
+    if (request.cut) splitInto(created)
+    multi.clear()
+    selectedId.value = created[0]?.id ?? null
+    for (const k of created) multi.add(k.id)
+    flash(t('studioPanel.bin.fill.done', { count: created.length }))
+  } catch (e) { fail(e) }
+  afterEdit()
+}
+
+// ── Places: saved scenes, one click puts a location on the keyframe ──
+const places = ref<PresetMetadata[]>([])
+async function refreshPlaces() {
+  try { places.value = (await getAllPresetEntries()).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name)) } catch (e) { fail(e) }
+}
+async function applyPlace(meta: PresetMetadata) {
+  try {
+    const record = await getPresetById(meta.id)
+    if (!record) return
+    applyBinItem({ id: meta.guid, kind: 'place', name: meta.name, camera: snapshotStudioCamera(record.value), thumb: await shrinkThumbnail(meta.thumbnail) })
+  } catch (e) { fail(e) }
+}
+
+// ── Loop range (I / O, X clears): playback repeats it, the fill uses it ──
+const loop = reactive<{ in: number | null; out: number | null }>({ in: null, out: null })
+const loopRange = computed<[number, number] | null>(() => loop.in !== null && loop.out !== null && loop.out > loop.in ? [loop.in, loop.out] : null)
+function setLoop(edge: 'in' | 'out') {
+  loop[edge] = time.value
+  if (loop.in !== null && loop.out !== null && loop.out <= loop.in) loop[edge === 'in' ? 'out' : 'in'] = null
+  invalidate()
+}
+function clearLoop() { loop.in = null; loop.out = null; invalidate() }
+watch(time, value => { const range = loopRange.value; if (range && playing.value && value >= range[1]) player.seek(range[0]) })
+const fillTimes = computed(() => {
+  const range = loopRange.value
+  return parcours.markers.map(m => m.time).filter(at => !range || (at >= range[0] - 1e-6 && at <= range[1] + 1e-6)).sort((a, b) => a - b)
+})
 
 // ── Keyboard (called by the viewer while the studio is open) ──
 function handleKey(e: KeyboardEvent): boolean {
@@ -465,6 +629,7 @@ function handleKey(e: KeyboardEvent): boolean {
     switch (e.code) {
       case 'KeyZ': if (e.shiftKey) redo(); else undo(); return true
       case 'KeyY': redo(); return true
+      case 'KeyA': multi.clear(); for (const k of parcours.keyframes) if (!selected.value || keyframeTrack(k) === keyframeTrack(selected.value)) multi.add(k.id); if (!selected.value) selectedId.value = parcours.keyframes[0]?.id ?? null; invalidate(); return true
       case 'KeyC': if (selected.value?.look) { copyLook(); return true } return false
       case 'KeyV': if (selected.value?.look && studioLookClipboard.value) { pasteLook(); return true } return false
     }
@@ -479,6 +644,9 @@ function handleKey(e: KeyboardEvent): boolean {
     case '-': case '_': zoomBy(1 / 1.5); return true
     case 'f': toggleFollow(); return true
     case 'm': if (!e.repeat) addMarker(); return true
+    case 'i': setLoop('in'); return true
+    case 'o': setLoop('out'); return true
+    case 'x': clearLoop(); return true
     case 'j': stepKeyframe(-1); return true
     case 'l': stepKeyframe(1); return true
     case 'home': seek(0); return true
@@ -498,7 +666,7 @@ const TRACKS = [
   { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 }, { id: 'audio', h: 56 }, { id: 'modulator', h: 28 },
 ] as const
 let frame: number | null = null
-let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean } | { kind: 'marker'; id: string; moved: boolean } | { kind: 'pan'; x: number; start: number } | null = null
+let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean; group: boolean } | { kind: 'box'; x0: number; y0: number; x1: number; y1: number } | { kind: 'marker'; id: string; moved: boolean } | { kind: 'pan'; x: number; start: number } | null = null
 let lastSeek = 0
 const paletteCache = new Map<string, string>()
 
@@ -560,6 +728,26 @@ function diamond(c: CanvasRenderingContext2D, x: number, y: number, color: strin
   if (isSelected) { c.strokeStyle = color; c.lineWidth = 2; c.strokeRect(-5, -5, 10, 10) }
   c.restore()
 }
+/** One half of a double keyframe: `side` -1 arrival (left), 1 departure (right). */
+function halfDiamond(c: CanvasRenderingContext2D, x: number, y: number, color: string, isSelected: boolean, side: -1 | 1, scale = 1) {
+  c.beginPath(); c.moveTo(x + side * 1.5, y - 7 * scale); c.lineTo(x + side * (1.5 + 7 * scale), y); c.lineTo(x + side * 1.5, y + 7 * scale); c.closePath()
+  c.fillStyle = isSelected ? '#fff' : color; c.fill()
+  if (isSelected) { c.strokeStyle = color; c.lineWidth = 2; c.stroke() }
+}
+/** A keyframe on the timeline: a diamond, or two halves when it is double.
+ *  The bin item hovering over it makes it swell. */
+function keyMark(c: CanvasRenderingContext2D, k: StudioKeyframe, x: number, yIn: number, yOut: number, color: string) {
+  const isSelected = k.id === selectedId.value || multi.has(k.id)
+  const target = drop.id === k.id
+  if (isDouble(k)) {
+    const side = k.id === selectedId.value && !multi.size ? sideOf(k) : null
+    halfDiamond(c, x, yIn, color, target ? drop.side === 'in' : isSelected && side !== 'out', -1, target && drop.side === 'in' ? 1.7 : 1)
+    halfDiamond(c, x, yOut, color, target ? drop.side === 'out' : isSelected && side !== 'in', 1, target && drop.side === 'out' ? 1.7 : 1)
+    return
+  }
+  if (target) { c.save(); c.translate(x, yOut); c.scale(1.7, 1.7); c.translate(-x, -yOut); diamond(c, x, yOut, color, true); c.restore() }
+  else diamond(c, x, yOut, color, isSelected)
+}
 function draw() {
   const canvas = canvasRef.value
   if (!canvas) return
@@ -601,7 +789,8 @@ function draw() {
   const cams = cameraKeyframes(parcours)
   if (cams.length) {
     const depths = cams.map(k => depthOf(k.camera.scale))
-    const lo = Math.min(...depths) - 0.25, hi = Math.max(...depths) + 0.25
+    const allDepths = [...depths, ...cams.filter(k => k.cameraIn).map(k => depthOf(k.cameraIn!.scale))]
+    const lo = Math.min(...allDepths) - 0.25, hi = Math.max(...allDepths) + 0.25
     const yv = (d: number) => r.camera[0] + 8 + (r.camera[1] - r.camera[0] - 16) * (hi - d) / (hi - lo)
     if (cams.length > 1) {
       c.strokeStyle = camColor; c.lineWidth = 1.5; c.beginPath()
@@ -619,7 +808,15 @@ function draw() {
       for (const k of parcours.keyframes) if (k.camera) c.fillRect(xOf(parcoursTimeOfCameraTime(parcours, k.time), w) - 0.5, r.camera[0] + 4, 1, r.camera[1] - r.camera[0] - 8)
       c.globalAlpha = 1
     }
-    cams.forEach((k, i) => diamond(c, xOf(parcoursTimeOfCameraTime(parcours, k.time), w), yv(depths[i]), camColor, k.id === selectedId.value))
+    const camX = cams.map(k => xOf(parcoursTimeOfCameraTime(parcours, k.time), w))
+    // Thumbnails, where the keyframes leave room for them.
+    cams.forEach((k, i) => {
+      const image = camX[i] > -40 && camX[i] < w && (i === cams.length - 1 || camX[i + 1] - camX[i] >= 44) ? thumbImage(k.camera) : null
+      if (!image) return
+      c.globalAlpha = 0.9; c.drawImage(image, camX[i] + 4, r.camera[1] - 24, 36, 20); c.globalAlpha = 1
+      c.strokeStyle = line; c.lineWidth = 1; c.strokeRect(camX[i] + 4.5, r.camera[1] - 23.5, 35, 19)
+    })
+    cams.forEach((k, i) => keyMark(c, parcours.keyframes.find(x => x.id === k.id) ?? k, camX[i], yv(k.cameraIn ? depthOf(k.cameraIn.scale) : depths[i]), yv(depths[i]), camColor))
     c.fillStyle = ink3; c.fillText(`1e-${depths[0].toFixed(1)} → 1e-${depths[depths.length - 1].toFixed(1)}`, PAD + 4, r.camera[0] + 8)
   } else {
     c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyCamera'), PAD + 4, (r.camera[0] + r.camera[1]) / 2)
@@ -646,7 +843,7 @@ function draw() {
       }
       c.stroke()
     }
-    diamond(c, x0, y0 + bandH / 2, lookColor, k.id === selectedId.value)
+    keyMark(c, k, x0, y0 + bandH / 2, y0 + bandH / 2, lookColor)
   })
   if (!looks.length) { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyLook'), PAD + 4, (r.look[0] + r.look[1]) / 2) }
   // Discrete: markers where a look keyframe switches texture, skybox, µ, stops…
@@ -696,6 +893,29 @@ function draw() {
       c.stroke()
       c.fillStyle = ink3; c.fillText(`${t(`studioPanel.features.${m.feature}`)} → ${t(`studioPanel.targets.${m.target}`)} ×${m.amount.toFixed(2)} · A ${m.attackMs} ms · R ${m.releaseMs} ms`, PAD + 4, y0 + 8)
     } else { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyModulator'), PAD + 4, y0 + hh / 2) }
+  }
+  // Loop range on the ruler.
+  if (loop.in !== null || loop.out !== null) {
+    const loopColor = 'oklch(0.75 0.13 200)'
+    const range = loopRange.value
+    if (range) { c.fillStyle = loopColor; c.globalAlpha = 0.22; c.fillRect(xOf(range[0], w), 14, xOf(range[1], w) - xOf(range[0], w), 6); c.globalAlpha = 1 }
+    c.fillStyle = loopColor
+    if (loop.in !== null) c.fillRect(xOf(loop.in, w) - 0.5, 10, 1.5, 10)
+    if (loop.out !== null) c.fillRect(xOf(loop.out, w) - 1, 10, 1.5, 10)
+  }
+  // Selection box (Shift + drag).
+  if (drag?.kind === 'box') {
+    c.strokeStyle = ink; c.globalAlpha = 0.7; c.lineWidth = 1
+    c.strokeRect(Math.min(drag.x0, drag.x1) + 0.5, Math.min(drag.y0, drag.y1) + 0.5, Math.abs(drag.x1 - drag.x0), Math.abs(drag.y1 - drag.y0))
+    c.globalAlpha = 0.08; c.fillStyle = ink
+    c.fillRect(Math.min(drag.x0, drag.x1), Math.min(drag.y0, drag.y1), Math.abs(drag.x1 - drag.x0), Math.abs(drag.y1 - drag.y0))
+    c.globalAlpha = 1
+  }
+  // A bin item hovering over an empty stretch: where its keyframe would land.
+  if (drop.time !== null) {
+    const track = drop.track === 'camera' ? r.camera : r.look
+    c.fillStyle = drop.track === 'camera' ? camColor : lookColor
+    c.globalAlpha = 0.9; c.fillRect(xOf(drop.time, w) - 1, track[0] + 2, 2, track[1] - track[0] - 4); c.globalAlpha = 1
   }
   // Markers: a flag on the ruler, a faint line down the tracks.
   const markerColor = 'oklch(0.8 0.15 150)'
@@ -770,7 +990,7 @@ function commitMarker(keep = true) {
 // music (sections, beats), then to whole seconds. Shift turns it off.
 const SNAP_PIXELS = 7
 let snapGuide: number | null = null
-function snapped(value: number, width: number, e: PointerEvent, exceptId?: string): number {
+function snapped(value: number, width: number, e: { shiftKey: boolean }, exceptId?: string): number {
   snapGuide = null
   if (e.shiftKey) return value
   const duration = parcours.durationSeconds
@@ -790,6 +1010,55 @@ function snapped(value: number, width: number, e: PointerEvent, exceptId?: strin
   return Math.max(0, Math.min(duration, hit.time))
 }
 
+// ── Dropping a bin item on the timeline ──
+const drop = reactive<{ id: string | null; side: Side; time: number | null; track: StudioTrack }>({ id: null, side: 'out', time: null, track: 'camera' })
+function clearDrop() { drop.id = null; drop.time = null; snapGuide = null; invalidate() }
+function aimDrop(e: DragEvent): BinItem | null {
+  const item = binDrag.value, canvas = canvasRef.value
+  if (!item || !canvas) return null
+  const box = canvas.getBoundingClientRect(), px = e.clientX - box.left
+  drop.track = item.kind === 'place' ? 'camera' : 'look'
+  const cams = cameraKeyframes(parcours)
+  // Magnet: a keyframe of the item's track within reach takes the drop.
+  let best: StudioKeyframe | null = null, distance = 18
+  for (const k of parcours.keyframes) {
+    if (keyframeTrack(k) !== drop.track) continue
+    const d = Math.abs(px - xOf(keyframeDisplayTime(parcours, k, cams), box.width))
+    if (d < distance) { best = k; distance = d }
+  }
+  if (best) {
+    drop.id = best.id; drop.time = null; snapGuide = null
+    drop.side = isDouble(best) && px < xOf(keyframeDisplayTime(parcours, best, cams), box.width) ? 'in' : 'out'
+  } else {
+    drop.id = null
+    drop.time = snapped(tOf(px, box.width), box.width, e)
+  }
+  invalidate()
+  return item
+}
+function onDragOver(e: DragEvent) {
+  if (!aimDrop(e)) return
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+}
+function onDrop(e: DragEvent) {
+  const item = aimDrop(e)
+  if (!item) return
+  e.preventDefault()
+  player.pause()
+  recordEdit()
+  try {
+    const target = drop.id ? parcours.keyframes.find(k => k.id === drop.id) : null
+    if (target) { writeBinItem(target, item, drop.side); selectedId.value = target.id }
+    else if (drop.time !== null) { const created = keyframeFromItem(item, drop.time); if (created) selectedId.value = created.id }
+    if (drop.track === 'look') pending.look = null; else pending.camera = null
+  } catch (error) { fail(error) }
+  binDrag.value = null
+  clearDrop()
+  afterEdit()
+}
+
+let hitSide: Side = 'out'
 function hitKeyframe(px: number, py: number, width: number): StudioKeyframe | null {
   const r = rows()
   const cams = cameraKeyframes(parcours)
@@ -798,7 +1067,7 @@ function hitKeyframe(px: number, py: number, width: number): StudioKeyframe | nu
     const [top, bottom] = k.camera ? r.camera : r.look
     if (py < top || py >= bottom) continue
     const distance = Math.abs(px - xOf(keyframeDisplayTime(parcours, k, cams), width))
-    if (distance < bestDistance) { best = k; bestDistance = distance }
+    if (distance < bestDistance) { best = k; bestDistance = distance; hitSide = isDouble(k) && px < xOf(keyframeDisplayTime(parcours, k, cams), width) ? 'in' : 'out' }
   }
   return best
 }
@@ -812,7 +1081,19 @@ function onPointerDown(e: PointerEvent) {
   const marker = markerAt(px, py, box.width)
   if (marker) { drag = { kind: 'marker', id: marker.id, moved: false }; return }
   const k = hitKeyframe(px, py, box.width)
-  if (k) { selectKeyframe(k); drag = { kind: 'key', id: k.id, moved: false } }
+  if (k && (e.shiftKey || e.metaKey || e.ctrlKey)) {
+    // Add to, or remove from, the selection.
+    if (selectedId.value) multi.add(selectedId.value)
+    if (multi.has(k.id)) multi.delete(k.id); else multi.add(k.id)
+    selectedId.value = multi.has(k.id) ? k.id : [...multi][0] ?? null
+    invalidate()
+    return
+  }
+  if (k) {
+    const group = multi.has(k.id) && multi.size > 1
+    if (group) selectedId.value = k.id; else { multi.clear(); selectSide(k, hitSide) }
+    drag = { kind: 'key', id: k.id, moved: false, group }
+  } else if (e.shiftKey) drag = { kind: 'box', x0: px, y0: py, x1: px, y1: py }
   else { drag = { kind: 'head' }; throttledSeek(snapped(tOf(px, box.width), box.width, e), true) }
   invalidate()
 }
@@ -825,6 +1106,19 @@ function onPointerMove(e: PointerEvent) {
     return
   }
   if (drag.kind === 'head') { throttledSeek(snapped(value, box.width, e), false); return }
+  if (drag.kind === 'box') {
+    drag.x1 = e.clientX - box.left; drag.y1 = e.clientY - box.top
+    const x0 = Math.min(drag.x0, drag.x1), x1 = Math.max(drag.x0, drag.x1), y0 = Math.min(drag.y0, drag.y1), y1 = Math.max(drag.y0, drag.y1)
+    const r = rows(), cams = cameraKeyframes(parcours)
+    multi.clear()
+    for (const k of parcours.keyframes) {
+      const [top, bottom] = k.camera ? r.camera : r.look, x = xOf(keyframeDisplayTime(parcours, k, cams), box.width)
+      if (x >= x0 && x <= x1 && bottom > y0 && top < y1) multi.add(k.id)
+    }
+    if (!selectedId.value || !multi.has(selectedId.value)) selectedId.value = [...multi][0] ?? null
+    invalidate()
+    return
+  }
   if (drag.kind === 'marker') {
     const markerDrag = drag, m = parcours.markers.find(x => x.id === markerDrag.id)
     if (!m) return
@@ -839,7 +1133,26 @@ function onPointerMove(e: PointerEvent) {
   if (!keyDrag.moved) { recordEdit(); keyDrag.moved = true }
   // The playhead rides with the keyframe, so it stays the one being edited.
   const at = Math.round(snapped(value, box.width, e, k.id) * FPS) / FPS
-  moveStudioKeyframe(parcours, k.id, k.camera ? rampedTime(parcours, at) : at)
+  if (keyDrag.group) {
+    // Move the whole selection by the same amount, leading edge first so the
+    // keyframes do not block one another.
+    // The group keeps its shape: it stops against the parcours' ends and
+    // against the unselected keyframes of its tracks.
+    const ids = new Set(selection.value.map(x => x.id))
+    let lo = -Infinity, hi = Infinity
+    for (const x of selection.value) {
+      const from = displayTime(x)
+      lo = Math.max(lo, -from); hi = Math.min(hi, parcours.durationSeconds - from)
+      for (const y of parcours.keyframes) {
+        if (ids.has(y.id) || keyframeTrack(y) !== keyframeTrack(x)) continue
+        const gap = displayTime(y) - from
+        if (gap > 0) hi = Math.min(hi, gap - STUDIO_KEYFRAME_MIN_GAP); else lo = Math.max(lo, gap + STUDIO_KEYFRAME_MIN_GAP)
+      }
+    }
+    const delta = Math.max(Math.min(lo, 0), Math.min(Math.max(hi, 0), at - displayTime(k)))
+    const keys = selection.value.map(x => ({ x, at: displayTime(x) })).sort((a, b) => delta > 0 ? b.at - a.at : a.at - b.at)
+    for (const { x, at: from } of keys) moveStudioKeyframe(parcours, x.id, x.camera ? rampedTime(parcours, from + delta) : from + delta)
+  } else moveStudioKeyframe(parcours, k.id, k.camera ? rampedTime(parcours, at) : at)
   time.value = displayTime(k)
   invalidate()
 }
@@ -897,6 +1210,7 @@ let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   void refreshLibrary()
   void refreshPalettes()
+  void refreshPlaces()
   void restoreAudio()
   resizeObserver = new ResizeObserver(() => invalidate())
   if (canvasRef.value?.parentElement) resizeObserver.observe(canvasRef.value.parentElement)
@@ -997,7 +1311,7 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           <div class="hd" style="height:28px"><span class="dot mod"></span>{{ t('studioPanel.tracks.modulator') }}</div>
         </div>
         <div class="studio-canvas">
-          <canvas ref="canvasRef" :aria-label="t('studioPanel.tracks.ariaTimeline')" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel.prevent="onWheel" @dblclick="onDoubleClick"></canvas>
+          <canvas ref="canvasRef" :aria-label="t('studioPanel.tracks.ariaTimeline')" @pointerdown="onPointerDown" @pointermove="onPointerMove" @pointerup="onPointerUp" @pointercancel="onPointerUp" @wheel.prevent="onWheel" @dblclick="onDoubleClick" @dragover="onDragOver" @dragleave="clearDrop" @drop="onDrop"></canvas>
           <input v-if="markerEdit" ref="markerInput" v-model="markerEdit.name" class="marker-input" maxlength="40" :style="{ left: `${markerEdit.x}px` }"
             :placeholder="t('studioPanel.markers.placeholder')" :aria-label="t('studioPanel.markers.placeholder')"
             @keydown.enter.prevent="commitMarker()" @keydown.esc.prevent.stop="commitMarker(false)" @blur="commitMarker()" />
@@ -1005,6 +1319,12 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
       </div>
 
       <aside class="studio-insp">
+        <div class="insp-tabs" role="tablist">
+          <button type="button" role="tab" :aria-selected="inspTab === 'inspector'" @click="inspTab = 'inspector'"><i class="fa-solid fa-sliders"></i> {{ t('studioPanel.tabs.inspector') }}</button>
+          <button type="button" role="tab" :aria-selected="inspTab === 'bin'" @click="inspTab = 'bin'"><i class="fa-solid fa-box-open"></i> {{ t('studioPanel.tabs.bin') }}</button>
+        </div>
+        <StudioBin v-show="inspTab === 'bin'" :params="props.params" :engine="(props.engine as any)" :marker-count="fillTimes.length" @apply="applyBinItem" @fill="fillFromBin" @error="fail" />
+        <template v-if="inspTab === 'inspector'">
         <!-- Edit state: where live edits go (studioPanel § editing linked to the keyframe). -->
         <section v-if="editing && (pending.camera || pending.look || cameraKeyAtPlayhead || lookKeyAtPlayhead)" class="edit-state">
           <div v-for="track in (['camera', 'look'] as const)" :key="track">
@@ -1020,17 +1340,44 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           </div>
         </section>
 
-        <template v-if="selected">
+        <template v-if="selection.length > 1">
+          <h3>{{ t('studioPanel.batch.title', { count: selection.length }) }}</h3>
+          <p class="hint">{{ t('studioPanel.batch.hint') }}</p>
+          <div class="row2">
+            <button class="sbtn" type="button" :disabled="!canSplit" :title="t('studioPanel.double.splitDesc')" @click="splitSelection"><i class="fa-solid fa-code-compare"></i> {{ t('studioPanel.double.split') }}</button>
+            <button class="sbtn" type="button" :disabled="!canMerge" @click="mergeSelection"><i class="fa-solid fa-diamond"></i> {{ t('studioPanel.double.merge') }}</button>
+          </div>
+          <DenseSelect v-if="selected?.camera" :model-value="selected.ease ?? 'linear'" :label="t('studioPanel.inspector.ease')" :options="EASE_OPTIONS" @update:model-value="setEase($event as StudioCameraEase)" />
+          <DenseSeg v-else-if="selected?.look" :model-value="selected.curve" :label="t('studioPanel.inspector.curve')" :options="CURVE_OPTIONS" @update:model-value="setLookField('curve', $event)" />
+          <button class="sbtn sbtn-danger" type="button" @click="deleteSelected">{{ t('studioPanel.batch.delete', { count: selection.length }) }}</button>
+        </template>
+        <template v-else-if="selected">
           <h3>{{ t(selected.camera ? 'studioPanel.inspector.titleCamera' : 'studioPanel.inspector.titleLook') }} <small>{{ formatTimecode(displayTime(selected), FPS) }}</small></h3>
+          <div v-if="isDouble(selected)" class="sides" role="tablist" :aria-label="t('studioPanel.double.side')">
+            <button type="button" role="tab" :aria-selected="selectedSide === 'in'" :title="t('studioPanel.double.sideInDesc')" @click="selectSide(selected, 'in')"><i class="fa-solid fa-caret-left"></i> {{ t('studioPanel.double.sideIn') }}</button>
+            <button type="button" role="tab" :aria-selected="selectedSide === 'out'" :title="t('studioPanel.double.sideOutDesc')" @click="selectSide(selected, 'out')">{{ t('studioPanel.double.sideOut') }} <i class="fa-solid fa-caret-right"></i></button>
+          </div>
+          <div class="row2">
+            <button v-if="!isDouble(selected)" class="sbtn" type="button" :disabled="!canSplit" :title="t('studioPanel.double.splitDesc')" @click="splitSelection"><i class="fa-solid fa-code-compare"></i> {{ t('studioPanel.double.split') }}</button>
+            <button v-else class="sbtn" type="button" :title="t('studioPanel.double.mergeDesc')" @click="mergeSelection"><i class="fa-solid fa-diamond"></i> {{ t('studioPanel.double.merge') }}</button>
+          </div>
           <DenseField :model-value="displayTime(selected)" :label="t('studioPanel.inspector.time')" :min="0" :max="parcours.durationSeconds" :step="1 / FPS" f="p2" unit="s" @update:model-value="setSelectedTime" />
           <template v-if="selected.camera">
             <div class="readout"><span>{{ t('studioPanel.inspector.scaleExp') }}</span><b>1e-{{ selectedDepth.toFixed(2) }}</b></div>
-            <div class="readout"><span>{{ t('studioPanel.inspector.angle') }}</span><b>{{ (selected.camera.angle * 180 / Math.PI).toFixed(1) }}°</b></div>
+            <div class="readout"><span>{{ t('studioPanel.inspector.angle') }}</span><b>{{ (cameraOf(selected)!.angle * 180 / Math.PI).toFixed(1) }}°</b></div>
             <DenseSelect v-if="selected.id !== firstCameraId" :model-value="selected.ease ?? 'linear'" :label="t('studioPanel.inspector.ease')" :options="EASE_OPTIONS" :desc="t('studioPanel.inspector.easeDesc')" @update:model-value="setEase($event as StudioCameraEase)" />
             <p class="hint">{{ t('studioPanel.inspector.cameraHint') }}</p>
+            <h3>{{ t('studioPanel.places.title') }} <small>{{ places.length }}</small></h3>
+            <div v-if="places.length" class="palette-grid">
+              <button v-for="p in places" :key="p.id" type="button" class="palette-tile place-tile" :title="t('studioPanel.places.applyTitle', { name: p.name })" @click="applyPlace(p)">
+                <span class="place-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : {}"></span>
+                <span class="palette-name"><i v-if="p.favorite" class="fa-solid fa-star"></i>{{ p.name }}</span>
+              </button>
+            </div>
+            <p v-else class="empty">{{ t('studioPanel.places.empty') }}</p>
           </template>
           <template v-else-if="selected.look">
-            <div class="swatch" :style="{ background: `linear-gradient(to right, ${lookGradient(selected.look).split('|').join(',')})` }"></div>
+            <div class="swatch" :style="{ background: `linear-gradient(to right, ${lookGradient(lookOf(selected)!).split('|').join(',')})` }"></div>
             <DenseSeg :model-value="selected.curve" :label="t('studioPanel.inspector.curve')" :options="CURVE_OPTIONS" @update:model-value="setLookField('curve', $event)" />
             <DenseField :model-value="selected.hold" :label="t('studioPanel.inspector.hold')" :min="0" :max="0.95" :step="0.05" :f="(v: number) => String(Math.round(v * 100))" unit="%" :desc="t('studioPanel.inspector.holdDesc')" @update:model-value="setLookField('hold', $event)" />
             <div class="row2">
@@ -1050,6 +1397,8 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           <button class="sbtn sbtn-danger" type="button" @click="deleteSelected">{{ t('studioPanel.inspector.delete') }}</button>
         </template>
         <p v-else class="empty">{{ t('studioPanel.inspector.empty') }}</p>
+        </template>
+        <template v-if="inspTab === 'inspector'">
 
         <h3>{{ t('studioPanel.settings.title') }}</h3>
         <DenseField :model-value="parcours.durationSeconds" :label="t('studioPanel.settings.duration')" :min="STUDIO_MIN_DURATION" :max="600" :step="0.5" f="p1" unit="s" @update:model-value="setDuration" />
@@ -1090,6 +1439,7 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
           </div>
           <p v-if="!parcours.modulators.length" class="empty">{{ t('studioPanel.modulators.empty') }}</p>
           <button class="sbtn" type="button" :disabled="parcours.modulators.length >= MODULATOR_MAX" @click="addModulator"><i class="fa-solid fa-plus"></i> {{ t('studioPanel.modulators.add') }}</button>
+        </template>
         </template>
       </aside>
     </div>
@@ -1148,6 +1498,11 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
 .studio-insp { border-left: 1px solid var(--line-soft); padding: 6px 10px 10px; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
 .studio-insp > * { flex: none; }
 .key-group { display: inline-flex; gap: 2px; }
+.insp-tabs, .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.insp-tabs button, .sides button { height: 26px; border: 1px solid var(--line-soft); border-radius: 6px; background: none; color: var(--ink-3); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.insp-tabs button[aria-selected="true"], .sides button[aria-selected="true"] { background: var(--row-on); color: var(--ink); border-color: var(--line); }
+.place-thumb { aspect-ratio: 16 / 9; border-radius: 4px; background-color: var(--row-on); background-size: cover; background-position: center; }
+.place-tile:hover { border-color: oklch(0.72 0.15 245 / .6); }
 .key-cam { color: oklch(0.72 0.15 245); } .key-look { color: oklch(0.72 0.16 320); }
 .tbtn:disabled { opacity: .4; cursor: default; }
 .edit-state { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 4px; }

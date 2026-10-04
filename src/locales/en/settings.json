@@ -264,7 +264,9 @@
     "sharedCannotDelete": "Shared catalog palettes cannot be deleted locally.",
     "deleteConfirm": "Delete palette \"{name}\"? This cannot be undone.",
     "allAlreadyImported": "All palettes were already imported (same name + date).",
-    "invalidFileFormat": "Invalid file format."
+    "invalidFileFormat": "Invalid file format.",
+    "splitStop": "Split: double stop, with a left side (end of the gradient before) and a right side (start of the next)",
+    "mergeStop": "Merge: back to a single stop, keeping this side"
   },
   "textures": {
     "environment": {

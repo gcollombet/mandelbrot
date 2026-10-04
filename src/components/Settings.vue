@@ -10,7 +10,7 @@ import {
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
 import type {ColorStop, StopTransferCurve} from '../ColorStop.ts';
-import {createInterpolatedColorStop, getStopTransferCurve} from '../ColorStop.ts';
+import {compareColorStops, createInterpolatedColorStop, flipLinkSide, getStopTransferCurve, linkedStopIndex} from '../ColorStop.ts';
 import {
   applyStopPresetValues,
   ensureDefaultStopPresetEntries,
@@ -821,9 +821,50 @@ function selectColor(idx: number) {
   selectedIdx.value = idx;
 }
 
+// ── Double stops ──
+// Two full stops linked at one position: the left one ends the gradient that
+// arrives, the right one starts the next. They move together; each side is
+// selected and edited like any stop.
+function stopHalf(idx: number): 'in' | 'out' | undefined {
+  return linkedStopIndex(model.value.colorStops, idx) >= 0 ? model.value.colorStops[idx].linkSide : undefined;
+}
+function moveStop(idx: number, position: number) {
+  const partner = linkedStopIndex(model.value.colorStops, idx);
+  model.value.colorStops[idx].position = position;
+  if (partner >= 0) model.value.colorStops[partner].position = position;
+}
+const selectedStopIsDouble = computed(() => selectedIdx.value !== null && linkedStopIndex(model.value.colorStops, selectedIdx.value) >= 0);
+function unlinkStop(stop: ColorStop | undefined) {
+  if (!stop) return;
+  delete stop.link;
+  delete stop.linkSide;
+}
+/** Make the selected stop double: it becomes the left side, a copy the right side. */
+function splitSelectedStop() {
+  if (selectedIdx.value === null || selectedStopIsDouble.value || model.value.colorStops.length >= MAX_COLORS) return;
+  const stop = model.value.colorStops[selectedIdx.value];
+  const link = crypto.randomUUID();
+  stop.link = link;
+  stop.linkSide = 'in';
+  model.value.colorStops.push({ ...JSON.parse(JSON.stringify(stop)), link, linkSide: 'out' });
+  selectedIdx.value = model.value.colorStops.length - 1;
+  applyToAll.value = false;
+}
+/** Back to a single stop: the selected side is kept. */
+function mergeSelectedStop() {
+  if (selectedIdx.value === null) return;
+  const partner = linkedStopIndex(model.value.colorStops, selectedIdx.value);
+  if (partner < 0) return;
+  unlinkStop(model.value.colorStops[selectedIdx.value]);
+  model.value.colorStops.splice(partner, 1);
+  if (partner < selectedIdx.value) selectedIdx.value -= 1;
+}
+
 function deleteSelectedStop() {
   if (selectedIdx.value === null) return;
   if (model.value.colorStops.length <= 2) return; // garder au moins 2 stops
+  // Deleting one side of a double stop leaves the other as a single stop.
+  unlinkStop(model.value.colorStops[linkedStopIndex(model.value.colorStops, selectedIdx.value)]);
   model.value.colorStops.splice(selectedIdx.value, 1);
   // Ajuster la sélection
   if (selectedIdx.value >= model.value.colorStops.length) {
@@ -2264,25 +2305,27 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
 /** Inverser : reverse stop order (position 0→1 becomes 1→0) */
 function invertPalette() {
   if (model.value.colorStops.length === 0) return;
-  model.value.colorStops = model.value.colorStops.map(s => ({
+  model.value.colorStops = model.value.colorStops.map(s => flipLinkSide({
     ...s,
     position: 1 - s.position,
-  })).sort((a, b) => a.position - b.position);
+  })).sort(compareColorStops);
   resetLchBase();
 }
 
 /** Dupliquer : compress palette to first half and repeat it in the second half */
 function duplicatePalette() {
   if (model.value.colorStops.length === 0) return;
+  // Each copy keeps its own double stops: the link ids must not be shared.
   const first = model.value.colorStops.map(s => ({
     ...s,
     position: s.position * 0.5,
   }));
   const second = model.value.colorStops.map(s => ({
     ...s,
+    ...(s.link ? { link: `${s.link}:2` } : {}),
     position: 0.5 + s.position * 0.5,
   }));
-  model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
+  model.value.colorStops = [...first, ...second].sort(compareColorStops);
   resetLchBase();
 }
 
@@ -2293,11 +2336,12 @@ function mirrorPalette() {
     ...s,
     position: s.position * 0.5,
   }));
-  const second = model.value.colorStops.map(s => ({
+  const second = model.value.colorStops.map(s => flipLinkSide({
     ...s,
+    ...(s.link ? { link: `${s.link}:2` } : {}),
     position: 1 - s.position * 0.5,
   }));
-  model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
+  model.value.colorStops = [...first, ...second].sort(compareColorStops);
   resetLchBase();
 }
 
@@ -3383,7 +3427,8 @@ async function startVideoExport(payload: {
             :selected="!applyToAll && selectedIdx === idx"
             :highlighted="applyToAll"
             :disabled="applyToAll"
-            @update:position="t => model.colorStops[idx].position = t"
+            :half="stopHalf(idx)"
+            @update:position="t => moveStop(idx, t)"
             @select="selectColor(idx)"
           />
           <!-- Bouton supprimer flottant au-dessus du curseur sélectionné -->
@@ -3396,6 +3441,19 @@ async function startVideoExport(payload: {
             @click.stop="deleteSelectedStop"
           >
             &times;
+          </button>
+          <!-- Double stop: split the selected stop in two sides, or merge them back -->
+          <button
+            v-if="!applyToAll && selectedIdx !== null && model.colorStops[selectedIdx]"
+            class="floating-delete-btn floating-split-btn"
+            :style="{ left: model.colorStops[selectedIdx].position * 100 + '%' }"
+            :title="t(selectedStopIsDouble ? 'settings.palettes.mergeStop' : 'settings.palettes.splitStop')"
+            :aria-label="t(selectedStopIsDouble ? 'settings.palettes.mergeStop' : 'settings.palettes.splitStop')"
+            :disabled="!selectedStopIsDouble && model.colorStops.length >= MAX_COLORS"
+            @mousedown.stop
+            @click.stop="selectedStopIsDouble ? mergeSelectedStop() : splitSelectedStop()"
+          >
+            <i :class="selectedStopIsDouble ? 'fa-solid fa-compress' : 'fa-solid fa-code-compare'"></i>
           </button>
         </div>
       </div>
@@ -4913,6 +4971,8 @@ async function startVideoExport(payload: {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
+.floating-split-btn { margin-left: 26px; color: var(--ink-2); font-size: 0.7em; }
+.floating-split-btn:hover { border-color: var(--accent) !important; background: var(--accent) !important; }
 .floating-delete-btn:hover {
   border-color: oklch(0.60 0.18 20);
   background: oklch(0.60 0.18 20);

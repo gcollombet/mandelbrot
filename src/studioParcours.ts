@@ -4,6 +4,7 @@ import type { MandelbrotParams } from './Mandelbrot'
 import { normalizeOrbitTrapFromLegacy } from './OrbitTrap'
 import { snapshotPathAppearance, type PathAppearance } from './palettePath'
 import { interpolatePresetAppearance, TRANSITION_DEFAULTS } from './presetTransition'
+import { normalizeAnimationConfig } from './AnimationConfig'
 import { log10FromDecimalString } from './floatexp'
 import type { VideoPathLocation } from './videoPath'
 import { canonicalDecimal, canonicalScale } from './expmap/decimal'
@@ -21,7 +22,7 @@ import { validateAudioRef, validateModulators, type StudioAudioRef, type StudioM
 // export transitions and `lookStateAt` into the engine's preset transition.
 
 export const STUDIO_PARCOURS_VERSION = 1
-export const STUDIO_MAX_KEYFRAMES = 64
+export const STUDIO_MAX_KEYFRAMES = 256
 export const STUDIO_MIN_DURATION = 1
 export const STUDIO_MAX_DURATION = 4 * 3600
 /** Default slot between two camera keyframes when no clock placed them. */
@@ -68,6 +69,11 @@ export type StudioKeyframe = {
   time: number
   camera?: StudioCamera
   look?: StudioLook
+  /** Double keyframe: the state the previous plan ARRIVES at. At the keyframe's
+   *  instant the view cuts from it to `camera` / `look`, the state the next
+   *  plan leaves from. Absent on an ordinary keyframe. */
+  cameraIn?: StudioCamera
+  lookIn?: StudioLook
   /** Camera timing of the segment that ARRIVES at this keyframe (default linear). */
   ease?: StudioCameraEase
   /** Transfer curve of the look transition that ARRIVES at this keyframe. */
@@ -79,7 +85,7 @@ export type StudioKeyframe = {
 
 /** A named point on the ruler, e.g. a moment of the music. Moves nothing. */
 export type StudioMarker = { id: string; time: number; name: string }
-export const STUDIO_MAX_MARKERS = 64
+export const STUDIO_MAX_MARKERS = 256
 
 export type StudioParcours = {
   version: typeof STUDIO_PARCOURS_VERSION
@@ -127,6 +133,7 @@ export type LookState = {
 export const STUDIO_DISCRETE_LOOK_FIELDS = [
   'colorStops', 'interpolationMode', 'paletteMirror', 'iterationPaletteCurve', 'textureMapping',
   'textureGuid', 'textureName', 'skyboxGuid', 'skyboxName', 'mu', 'stripeFrequency', 'orbitTrap', 'orbitTrapStrength',
+  'animation',
 ] as const
 
 /** Tilted 3D view (Navigation tab): part of a look keyframe, mixed linearly.
@@ -152,6 +159,9 @@ export function snapshotStudioLook(source: Partial<MandelbrotParams>): StudioLoo
   look.stripeFrequency = finite(source.stripeFrequency, 8)
   look.orbitTrap = normalizeOrbitTrapFromLegacy(source)
   look.orbitTrapStrength = look.orbitTrap.strength
+  // Oscillations of the Animation tab ride with the look. A look saved before
+  // that carries none and leaves the current ones alone.
+  if (source.animation) look.animation = normalizeAnimationConfig(source.animation, source.animationSpeed)
   return copyPlain(look)
 }
 
@@ -189,6 +199,7 @@ export function validateStudioParcours(value: unknown): StudioParcours {
     if (k.camera) {
       const camera: StudioKeyframe = { id: k.id, time: k.time, curve: 'gaussian', hold: 0, camera: validateCamera(k.camera) }
       if (isStudioCameraEase(k.ease) && k.ease !== 'linear') camera.ease = k.ease
+      if (k.cameraIn) camera.cameraIn = validateCamera(k.cameraIn)
       out.push(camera)
     }
     if (k.look) {
@@ -200,6 +211,7 @@ export function validateStudioParcours(value: unknown): StudioParcours {
         id, time: k.time, look: snapshotStudioLook(k.look),
         curve: isStopTransferCurve(k.curve) ? k.curve : 'gaussian',
         hold: clamp(finite(k.hold, 0), 0, 0.95),
+        ...(k.lookIn ? { lookIn: snapshotStudioLook(k.lookIn) } : {}),
       })
     }
     return out
@@ -287,7 +299,8 @@ export function cameraDistance(a: StudioCamera, b: StudioCamera): number {
 export function cameraKeyframes(parcours: StudioParcours): (StudioKeyframe & { camera: StudioCamera })[] {
   const ks = parcours.keyframes.filter((k): k is StudioKeyframe & { camera: StudioCamera } => !!k.camera).sort((a, b) => a.time - b.time)
   if (!parcours.retime || ks.length < 3) return ks
-  const legs = ks.slice(1).map((k, i) => cameraDistance(ks[i].camera, k.camera))
+  // A double keyframe is reached at its arrival side; the cut costs no time.
+  const legs = ks.slice(1).map((k, i) => cameraDistance(ks[i].camera, k.cameraIn ?? k.camera))
   const total = legs.reduce((a, b) => a + b, 0)
   if (!(total > 0)) return ks
   const t0 = ks[0].time, span = ks[ks.length - 1].time - t0
@@ -333,6 +346,26 @@ export function keyframeDisplayTime(parcours: StudioParcours, keyframe: StudioKe
   return parcoursTimeOfCameraTime(parcours, cams.find(c => c.id === keyframe.id)?.time ?? keyframe.time)
 }
 
+/** Gap between the two sides of a double keyframe on the camera clock. The
+ *  navigator's corner window never exceeds half a leg, so both stay sharp. */
+export const STUDIO_CUT_SECONDS = 0.001
+
+export type CameraKnot = { id: string; time: number; camera: StudioCamera; ease?: StudioCameraEase }
+
+/** The camera keyframes as path knots: a double keyframe gives two, its
+ *  arrival side a cut's width before its departure side, joined by a `hold`
+ *  segment so the clock jumps from one to the other. */
+export function cameraKnots(parcours: StudioParcours): CameraKnot[] {
+  const out: CameraKnot[] = []
+  for (const k of cameraKeyframes(parcours)) {
+    if (k.cameraIn && out.length) {
+      out.push({ id: `${k.id}:in`, time: Math.max(k.time - STUDIO_CUT_SECONDS, out[out.length - 1].time + STUDIO_CUT_SECONDS), camera: k.cameraIn, ease: k.ease })
+      out.push({ id: k.id, time: Math.max(k.time, out[out.length - 1].time + STUDIO_CUT_SECONDS), camera: k.camera, ease: 'hold' })
+    } else out.push({ id: k.id, time: out.length ? Math.max(k.time, out[out.length - 1].time + STUDIO_CUT_SECONDS) : k.time, camera: k.camera, ease: k.ease })
+  }
+  return out
+}
+
 export type CameraClock = {
   /** Camera time: ramps, then the ease of the segment under it. */
   time: number
@@ -347,7 +380,7 @@ export type CameraClock = {
 
 /** Parcours time → camera time on the navigator path: the global ramps, then
  *  the per-segment ease. Preview, export and the timeline all read this. */
-export function cameraClockAt(parcours: StudioParcours, time: number, keys = cameraKeyframes(parcours)): CameraClock {
+export function cameraClockAt(parcours: StudioParcours, time: number, keys: readonly CameraKnot[] = cameraKnots(parcours)): CameraClock {
   const u = rampedTime(parcours, time)
   if (keys.length < 2 || u <= keys[0].time) return { time: u, index: 0, linear: 0, eased: 0, hold: false }
   const lastIndex = keys.length - 1
@@ -362,7 +395,7 @@ export function cameraClockAt(parcours: StudioParcours, time: number, keys = cam
 }
 
 export function cameraSegmentAt(parcours: StudioParcours, time: number): CameraSegment | null {
-  const ks = cameraKeyframes(parcours)
+  const ks = cameraKnots(parcours)
   if (!ks.length) return null
   const clock = cameraClockAt(parcours, time, ks)
   const from = ks[clock.index]
@@ -376,7 +409,7 @@ export function cameraSegmentAt(parcours: StudioParcours, time: number): CameraS
  *  in camera time (retimed when asked). Times are made strictly increasing:
  *  two keys the retiming put on the same instant get a millisecond apart. */
 export function cameraPathSpec(parcours: StudioParcours): { spec: string; count: number; duration: number } | null {
-  const keys = cameraKeyframes(parcours)
+  const keys = cameraKnots(parcours)
   if (!keys.length) return null
   let last = -Infinity
   const entries = keys.map(k => {
@@ -386,6 +419,10 @@ export function cameraPathSpec(parcours: StudioParcours): { spec: string; count:
   })
   return { spec: entries.join(';'), count: keys.length, duration: last - keys[0].time }
 }
+
+/** How long before a double look keyframe the arrival side is fully reached:
+ *  the editor rests the playhead there to show and edit that side. */
+export const STUDIO_LOOK_REST_SECONDS = 0.01
 
 export function lookKeyframes(parcours: StudioParcours): (StudioKeyframe & { look: StudioLook })[] {
   return parcours.keyframes.filter((k): k is StudioKeyframe & { look: StudioLook } => !!k.look).sort((a, b) => a.time - b.time)
@@ -401,9 +438,12 @@ export function lookStateAt(parcours: StudioParcours, time: number): LookState |
   for (let i = 0; i < ks.length - 1; i++) {
     const a = ks[i], b = ks[i + 1]
     if (time > b.time) continue
-    const span = b.time - a.time, hold = b.hold * span
+    // A double keyframe: the plan glides to its arrival side, rests on it for
+    // the last instants, and the departure side takes over at the keyframe.
+    if (b.lookIn && time >= b.time) continue
+    const span = Math.max(1e-6, b.time - a.time - (b.lookIn ? STUDIO_LOOK_REST_SECONDS : 0)), hold = b.hold * span
     const f = span - hold > 1e-6 ? clamp((time - a.time - hold) / (span - hold), 0, 1) : (time >= b.time ? 1 : 0)
-    return { a: a.look, b: b.look, w: applyStopTransferCurve(b.curve, f), fromId: a.id, toId: b.id }
+    return { a: a.look, b: b.lookIn ?? b.look, w: applyStopTransferCurve(b.curve, f), fromId: a.id, toId: b.lookIn ? `${b.id}:in` : b.id }
   }
   return rest(ks[ks.length - 1])
 }

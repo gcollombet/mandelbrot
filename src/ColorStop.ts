@@ -55,6 +55,11 @@ export type ColorStop = {
   position: number;
   /** Transfer curve used from this stop to the next stop. */
   transferCurve?: StopTransferCurve;
+  /** Double stop: two stops sharing a `link` id sit at the same position and
+   *  move as one. `in` is the left side (where the gradient before arrives),
+   *  `out` the right side (where the gradient after starts). */
+  link?: string;
+  linkSide?: 'in' | 'out';
 
   // ── Activation weights (0 = off, 1 = full, fractional = blend) ──
 
@@ -292,4 +297,22 @@ export function createInterpolatedColorStop(
   }
 
   return newStop;
+}
+
+/** Palette order: by position, the two sides of a double stop left then right. */
+export function compareColorStops(a: ColorStop, b: ColorStop): number {
+  return a.position - b.position || Number(a.linkSide === 'out') - Number(b.linkSide === 'out');
+}
+
+/** Index of the other side of a double stop, or -1 when `index` is a single
+ *  stop (or its partner was lost: it then behaves as a single one). */
+export function linkedStopIndex(stops: readonly ColorStop[], index: number): number {
+  const stop = stops[index];
+  if (!stop?.link || !stop.linkSide) return -1;
+  return stops.findIndex((other, i) => i !== index && other.link === stop.link && !!other.linkSide && other.linkSide !== stop.linkSide);
+}
+
+/** A copy of the stop reflected in position: its side swaps too. */
+export function flipLinkSide<T extends ColorStop>(stop: T): T {
+  return stop.linkSide ? { ...stop, linkSide: stop.linkSide === 'in' ? 'out' : 'in' } : stop;
 }

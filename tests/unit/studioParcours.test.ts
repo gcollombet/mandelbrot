@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  addStudioKeyframe, blendedLook, cameraClockAt, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
+  addStudioKeyframe, blendedLook, cameraClockAt, cameraKnots, cameraSegmentAt, lookStateAt, STUDIO_CUT_SECONDS, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, snapshotStudioLook, validateStudioParcours,
 } from '../../src/studioParcours'
 
@@ -64,5 +64,42 @@ describe('studio look: tilted 3D view', () => {
     expect(mid.tiltViewTilt).toBe(20)
     expect(mid.tiltViewHeading).toBeCloseTo(0)
     expect(mid.tiltViewRelief).toBe(15)
+  })
+})
+
+describe('studio double keyframes', () => {
+  const stops = (color: string) => [{ position: 0, color }, { position: 1, color: '#ffffff' }]
+  const lookOf = (color: string) => snapshotStudioLook({ colorStops: stops(color) } as never)
+  it('camera: glides to the arrival side, then cuts to the departure side', () => {
+    const p = { ...newStudioParcours('x'), durationSeconds: 20, easeInSeconds: 0, easeOutSeconds: 0 }
+    addStudioKeyframe(p, 0, { camera: camera('1e-1') })
+    const [b] = addStudioKeyframe(p, 10, { camera: camera('1e-5') })
+    addStudioKeyframe(p, 20, { camera: camera('1e-6') })
+    b.cameraIn = camera('1e-2')
+    const knots = cameraKnots(p)
+    expect(knots.map(k => k.camera.scale)).toEqual(['1e-1', '1e-2', '1e-5', '1e-6'])
+    expect(knots[2].time - knots[1].time).toBeCloseTo(STUDIO_CUT_SECONDS)
+    expect(knots[2].ease).toBe('hold')
+    // Half-way through the first plan the camera heads for the arrival side.
+    expect(cameraSegmentAt(p, 5)!.to.scale).toBe('1e-2')
+    // On the keyframe the clock has jumped onto the departure side.
+    expect(cameraClockAt(p, 10).time).toBeCloseTo(10)
+    expect(cameraClockAt(p, 10 - STUDIO_CUT_SECONDS / 2).time).toBeCloseTo(10 - STUDIO_CUT_SECONDS)
+    expect(cameraSegmentAt(p, 12)!.from.scale).toBe('1e-5')
+    expect(validateStudioParcours(JSON.parse(JSON.stringify(p))).keyframes[1].cameraIn?.scale).toBe('1e-2')
+  })
+  it('look: blends to the arrival side, rests on it, then the departure side takes over', () => {
+    const p = { ...newStudioParcours('x'), durationSeconds: 20 }
+    addStudioKeyframe(p, 0, { look: lookOf('#000000') })
+    const [b] = addStudioKeyframe(p, 10, { look: lookOf('#00ff00') })
+    b.curve = 'linear'
+    b.lookIn = lookOf('#ff0000')
+    const mid = lookStateAt(p, 5)!
+    expect(mid.b.colorStops[0].color).toBe('#ff0000')
+    expect(mid.w).toBeGreaterThan(0.45)
+    expect(lookStateAt(p, 9.995)).toMatchObject({ w: 1, toId: `${b.id}:in` })
+    const after = lookStateAt(p, 10)!
+    expect(after.a.colorStops[0].color).toBe('#00ff00')
+    expect(after.w).toBe(0)
   })
 })

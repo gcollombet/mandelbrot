@@ -1,7 +1,7 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { applyStopTransferCurve, getEffectValue, getStopTransferCurve, normalizeColorStops } from './ColorStop.ts';
+import { applyStopTransferCurve, compareColorStops, getEffectValue, getStopTransferCurve, normalizeColorStops } from './ColorStop.ts';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG } from './effectFieldConfig';
 import type { EffectFieldName } from './effectFieldConfig';
 import type { InterpolationMode } from './Mandelbrot.ts';
@@ -52,7 +52,7 @@ export class Palette {
   private interpolate: (a: string, b: string) => (t: number) => string;
 
   constructor(points: ColorStop[], mode: InterpolationMode = 'lab') {
-    this.points = normalizeColorStops(points).sort((a, b) => a.position - b.position);
+    this.points = normalizeColorStops(points).sort(compareColorStops);
     this.interpolate = interpolators[mode] ?? interpolateLab;
   }
 

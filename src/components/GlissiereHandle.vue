@@ -7,6 +7,8 @@ const props = defineProps<{
   selected?: boolean;
   highlighted?: boolean;
   disabled?: boolean;
+  /** One side of a double stop: `in` is drawn left of the position, `out` right. */
+  half?: 'in' | 'out';
 }>();
 
 const zIndex = computed(() => (props.selected ? 10 : (props.highlighted ? 4 : 1)));
@@ -80,7 +82,7 @@ function onTouchStart(e: TouchEvent) {
   <div
     ref="markerRef"
     class="stop-marker"
-    :class="{ sel: props.selected, highlighted: props.highlighted }"
+    :class="[{ sel: props.selected, highlighted: props.highlighted }, props.half ? `half half-${props.half}` : '']"
     :style="{
       left: props.stop.position * 100 + '%',
       background: props.stop.color,
@@ -105,6 +107,11 @@ function onTouchStart(e: TouchEvent) {
   pointer-events: auto;
   transition: width 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
+
+.stop-marker.half { width: 9px; }
+.stop-marker.half-in { transform: translateX(calc(-100% - 0.5px)); border-radius: 6px 0 0 6px; border-right-width: 0; }
+.stop-marker.half-out { transform: translateX(0.5px); border-radius: 0 6px 6px 0; border-left-width: 0; }
+.stop-marker.half.sel { width: 11px; }
 
 .stop-marker:hover {
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);

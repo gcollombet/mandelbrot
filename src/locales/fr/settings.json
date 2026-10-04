@@ -264,7 +264,9 @@
     "sharedCannotDelete": "Les palettes du catalogue partagé ne peuvent pas être supprimées localement.",
     "deleteConfirm": "Supprimer la palette « {name} » ? Cette action est irréversible.",
     "allAlreadyImported": "Toutes les palettes étaient déjà importées (même nom + date).",
-    "invalidFileFormat": "Format de fichier invalide."
+    "invalidFileFormat": "Format de fichier invalide.",
+    "splitStop": "Scinder : stop double, avec un côté gauche (fin du dégradé qui arrive) et un côté droit (début du suivant)",
+    "mergeStop": "Fusionner : redevenir un stop simple en gardant ce côté"
   },
   "textures": {
     "environment": {
