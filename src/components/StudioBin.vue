@@ -32,6 +32,8 @@ const bin = reactive(loadStudioBin())
 const collectionId = ref(bin.collections[0]?.id ?? '')
 const kind = ref<BinKind>('place')
 const picking = ref(false)
+/** Where the Palettes tab picks from: saved palettes, or the palette of a saved scene. */
+const lookSource = ref<'palettes' | 'scenes'>('palettes')
 const order = ref<BinOrder>('sequence')
 const cut = ref(true)
 const presets = ref<PresetMetadata[]>([])
@@ -103,8 +105,8 @@ async function openPicker() {
   picking.value = !picking.value
   if (!picking.value) return
   try {
-    if (kind.value === 'place') presets.value = (await getAllPresetEntries()).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
-    else palettes.value = (await getAllPaletteEntries()).filter(p => p.colorStops?.length).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
+    presets.value = (await getAllPresetEntries()).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
+    if (kind.value === 'look') palettes.value = (await getAllPaletteEntries()).filter(p => p.colorStops?.length).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
   } catch (e) { emit('error', e) }
 }
 async function addPreset(meta: PresetMetadata) {
@@ -112,6 +114,14 @@ async function addPreset(meta: PresetMetadata) {
     const record = await getPresetById(meta.id)
     if (!record) return
     push({ id: crypto.randomUUID(), kind: 'place', name: meta.name, camera: snapshotStudioCamera(record.value), thumb: await shrinkThumbnail(meta.thumbnail) })
+  } catch (e) { emit('error', e) }
+}
+/** The palette of a saved scene: its stops, surface and textures, not its location. */
+async function addScenePalette(meta: PresetMetadata) {
+  try {
+    const record = await getPresetById(meta.id)
+    if (!record?.value.colorStops?.length) return
+    push({ id: crypto.randomUUID(), kind: 'look', name: meta.name, look: JSON.parse(JSON.stringify(paletteRecordAppearance({ ...record.value, name: meta.name } as PaletteRecord))) as StudioLook })
   } catch (e) { emit('error', e) }
 }
 function addPalette(p: PaletteRecord) {
@@ -182,11 +192,24 @@ onMounted(() => {
         <p v-if="!presets.length" class="bin-empty">{{ t('studioPanel.bin.noPresets') }}</p>
       </template>
       <template v-else>
+        <div class="bin-source" role="tablist">
+          <button type="button" role="tab" :aria-selected="lookSource === 'palettes'" @click="lookSource = 'palettes'">{{ t('studioPanel.bin.sources.palettes') }}</button>
+          <button type="button" role="tab" :aria-selected="lookSource === 'scenes'" @click="lookSource = 'scenes'">{{ t('studioPanel.bin.sources.scenes') }}</button>
+        </div>
+        <template v-if="lookSource === 'scenes'">
+          <button v-for="p in presets" :key="p.id" type="button" class="bin-tile place" :title="t('studioPanel.bin.addSceneTitle', { name: p.name })" @click="addScenePalette(p)">
+            <span class="bin-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : {}"></span>
+            <span class="bin-name">{{ p.name }}</span>
+          </button>
+          <p v-if="!presets.length" class="bin-empty">{{ t('studioPanel.bin.noPresets') }}</p>
+        </template>
+        <template v-else>
         <button v-for="p in palettes" :key="p.guid ?? p.name" type="button" class="bin-tile look" :title="t('studioPanel.bin.addTitle', { name: p.name })" @click="addPalette(p)">
           <span class="bin-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : { background: swatch({ colorStops: p.colorStops, interpolationMode: p.interpolationMode ?? 'lab' }) }"></span>
           <span class="bin-name">{{ p.name }}</span>
         </button>
         <p v-if="!palettes.length" class="bin-empty">{{ t('studioPanel.bin.noPalettes') }}</p>
+        </template>
       </template>
     </div>
     <div class="bin-fill">
@@ -220,6 +243,9 @@ onMounted(() => {
 .bin-kinds .look[aria-selected="true"] { border-color: oklch(0.72 0.16 320 / .6); }
 .bin-kinds small { font-family: var(--mono); color: var(--ink-3); margin-left: 4px; }
 .bin-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; max-height: 260px; overflow: auto; padding-right: 2px; }
+.bin-source { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.bin-source button { height: 24px; border: 1px solid var(--line-soft); border-radius: 6px; background: none; color: var(--ink-3); font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer; }
+.bin-source button[aria-selected="true"] { background: var(--row-on); color: var(--ink); }
 .bin-grid.picker { border-top: 1px solid var(--line-soft); padding-top: 6px; max-height: 220px; }
 .bin-tile { position: relative; display: flex; flex-direction: column; gap: 3px; padding: 4px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--row); color: var(--ink-2); font: inherit; font-size: 11px; cursor: grab; text-align: left; min-width: 0; }
 .bin-tile.place:hover { border-color: oklch(0.72 0.15 245 / .7); color: var(--ink); }

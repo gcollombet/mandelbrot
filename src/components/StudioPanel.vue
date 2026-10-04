@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { centerOn, clampView, revealTime, rulerStep, snapTime, viewSpan, zoomAround, type TimelineView } from '../studioTimelineView'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch, nextTick } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch, nextTick, toRaw } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Palette } from '../Palette'
 import type { MandelbrotParams } from '../Mandelbrot'
 import { log10FromDecimalString } from '../floatexp'
 import {
-  cameraClockAt, cameraDistance, cameraKeyframes, cameraSegmentAt, copyPlain, discreteLookDiffers, formatSeconds, formatTimecode,
+  cameraClockAt, cameraDistance, cameraKeyframes, cameraSegmentAt, copyPlain, discreteLookFields, formatSeconds, formatTimecode,
   keyframeDisplayTime, keyframeTimes, keyframeTrack, lookKeyframes, lookStateAt, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, removeStudioKeyframe, snapshotStudioCamera, snapshotStudioLook, validateStudioParcours,
   STUDIO_CAMERA_EASES, STUDIO_MAX_DURATION, STUDIO_MIN_DURATION,
-  STUDIO_MAX_MARKERS, STUDIO_LOOK_REST_SECONDS, STUDIO_KEYFRAME_MIN_GAP, addStudioKeyframe, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
+  STUDIO_MAX_MARKERS, STUDIO_LOOK_REST_SECONDS, STUDIO_KEYFRAME_MIN_GAP, addStudioKeyframe, cameraKnots, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
 } from '../studioParcours'
 import { StudioHistory } from '../studioHistory'
 import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
@@ -490,7 +490,15 @@ async function refreshPalettes() {
     palettes.value = all.filter(p => p.colorStops?.length).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
   } catch (e) { fail(e) }
 }
+const paletteSwatches = new WeakMap<object, string>()
 function paletteSwatch(p: PaletteRecord): string {
+  // Memoised: the template re-renders at every playback tick.
+  const raw = toRaw(p)
+  let swatch = paletteSwatches.get(raw)
+  if (!swatch) { swatch = paletteSwatchOf(raw); paletteSwatches.set(raw, swatch) }
+  return swatch
+}
+function paletteSwatchOf(p: PaletteRecord): string {
   return `linear-gradient(to right, ${lookGradient({ colorStops: p.colorStops, interpolationMode: p.interpolationMode ?? 'lab' } as StudioLook).split('|').join(',')})`
 }
 function applyPalette(p: PaletteRecord) {
@@ -670,7 +678,16 @@ let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean; group: b
 let lastSeek = 0
 const paletteCache = new Map<string, string>()
 
-function invalidate() { if (frame === null) frame = requestAnimationFrame(() => { frame = null; draw() }) }
+// The tracks are drawn into an off-screen layer and only redrawn when something
+// other than the playhead changes; a playback tick blits the layer and draws
+// the playhead over it. `invalidate` marks the tracks stale, `invalidateHead`
+// only asks for a repaint.
+let tracksStale = true
+let tracksKey = ''
+let tracksLayer: HTMLCanvasElement | null = null
+let headInk = '#f2f4f8', headRed = '#d44'
+function invalidateHead() { if (frame === null) frame = requestAnimationFrame(() => { frame = null; draw() }) }
+function invalidate() { tracksStale = true; invalidateHead() }
 function cssVar(name: string): string { return canvasRef.value ? getComputedStyle(canvasRef.value).getPropertyValue(name).trim() : '#888' }
 // Horizontal zoom and scroll (studioTimelineView.ts). Zoom 1 fits the parcours.
 const FOLLOW_KEY = 'mandelbrot_studio_follow'
@@ -706,8 +723,21 @@ function syncView(width: number) {
 }
 function xOf(seconds: number, width: number) { return PAD + (width - 2 * PAD) * (seconds - view.start) / Math.max(1e-6, viewSpan(view, parcours.durationSeconds)) }
 function tOf(x: number, width: number) { return Math.max(0, Math.min(parcours.durationSeconds, view.start + (x - PAD) / (width - 2 * PAD) * viewSpan(view, parcours.durationSeconds))) }
+// Per-look strings the timeline needs at every redraw (which happens at every
+// playback tick): serialising a look is too slow to repeat for each keyframe.
+// Looks are replaced, never edited in place, so the object is the cache key.
+const lookSignatures = new WeakMap<object, { discrete: string; stops: string }>()
+function lookSignature(look: StudioLook) {
+  const raw = toRaw(look)
+  let signature = lookSignatures.get(raw)
+  if (!signature) {
+    signature = { discrete: JSON.stringify(discreteLookFields(raw)), stops: JSON.stringify([raw.colorStops, raw.interpolationMode]) }
+    lookSignatures.set(raw, signature)
+  }
+  return signature
+}
 function lookGradient(look: StudioLook): string {
-  const key = JSON.stringify([look.colorStops, look.interpolationMode])
+  const key = lookSignature(look).stops
   let g = paletteCache.get(key)
   if (!g) {
     const p = new Palette(look.colorStops, look.interpolationMode)
@@ -756,11 +786,34 @@ function draw() {
   const w = Math.max(120, box.width), h = RULER + TRACKS.reduce((a, b) => a + b.h, 0)
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.height = `${h}px` }
   syncView(w)
+  // What the tracks depend on besides the parcours itself: the window, the
+  // canvas size and the side of the selected double keyframe under the playhead.
+  const key = `${canvas.width}x${canvas.height}|${view.zoom}|${view.start}|${selected.value ? sideOf(selected.value) : ''}`
+  if (tracksStale || key !== tracksKey || !tracksLayer) {
+    tracksLayer ??= document.createElement('canvas')
+    if (tracksLayer.width !== canvas.width || tracksLayer.height !== canvas.height) { tracksLayer.width = canvas.width; tracksLayer.height = canvas.height }
+    const layer = tracksLayer.getContext('2d')!
+    layer.setTransform(dpr, 0, 0, dpr, 0, 0)
+    layer.clearRect(0, 0, w, h)
+    drawTracks(layer, w, h)
+    tracksStale = false
+    tracksKey = key
+  }
   const c = canvas.getContext('2d')!
+  c.setTransform(1, 0, 0, 1, 0, 0)
+  c.clearRect(0, 0, canvas.width, canvas.height)
+  c.drawImage(tracksLayer, 0, 0)
   c.setTransform(dpr, 0, 0, dpr, 0, 0)
-  c.clearRect(0, 0, w, h)
+  // Playhead
+  const x = xOf(Math.min(time.value, parcours.durationSeconds), w)
+  c.fillStyle = recording.value ? headRed : headInk
+  c.fillRect(x - 0.5, 0, 1, h)
+  c.beginPath(); c.moveTo(x - 6, 0); c.lineTo(x + 6, 0); c.lineTo(x, 8); c.fill()
+}
+function drawTracks(c: CanvasRenderingContext2D, w: number, h: number) {
   const ink = cssVar('--ink') || '#f2f4f8', ink3 = cssVar('--ink-3') || '#717889', line = cssVar('--line-soft') || '#1c2029'
-  const camColor = 'oklch(0.72 0.15 245)', lookColor = 'oklch(0.72 0.16 320)', discColor = 'oklch(0.78 0.14 75)', red = cssVar('--red') || '#d44'
+  const camColor = 'oklch(0.72 0.15 245)', lookColor = 'oklch(0.72 0.16 320)', discColor = 'oklch(0.78 0.14 75)'
+  headInk = ink; headRed = cssVar('--red') || '#d44'
   const r = rows()
   c.font = '10px "JetBrains Mono", ui-monospace, monospace'; c.textBaseline = 'middle'
   // Ruler
@@ -793,9 +846,11 @@ function draw() {
     const lo = Math.min(...allDepths) - 0.25, hi = Math.max(...allDepths) + 0.25
     const yv = (d: number) => r.camera[0] + 8 + (r.camera[1] - r.camera[0] - 16) * (hi - d) / (hi - lo)
     if (cams.length > 1) {
+      // Built once: the curve samples the camera every other pixel.
+      const knots = cameraKnots(parcours)
       c.strokeStyle = camColor; c.lineWidth = 1.5; c.beginPath()
       for (let x = PAD; x <= w - PAD; x += 2) {
-        const seg = cameraSegmentAt(parcours, tOf(x, w))!
+        const seg = cameraSegmentAt(parcours, tOf(x, w), knots)!
         const f = seg.duration > 0 ? seg.localElapsed / seg.duration : 0
         const d = depthOf(seg.from.scale) + (depthOf(seg.to.scale) - depthOf(seg.from.scale)) * f
         if (x === PAD) c.moveTo(x, yv(d)); else c.lineTo(x, yv(d))
@@ -816,7 +871,7 @@ function draw() {
       c.globalAlpha = 0.9; c.drawImage(image, camX[i] + 4, r.camera[1] - 24, 36, 20); c.globalAlpha = 1
       c.strokeStyle = line; c.lineWidth = 1; c.strokeRect(camX[i] + 4.5, r.camera[1] - 23.5, 35, 19)
     })
-    cams.forEach((k, i) => keyMark(c, parcours.keyframes.find(x => x.id === k.id) ?? k, camX[i], yv(k.cameraIn ? depthOf(k.cameraIn.scale) : depths[i]), yv(depths[i]), camColor))
+    cams.forEach((k, i) => keyMark(c, k, camX[i], yv(k.cameraIn ? depthOf(k.cameraIn.scale) : depths[i]), yv(depths[i]), camColor))
     c.fillStyle = ink3; c.fillText(`1e-${depths[0].toFixed(1)} → 1e-${depths[depths.length - 1].toFixed(1)}`, PAD + 4, r.camera[0] + 8)
   } else {
     c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyCamera'), PAD + 4, (r.camera[0] + r.camera[1]) / 2)
@@ -827,6 +882,7 @@ function draw() {
   looks.forEach((k, i) => {
     const next = looks[i + 1]
     const x0 = xOf(k.time, w), x1 = xOf(next ? next.time : duration, w)
+    if (x1 < -10 || x0 > w + 10) return
     const colors = lookGradient(k.look).split('|')
     const g = c.createLinearGradient(x0, 0, Math.max(x0 + 1, x1), 0)
     colors.forEach((col, j) => g.addColorStop(j / (colors.length - 1), col))
@@ -837,7 +893,7 @@ function draw() {
       c.strokeStyle = lookColor; c.lineWidth = 1; c.beginPath()
       for (let x = Math.max(holdX, 0); x <= Math.min(x1, w); x += 2) {
         const f = (x - holdX) / Math.max(1, x1 - holdX)
-        const state = lookStateAt(parcours, tOf(x, w))?.w ?? f
+        const state = lookStateAt(parcours, tOf(x, w), looks)?.w ?? f
         const yy = y0 + bandH - bandH * state
         if (x === Math.max(holdX, 0)) c.moveTo(x, yy); else c.lineTo(x, yy)
       }
@@ -848,7 +904,7 @@ function draw() {
   if (!looks.length) { c.fillStyle = ink3; c.fillText(t('studioPanel.tracks.emptyLook'), PAD + 4, (r.look[0] + r.look[1]) / 2) }
   // Discrete: markers where a look keyframe switches texture, skybox, µ, stops…
   looks.forEach((k, i) => {
-    if (i === 0 || !discreteLookDiffers(looks[i - 1].look, k.look)) return
+    if (i === 0 || lookSignature(looks[i - 1].look).discrete === lookSignature(k.look).discrete) return
     const x = xOf(k.time, w)
     c.fillStyle = discColor; c.fillRect(x - 1, r.discrete[0] + 4, 2, r.discrete[1] - r.discrete[0] - 8)
     const labels: string[] = []
@@ -856,7 +912,7 @@ function draw() {
     if (prev.textureGuid !== k.look.textureGuid || prev.textureName !== k.look.textureName) labels.push(t('studioPanel.discrete.texture'))
     if (prev.skyboxGuid !== k.look.skyboxGuid || prev.skyboxName !== k.look.skyboxName) labels.push(t('studioPanel.discrete.skybox'))
     if (prev.mu !== k.look.mu) labels.push('µ')
-    if (JSON.stringify(prev.colorStops) !== JSON.stringify(k.look.colorStops)) labels.push(t('studioPanel.discrete.stops'))
+    if (lookSignature(prev).stops !== lookSignature(k.look).stops) labels.push(t('studioPanel.discrete.stops'))
     c.fillStyle = ink3; c.fillText(labels.join(' · '), x + 5, (r.discrete[0] + r.discrete[1]) / 2)
   })
   // Audio: loudness waveform, section boundaries, beat grid (every 4 beats).
@@ -936,11 +992,6 @@ function draw() {
     c.fillRect(xOf(snapGuide, w) - 0.5, RULER, 1, h - RULER)
     c.globalAlpha = 1
   }
-  // Playhead
-  const x = xOf(Math.min(time.value, duration), w)
-  c.fillStyle = recording.value ? red : ink
-  c.fillRect(x - 0.5, 0, 1, h)
-  c.beginPath(); c.moveTo(x - 6, 0); c.lineTo(x + 6, 0); c.lineTo(x, 8); c.fill()
 }
 
 // ── Markers ──
@@ -1235,7 +1286,11 @@ onBeforeUnmount(() => {
   player.destroy()
   rememberStudioDraft(parcours, savedId.value, time.value)
 })
-watch([time, playing, recording, selectedId], invalidate)
+watch([time, recording], invalidateHead)
+watch([playing, selectedId], invalidate)
+// Any edit of the parcours redraws the tracks, whoever made it.
+watch(parcours, invalidate, { deep: true })
+watch(() => multi.size, invalidate)
 watch(() => JSON.stringify(parcours), () => { invalidate(); publishStudioParcours(parcours) }, { immediate: true })
 
 const timecode = computed(() => formatTimecode(time.value, FPS))
@@ -1368,7 +1423,8 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
             <DenseSelect v-if="selected.id !== firstCameraId" :model-value="selected.ease ?? 'linear'" :label="t('studioPanel.inspector.ease')" :options="EASE_OPTIONS" :desc="t('studioPanel.inspector.easeDesc')" @update:model-value="setEase($event as StudioCameraEase)" />
             <p class="hint">{{ t('studioPanel.inspector.cameraHint') }}</p>
             <h3>{{ t('studioPanel.places.title') }} <small>{{ places.length }}</small></h3>
-            <div v-if="places.length" class="palette-grid">
+            <!-- v-memo: the template re-renders at every playback tick, and rebuilding each tile's data-URL style then costs far more than a frame. -->
+            <div v-if="places.length" v-memo="[places]" class="palette-grid">
               <button v-for="p in places" :key="p.id" type="button" class="palette-tile place-tile" :title="t('studioPanel.places.applyTitle', { name: p.name })" @click="applyPlace(p)">
                 <span class="place-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : {}"></span>
                 <span class="palette-name"><i v-if="p.favorite" class="fa-solid fa-star"></i>{{ p.name }}</span>
@@ -1386,7 +1442,7 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
             </div>
             <button class="sbtn" type="button" :title="t('studioPanel.inspector.editLookDesc')" @click="editLook"><i class="fa-solid fa-sliders"></i> {{ t('studioPanel.inspector.editLook') }}</button>
             <h3>{{ t('studioPanel.palettes.title') }} <small>{{ palettes.length }}</small></h3>
-            <div v-if="palettes.length" class="palette-grid">
+            <div v-if="palettes.length" v-memo="[palettes]" class="palette-grid">
               <button v-for="p in palettes" :key="p.guid ?? p.name" type="button" class="palette-tile" :title="t('studioPanel.palettes.applyTitle', { name: p.name })" @click="applyPalette(p)">
                 <span class="palette-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : { background: paletteSwatch(p) }"></span>
                 <span class="palette-name"><i v-if="p.favorite" class="fa-solid fa-star"></i>{{ p.name }}</span>

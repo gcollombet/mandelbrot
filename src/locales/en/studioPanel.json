@@ -254,6 +254,11 @@
       "hint": "Pins one keyframe per marker with the items of this collection. With a loop range (I / O), only its markers are used.",
       "run": "Pin on {count} marker(s)",
       "done": "{count} keyframe(s) pinned"
-    }
+    },
+    "sources": {
+      "palettes": "Palettes",
+      "scenes": "Scenes"
+    },
+    "addSceneTitle": "Add the palette of the scene “{name}”"
   }
 }

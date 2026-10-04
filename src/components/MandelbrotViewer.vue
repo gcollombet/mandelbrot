@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { encodeHdrPng } from '../hdrPng';
+import { withPngProvenance, withWebpProvenance, type ImageProvenance } from '../imageProvenance';
 import { nearestPaletteStop } from '../palettePicking';
 import {computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
@@ -145,8 +146,12 @@ async function toggleHdrDisplay() {
   catch (error) { showHudStatus(error instanceof Error ? error.message : String(error), 8000); }
   finally { outputDiagnostics.value = readOutputDiagnostics(); hdrSwitchBusy.value = false; }
 }
-function downloadHdrBlob(blob: Blob, width: number, height: number) {
-  const url = URL.createObjectURL(blob), a = document.createElement('a');
+function currentProvenance(): ImageProvenance {
+  const p = mandelbrotParams.value;
+  return { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle };
+}
+function downloadHdrBlob(blob: Blob, width: number, height: number, provenance: ImageProvenance) {
+  const url = URL.createObjectURL(withPngProvenance(blob, provenance)), a = document.createElement('a');
   a.href = url; a.download = `mandelbrot-${timestampForFilename()}-${width}x${height}-HDR.png`;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -252,6 +257,7 @@ async function exportStill(size: StillSize) {
   console.info(`[still] start ${size} ${width}×${height} t=${Math.round(performance.now())}`);
   try {
     const p = mandelbrotParams.value;
+    const provenance = currentProvenance();
     const result = await renderStill(
       {
         engine,
@@ -285,7 +291,7 @@ async function exportStill(size: StillSize) {
         }
       }
       const blob = await encodeHdrPng(width, height, pixels, { signal: stillAbort.signal });
-      downloadHdrBlob(blob, width, height);
+      downloadHdrBlob(blob, width, height, provenance);
       if (stillHdrWarning.value) showHudStatus(stillHdrWarning.value, 10000);
     } else {
       let output = result.canvas;
@@ -293,7 +299,7 @@ async function exportStill(size: StillSize) {
         output = document.createElement('canvas'); output.width = width; output.height = height;
         output.getContext('2d')!.drawImage(result.canvas, cropX, cropY, width, height, 0, 0, width, height);
       }
-      await downloadCanvas(output, `${width}x${height}`);
+      await downloadCanvas(output, `${width}x${height}`, provenance);
     }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
@@ -1433,7 +1439,7 @@ async function downloadCanvasSnapshot(aspect: StillAspect = 'window') {
 
 /** Save a canvas as WebP (compact) and PNG (lossless). WebP is skipped when the
  *  browser cannot encode it or the canvas exceeds its 16383 px limit. */
-async function downloadCanvas(canvas: HTMLCanvasElement, suffix = '') {
+async function downloadCanvas(canvas: HTMLCanvasElement, suffix = '', provenance = currentProvenance()) {
   const timestamp = timestampForFilename();
   const stem = `mandelbrot-${timestamp}${suffix ? `-${suffix}` : ''}`;
 
@@ -1450,9 +1456,9 @@ async function downloadCanvas(canvas: HTMLCanvasElement, suffix = '') {
     && canvas.toDataURL('image/webp').startsWith('data:image/webp');
   if (webpSupported) {
     await new Promise<void>((resolve) => {
-      canvas.toBlob((blob) => {
+      canvas.toBlob(async (blob) => {
         if (blob) {
-          const url = URL.createObjectURL(blob);
+          const url = URL.createObjectURL(await withWebpProvenance(blob, canvas.width, canvas.height, provenance));
           triggerDownload(url, 'webp');
           setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
@@ -1465,7 +1471,7 @@ async function downloadCanvas(canvas: HTMLCanvasElement, suffix = '') {
   await new Promise<void>((resolve) => {
     canvas.toBlob((blob) => {
       if (blob) {
-        const url = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(withPngProvenance(blob, provenance));
         triggerDownload(url, 'png');
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } else {

@@ -394,8 +394,8 @@ export function cameraClockAt(parcours: StudioParcours, time: number, keys: read
   return { time: keys[i].time + span * eased, index: i, linear, eased, hold: ease === 'hold' }
 }
 
-export function cameraSegmentAt(parcours: StudioParcours, time: number): CameraSegment | null {
-  const ks = cameraKnots(parcours)
+/** `ks` lets a caller that samples many times (the timeline) build the knots once. */
+export function cameraSegmentAt(parcours: StudioParcours, time: number, ks: readonly CameraKnot[] = cameraKnots(parcours)): CameraSegment | null {
   if (!ks.length) return null
   const clock = cameraClockAt(parcours, time, ks)
   const from = ks[clock.index]
@@ -430,8 +430,7 @@ export function lookKeyframes(parcours: StudioParcours): (StudioKeyframe & { loo
 
 /** The look holds through `hold`, then crosses to the next one along its
  *  transfer curve over the rest of the segment. */
-export function lookStateAt(parcours: StudioParcours, time: number): LookState | null {
-  const ks = lookKeyframes(parcours)
+export function lookStateAt(parcours: StudioParcours, time: number, ks = lookKeyframes(parcours)): LookState | null {
   if (!ks.length) return null
   const rest = (k: StudioKeyframe & { look: StudioLook }): LookState => ({ a: k.look, b: k.look, w: 0, fromId: k.id, toId: k.id })
   if (time <= ks[0].time) return rest(ks[0])

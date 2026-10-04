@@ -1,21 +1,5 @@
 import { t } from './i18n'
-/** Package GPU-converted PNG 3 RGB16 PQ using native zlib compression. */
-const crcTable = Uint32Array.from({ length: 256 }, (_, i) => {
-  let c = i
-  for (let bit = 0; bit < 8; bit++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
-  return c >>> 0
-})
-function chunk(type: string, data: Uint8Array): Uint8Array<ArrayBuffer> {
-  const bytes = new Uint8Array(data.length + 12), view = new DataView(bytes.buffer)
-  view.setUint32(0, data.length)
-  for (let i = 0; i < 4; i++) bytes[4+i] = type.charCodeAt(i)
-  bytes.set(data, 8)
-  let crc = 0xffffffff
-  for (let i = 4; i < bytes.length - 4; i++) crc = crcTable[(crc ^ bytes[i]) & 255] ^ (crc >>> 8)
-  view.setUint32(bytes.length - 4, (crc ^ 0xffffffff) >>> 0)
-  return bytes
-}
-
+import { pngChunk as chunk } from './imageProvenance'
 /** Package GPU-converted, big-endian RGB16 PQ samples; no color math on the CPU. */
 export async function encodeHdrPng(width: number, height: number, rgbPq: Uint16Array, options: { signal?: AbortSignal } = {}): Promise<Blob> {
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || rgbPq.length !== width * height * 3) throw new Error(t('video.hdr.dimensionsInvalid'))
