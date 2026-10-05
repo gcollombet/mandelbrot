@@ -7,7 +7,7 @@ import { interpolatePresetAppearance, TRANSITION_DEFAULTS } from './presetTransi
 import { normalizeAnimationConfig } from './AnimationConfig'
 import { log10FromDecimalString } from './floatexp'
 import type { VideoPathLocation } from './videoPath'
-import { canonicalDecimal, canonicalScale } from './expmap/decimal'
+import { canonicalDecimal, canonicalScale, decimalDifferenceLog10 } from './expmap/decimal'
 import { validateAudioRef, validateModulators, type StudioAudioRef, type StudioModulator } from './studioAudio'
 
 // ── Studio parcours: a keyframe timeline indexed by TIME ──
@@ -22,7 +22,7 @@ import { validateAudioRef, validateModulators, type StudioAudioRef, type StudioM
 // export transitions and `lookStateAt` into the engine's preset transition.
 
 export const STUDIO_PARCOURS_VERSION = 1
-export const STUDIO_MAX_KEYFRAMES = 256
+export const STUDIO_MAX_KEYFRAMES = 512
 export const STUDIO_MIN_DURATION = 1
 export const STUDIO_MAX_DURATION = 4 * 3600
 /** Default slot between two camera keyframes when no clock placed them. */
@@ -85,7 +85,7 @@ export type StudioKeyframe = {
 
 /** A named point on the ruler, e.g. a moment of the music. Moves nothing. */
 export type StudioMarker = { id: string; time: number; name: string }
-export const STUDIO_MAX_MARKERS = 256
+export const STUDIO_MAX_MARKERS = 512
 
 export type StudioParcours = {
   version: typeof STUDIO_PARCOURS_VERSION
@@ -281,14 +281,22 @@ export function moveStudioKeyframe(parcours: StudioParcours, id: string, time: n
 
 // ── Perceptual arc length ──
 // What the eye reads: decades of zoom, screen widths of pan and turns of
-// angle. The pan term needs the centre difference in f64; it vanishes past
-// ~1e-308 where it has no screen meaning anyway (a pan that deep is a zoom).
+// angle. The pan term reads the centre difference exactly (decimal strings),
+// so it holds at any depth.
 export function cameraDistance(a: StudioCamera, b: StudioCamera): number {
   const la = log10FromDecimalString(a.scale), lb = log10FromDecimalString(b.scale)
   const decades = Number.isFinite(la) && Number.isFinite(lb) ? Math.abs(la - lb) : 0
-  const scale = Math.max(Number(a.scale), Number(b.scale))
-  const dx = Number(a.cx) - Number(b.cx), dy = Number(a.cy) - Number(b.cy)
-  const pan = Number.isFinite(scale) && scale > 0 && Number.isFinite(dx) && Number.isFinite(dy) ? Math.hypot(dx, dy) / scale : 0
+  // Pan in screens, from the exact centre difference: f64 would lose it below 1e-15.
+  let pan = 0
+  try {
+    const dx = decimalDifferenceLog10(a.cx, b.cx), dy = decimalDifferenceLog10(a.cy, b.cy)
+    const far = Math.max(dx, dy), near = Math.min(dx, dy)
+    const scale = Math.max(la, lb)
+    if (Number.isFinite(far) && Number.isFinite(scale)) {
+      const hypot = far + (Number.isFinite(near) ? 0.5 * Math.log10(1 + 10 ** (2 * (near - far))) : 0)
+      pan = 10 ** Math.min(3, hypot - scale)
+    }
+  } catch { /* unreadable centre: no pan term */ }
   const turns = Math.abs(a.angle - b.angle) / (2 * Math.PI)
   // One decade ≈ one screen width of pan ≈ a quarter turn, as felt at the eye.
   return decades + Math.min(pan, 50) + turns * 4

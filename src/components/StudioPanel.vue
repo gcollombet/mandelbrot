@@ -13,8 +13,6 @@ import {
   STUDIO_MAX_MARKERS, STUDIO_LOOK_REST_SECONDS, STUDIO_KEYFRAME_MIN_GAP, addStudioKeyframe, cameraKnots, type StudioMarker, type StudioCamera, type StudioCameraEase, type StudioKeyframe, type StudioLook, type StudioParcours, type StudioTrack,
 } from '../studioParcours'
 import { StudioHistory } from '../studioHistory'
-import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
-import { paletteRecordAppearance } from '../paletteLook'
 import { deleteStudioParcours, readStudioParcoursRecords, saveStudioParcours, type StudioParcoursRecord } from '../studioParcoursStore'
 import { createStudioPlayer, type StudioAudioSource, type StudioController, type StudioEngine, type StudioTextures } from '../studioPlayer'
 import { AUDIO_FEATURES, type AudioAnalysis } from '../audioAnalysis'
@@ -23,6 +21,7 @@ import { decodeStudioAudio, getStudioAudioRecord, importStudioAudio } from '../s
 import { publishStudioParcours, recallStudioDraft, rememberStudioDraft, studioExportAudio, studioLookClipboard } from '../studioDraft'
 import { DenseField, DenseSeg, DenseSelect, DenseToggle } from './dense'
 import StudioBin from './StudioBin.vue'
+import { formatQuick, loadQuickPins, QUICK_GROUPS, QUICK_PARAMS, quickFromSlider, quickSliderRange, quickToSlider, saveQuickPins, scaleTimes, wrapDegrees, type QuickParam } from '../studioQuickParams'
 import { AUTO_KEY_DETECTORS, detectAutoKeyTimes, isPeakDetector, type AutoKeyDetector } from '../studioAutoKeys'
 import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../presetStore'
 import { binDrag, cameraThumbKey, distributeBinItems, placeThumbs, rememberPlaceThumb, shrinkThumbnail, type BinItem, type BinOrder } from '../studioBin'
@@ -483,34 +482,7 @@ function setDuration(value: number) {
   afterEdit()
 }
 
-// ── Look library: saved palettes and a look clipboard ──
-const palettes = ref<PaletteRecord[]>([])
-async function refreshPalettes() {
-  try {
-    const all = await getAllPaletteEntries()
-    palettes.value = all.filter(p => p.colorStops?.length).sort((a, b) => Number(!!b.favorite) - Number(!!a.favorite) || a.name.localeCompare(b.name))
-  } catch (e) { fail(e) }
-}
-const paletteSwatches = new WeakMap<object, string>()
-function paletteSwatch(p: PaletteRecord): string {
-  // Memoised: the template re-renders at every playback tick.
-  const raw = toRaw(p)
-  let swatch = paletteSwatches.get(raw)
-  if (!swatch) { swatch = paletteSwatchOf(raw); paletteSwatches.set(raw, swatch) }
-  return swatch
-}
-function paletteSwatchOf(p: PaletteRecord): string {
-  return `linear-gradient(to right, ${lookGradient({ colorStops: p.colorStops, interpolationMode: p.interpolationMode ?? 'lab' } as StudioLook).split('|').join(',')})`
-}
-function applyPalette(p: PaletteRecord) {
-  const k = selected.value
-  if (!k?.look) return
-  recordEdit()
-  for (const x of sameTrackSelection.value) setLook(x, snapshotStudioLook({ ...lookOf(x), ...paletteRecordAppearance(p) }))
-  if (Math.abs(k.time - time.value) < HALF_FRAME) pending.look = null
-  afterEdit()
-  flash(t('studioPanel.palettes.applied', { name: p.name }))
-}
+// ── Look clipboard ──
 function copyLook() {
   const k = selected.value
   if (!k?.look) return
@@ -666,6 +638,64 @@ function addAutoKeyframes() {
   afterEdit()
 }
 
+// ── Quick controls (studioQuickParams.ts) ──
+// Sliders on the live look. They write the params like the palette editor
+// does, so the edit lands in the look keyframe (and side) under the playhead,
+// or stays pending elsewhere.
+const quickPins = ref(loadQuickPins())
+const quickEditing = ref(false)
+const quickShown = computed(() => QUICK_PARAMS.filter(p => quickPins.value.includes(p.field)))
+const quickByGroup = computed(() => QUICK_GROUPS.map(group => ({ group, params: QUICK_PARAMS.filter(p => p.group === group) })))
+function quickValue(p: QuickParam): number {
+  const value = props.params[p.field]
+  return typeof value === 'number' && Number.isFinite(value) ? value : p.default
+}
+function setQuick(p: QuickParam, slider: number) { (props.params as unknown as Record<string, unknown>)[p.field] = quickFromSlider(p, slider) }
+function toggleQuickPin(field: string) {
+  quickPins.value = QUICK_PARAMS.map(p => p.field as string).filter(f => f === field ? !quickPins.value.includes(f) : quickPins.value.includes(f))
+  try { saveQuickPins(quickPins.value) } catch { /* ignore */ }
+}
+
+// ── Quick camera moves ──
+// Slide, zoom and turn the live view by a set amount. Like navigating by hand,
+// the move lands in the camera keyframe (and side) under the playhead, or
+// stays pending elsewhere: an arrival side copied to the departure side then
+// nudged gives a plan that drifts.
+const nudge = reactive({ slide: 10, zoom: 10 })
+function moveCamera(move: { dx?: number; dy?: number; zoom?: number; angle?: number }) {
+  if (playing.value) player.pause()
+  const controller = props.controller, navigator = controller?.getNavigator()
+  if (!controller || !navigator) return
+  const camera = snapshotStudioCamera(props.params)
+  let { cx, cy } = camera
+  if (move.dx || move.dy) {
+    // The navigator carries the centre at full precision: let it do the sum.
+    navigator.origin(camera.cx, camera.cy)
+    navigator.scale(camera.scale)
+    navigator.angle(camera.angle)
+    navigator.translate_direct(move.dx ?? 0, move.dy ?? 0)
+    const raw = navigator.get_params() as unknown[]
+    if (Array.isArray(raw) && raw.length >= 2) { cx = String(raw[0]); cy = String(raw[1]) }
+  }
+  controller.resetReferenceTo(cx, cy, move.zoom ? scaleTimes(camera.scale, 1 / move.zoom) : camera.scale, move.angle ?? camera.angle)
+}
+/** `x`, `y` in screens: the view is two half-heights tall. */
+function slideCamera(x: number, y: number) { moveCamera({ dx: 2 * x * nudge.slide / 100, dy: 2 * y * nudge.slide / 100 }) }
+function zoomCamera(direction: 1 | -1) { moveCamera({ zoom: (1 + nudge.zoom / 100) ** direction }) }
+const cameraDegrees = computed(() => wrapDegrees(Number(props.params.angle) || 0))
+function setCameraDegrees(degrees: number) { moveCamera({ angle: degrees * Math.PI / 180 }) }
+
+// ── Keyframe lock: a click selects, nothing moves ──
+const LOCK_KEY = 'mandelbrot_studio_lock'
+const locked = ref((() => { try { return localStorage.getItem(LOCK_KEY) === '1' } catch { return false } })())
+function toggleLock() {
+  locked.value = !locked.value
+  try { localStorage.setItem(LOCK_KEY, locked.value ? '1' : '0') } catch { /* ignore */ }
+}
+/** A drag only starts moving things past this many pixels: a click on a small
+ *  keyframe must not shift it. */
+const DRAG_THRESHOLD = 4
+
 // ── Places: saved scenes, one click puts a location on the keyframe ──
 const places = ref<PresetMetadata[]>([])
 async function refreshPlaces() {
@@ -712,6 +742,7 @@ function handleKey(e: KeyboardEvent): boolean {
     case '+': case '=': zoomBy(1.5); return true
     case '-': case '_': zoomBy(1 / 1.5); return true
     case 'f': toggleFollow(); return true
+    case 'n': toggleLock(); return true
     case 'm': if (!e.repeat) addMarker(); return true
     case 'i': setLoop('in'); return true
     case 'o': setLoop('out'); return true
@@ -735,7 +766,7 @@ const TRACKS = [
   { id: 'camera', h: 64 }, { id: 'look', h: 44 }, { id: 'discrete', h: 24 }, { id: 'audio', h: 56 }, { id: 'modulator', h: 28 },
 ] as const
 let frame: number | null = null
-let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean; group: boolean } | { kind: 'box'; x0: number; y0: number; x1: number; y1: number } | { kind: 'marker'; id: string; moved: boolean } | { kind: 'pan'; x: number; start: number } | null = null
+let drag: { kind: 'head' } | { kind: 'key'; id: string; moved: boolean; group: boolean; x: number } | { kind: 'box'; x0: number; y0: number; x1: number; y1: number } | { kind: 'marker'; id: string; moved: boolean; x: number } | { kind: 'pan'; x: number; start: number } | null = null
 let lastSeek = 0
 const paletteCache = new Map<string, string>()
 
@@ -1194,7 +1225,7 @@ function onPointerDown(e: PointerEvent) {
   // Middle button, or Alt + drag: scroll the timeline.
   if (e.button === 1 || e.altKey) { e.preventDefault(); drag = { kind: 'pan', x: e.clientX, start: view.start }; return }
   const marker = markerAt(px, py, box.width)
-  if (marker) { drag = { kind: 'marker', id: marker.id, moved: false }; return }
+  if (marker) { drag = { kind: 'marker', id: marker.id, moved: false, x: e.clientX }; return }
   const k = hitKeyframe(px, py, box.width)
   if (k && (e.shiftKey || e.metaKey || e.ctrlKey)) {
     // Add to, or remove from, the selection.
@@ -1207,7 +1238,7 @@ function onPointerDown(e: PointerEvent) {
   if (k) {
     const group = multi.has(k.id) && multi.size > 1
     if (group) selectedId.value = k.id; else { multi.clear(); selectSide(k, hitSide) }
-    drag = { kind: 'key', id: k.id, moved: false, group }
+    drag = { kind: 'key', id: k.id, moved: false, group, x: e.clientX }
   } else if (e.shiftKey) drag = { kind: 'box', x0: px, y0: py, x1: px, y1: py }
   else { drag = { kind: 'head' }; throttledSeek(snapped(tOf(px, box.width), box.width, e), true) }
   invalidate()
@@ -1234,6 +1265,8 @@ function onPointerMove(e: PointerEvent) {
     invalidate()
     return
   }
+  // Locked, or not dragged far enough yet: the keyframe or marker stays put.
+  if ((drag.kind === 'key' || drag.kind === 'marker') && !drag.moved && (locked.value || Math.abs(e.clientX - drag.x) < DRAG_THRESHOLD)) return
   if (drag.kind === 'marker') {
     const markerDrag = drag, m = parcours.markers.find(x => x.id === markerDrag.id)
     if (!m) return
@@ -1324,7 +1357,6 @@ function throttledSeek(value: number, force: boolean) {
 let resizeObserver: ResizeObserver | null = null
 onMounted(() => {
   void refreshLibrary()
-  void refreshPalettes()
   void refreshPlaces()
   void restoreAudio()
   resizeObserver = new ResizeObserver(() => invalidate())
@@ -1420,6 +1452,7 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
             <button class="vbtn" type="button" :disabled="view.zoom <= 1" :title="t('studioPanel.view.zoomOut')" :aria-label="t('studioPanel.view.zoomOut')" @click="zoomBy(1 / 1.5)"><i class="fa-solid fa-magnifying-glass-minus"></i></button>
             <button class="vbtn" type="button" :title="t('studioPanel.view.zoomIn')" :aria-label="t('studioPanel.view.zoomIn')" @click="zoomBy(1.5)"><i class="fa-solid fa-magnifying-glass-plus"></i></button>
             <button class="vbtn" type="button" :disabled="view.zoom <= 1" :title="t('studioPanel.view.fit')" :aria-label="t('studioPanel.view.fit')" @click="zoomFit"><i class="fa-solid fa-arrows-left-right-to-line"></i></button>
+            <button class="vbtn" type="button" :aria-pressed="locked" :title="t('studioPanel.view.lock')" :aria-label="t('studioPanel.view.lock')" @click="toggleLock"><i :class="locked ? 'fa-solid fa-lock' : 'fa-solid fa-lock-open'"></i></button>
             <button class="vbtn" type="button" :title="t('studioPanel.markers.add')" :aria-label="t('studioPanel.markers.add')" @click="addMarker"><i class="fa-solid fa-location-pin"></i></button>
             <button class="vbtn" type="button" :aria-pressed="follow" :title="t('studioPanel.view.follow')" :aria-label="t('studioPanel.view.follow')" @click="toggleFollow"><i class="fa-solid fa-arrows-to-dot"></i></button>
           </div>
@@ -1505,20 +1538,50 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
               <button class="sbtn" type="button" :disabled="!studioLookClipboard" :title="t('studioPanel.palettes.pasteTitle')" @click="pasteLook"><i class="fa-regular fa-paste"></i> {{ t('studioPanel.palettes.paste') }}</button>
             </div>
             <button class="sbtn" type="button" :title="t('studioPanel.inspector.editLookDesc')" @click="editLook"><i class="fa-solid fa-sliders"></i> {{ t('studioPanel.inspector.editLook') }}</button>
-            <h3>{{ t('studioPanel.palettes.title') }} <small>{{ palettes.length }}</small></h3>
-            <div v-if="palettes.length" v-memo="[palettes]" class="palette-grid">
-              <button v-for="p in palettes" :key="p.guid ?? p.name" type="button" class="palette-tile" :title="t('studioPanel.palettes.applyTitle', { name: p.name })" @click="applyPalette(p)">
-                <span class="palette-thumb" :style="p.thumbnail ? { backgroundImage: `url(${p.thumbnail})` } : { background: paletteSwatch(p) }"></span>
-                <span class="palette-name"><i v-if="p.favorite" class="fa-solid fa-star"></i>{{ p.name }}</span>
-              </button>
-            </div>
-            <p v-else class="empty">{{ t('studioPanel.palettes.empty') }}</p>
           </template>
           <button class="sbtn sbtn-danger" type="button" @click="deleteSelected">{{ t('studioPanel.inspector.delete') }}</button>
         </template>
         <p v-else class="empty">{{ t('studioPanel.inspector.empty') }}</p>
         </template>
         <template v-if="inspTab === 'inspector'">
+        <h3>{{ t('studioPanel.moves.title') }}</h3>
+        <div class="moves">
+          <div class="move-pad" role="group" :aria-label="t('studioPanel.moves.slide')">
+            <button class="tbtn up" type="button" :title="t('studioPanel.moves.up')" :aria-label="t('studioPanel.moves.up')" @click="slideCamera(0, 1)"><i class="fa-solid fa-arrow-up"></i></button>
+            <button class="tbtn left" type="button" :title="t('studioPanel.moves.left')" :aria-label="t('studioPanel.moves.left')" @click="slideCamera(-1, 0)"><i class="fa-solid fa-arrow-left"></i></button>
+            <button class="tbtn right" type="button" :title="t('studioPanel.moves.right')" :aria-label="t('studioPanel.moves.right')" @click="slideCamera(1, 0)"><i class="fa-solid fa-arrow-right"></i></button>
+            <button class="tbtn down" type="button" :title="t('studioPanel.moves.down')" :aria-label="t('studioPanel.moves.down')" @click="slideCamera(0, -1)"><i class="fa-solid fa-arrow-down"></i></button>
+          </div>
+          <div class="move-fields">
+            <DenseField :model-value="nudge.slide" :label="t('studioPanel.moves.slide')" :min="0.5" :max="100" :step="0.5" f="p1" unit="%" :default="10" :desc="t('studioPanel.moves.slideDesc')" @update:model-value="nudge.slide = $event" />
+            <div class="move-zoom">
+              <button class="tbtn" type="button" :title="t('studioPanel.moves.zoomOut')" :aria-label="t('studioPanel.moves.zoomOut')" @click="zoomCamera(-1)"><i class="fa-solid fa-minus"></i></button>
+              <DenseField :model-value="nudge.zoom" :label="t('studioPanel.moves.zoom')" :min="1" :max="900" :step="1" f="p0" unit="%" :default="10" @update:model-value="nudge.zoom = $event" />
+              <button class="tbtn" type="button" :title="t('studioPanel.moves.zoomIn')" :aria-label="t('studioPanel.moves.zoomIn')" @click="zoomCamera(1)"><i class="fa-solid fa-plus"></i></button>
+            </div>
+          </div>
+        </div>
+        <DenseField :model-value="cameraDegrees" :label="t('studioPanel.moves.rotation')" :min="-180" :max="180" :step="0.5" f="p1" unit="°" :default="0" @update:model-value="setCameraDegrees" />
+        <h3>
+          {{ t('studioPanel.quick.title') }}
+          <button class="vbtn quick-gear" type="button" :aria-pressed="quickEditing" :title="t('studioPanel.quick.customize')" :aria-label="t('studioPanel.quick.customize')" @click="quickEditing = !quickEditing"><i class="fa-solid fa-star"></i></button>
+        </h3>
+        <div v-if="quickEditing" class="quick-catalogue">
+          <p class="hint">{{ t('studioPanel.quick.customizeHint') }}</p>
+          <div v-for="g in quickByGroup" :key="g.group" class="quick-group">
+            <h4>{{ t(`studioPanel.quick.groups.${g.group}`) }}</h4>
+            <label v-for="p in g.params" :key="p.field" class="quick-pin">
+              <input type="checkbox" :checked="quickPins.includes(p.field)" @change="toggleQuickPin(p.field)" /> <span>{{ t(p.label) }}</span>
+            </label>
+          </div>
+        </div>
+        <template v-else>
+          <DenseField v-for="p in quickShown" :key="p.field" :model-value="quickToSlider(p, quickValue(p))" :label="t(p.label)"
+            :min="quickSliderRange(p).min" :max="quickSliderRange(p).max" :step="p.step" :default="quickSliderRange(p).default"
+            :f="() => formatQuick(p, quickValue(p))" @update:model-value="setQuick(p, $event)" />
+          <p v-if="!quickShown.length" class="empty">{{ t('studioPanel.quick.none') }}</p>
+          <p v-else class="hint">{{ t('studioPanel.quick.hint') }}</p>
+        </template>
 
         <h3>{{ t('studioPanel.settings.title') }}</h3>
         <DenseField :model-value="parcours.durationSeconds" :label="t('studioPanel.settings.duration')" :min="STUDIO_MIN_DURATION" :max="600" :step="0.5" f="p1" unit="s" @update:model-value="setDuration" />
@@ -1625,6 +1688,21 @@ const cameraTimeLabel = computed(() => formatTimecode(cameraClockAt(parcours, ti
 .studio-insp { border-left: 1px solid var(--line-soft); padding: 6px 10px 10px; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
 .studio-insp > * { flex: none; }
 .key-group { display: inline-flex; gap: 2px; }
+.moves { display: flex; gap: 8px; align-items: center; }
+.move-pad { display: grid; grid-template: "a up b" 24px "left c right" 24px "d down e" 24px / 26px 26px 26px; gap: 2px; flex: none; }
+.move-pad .tbtn { width: 26px; height: 24px; }
+.move-pad .up { grid-area: up; } .move-pad .left { grid-area: left; } .move-pad .right { grid-area: right; } .move-pad .down { grid-area: down; }
+.move-fields { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.move-zoom { display: flex; gap: 4px; align-items: center; }
+.move-zoom > :nth-child(2) { flex: 1; min-width: 0; }
+.quick-gear { margin-left: auto; width: 22px; height: 18px; font-size: 10px; }
+.quick-gear[aria-pressed="true"] { color: oklch(0.82 0.15 85); background: var(--row-on); }
+.quick-catalogue { display: flex; flex-direction: column; gap: 6px; }
+.quick-group { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; }
+.quick-group h4 { grid-column: 1 / -1; margin: 4px 0 2px; font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.quick-pin { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-2); cursor: pointer; min-width: 0; }
+.quick-pin span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-pin input { accent-color: oklch(0.82 0.15 85); margin: 0; flex: none; }
 .insp-tabs, .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
 .insp-tabs button, .sides button { height: 26px; border: 1px solid var(--line-soft); border-radius: 6px; background: none; color: var(--ink-3); font: inherit; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 .insp-tabs button[aria-selected="true"], .sides button[aria-selected="true"] { background: var(--row-on); color: var(--ink); border-color: var(--line); }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  addStudioKeyframe, blendedLook, cameraClockAt, cameraKnots, cameraSegmentAt, lookStateAt, STUDIO_CUT_SECONDS, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
+  addStudioKeyframe, blendedLook, cameraClockAt, cameraDistance, cameraKnots, cameraSegmentAt, lookStateAt, STUDIO_CUT_SECONDS, keyframeDisplayTime, moveStudioKeyframe, newStudioParcours,
   parcoursTimeOfCameraTime, rampedTime, snapshotStudioLook, validateStudioParcours,
 } from '../../src/studioParcours'
 
@@ -101,5 +101,16 @@ describe('studio double keyframes', () => {
     const after = lookStateAt(p, 10)!
     expect(after.a.colorStops[0].color).toBe('#00ff00')
     expect(after.w).toBe(0)
+  })
+})
+
+describe('camera distance', () => {
+  it('sees a pan at any depth, and nothing when the camera did not move', () => {
+    const at = (cx: string, scale: string) => ({ cx, cy: '0.11', scale, angle: 0 })
+    expect(cameraDistance(at('-0.7436', '1e-30'), at('-0.7436', '1e-30'))).toBe(0)
+    // 2e-31 at scale 1e-30: a fifth of a half-height.
+    expect(cameraDistance(at('-0.7436', '1e-30'), at('-0.7435999999999999999999999999998', '1e-30'))).toBeCloseTo(0.2, 6)
+    expect(cameraDistance(at('-0.745', '2e-3'), at('-0.743', '2e-3'))).toBeCloseTo(1, 6)
+    expect(cameraDistance(at('1e-400', '1e-400'), at('3e-400', '1e-400'))).toBeCloseTo(2, 6)
   })
 })

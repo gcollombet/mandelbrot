@@ -1,3 +1,4 @@
+import { watermarkSettings } from './exportWatermark'
 import type { HdrGpuOptions } from './hdrGpuOutput'
 import { t } from './i18n'
 import { hdrInputFrame } from './hdrVideo'
@@ -61,6 +62,7 @@ export type VideoExportRunnerDeps = {
       outputHeight: number
       supersample: number
       timestampMicros: number
+      watermark?: boolean
       durationMicros: number
     }): Promise<VideoFrame>
     captureHdrFrame?(width: number, height: number, supersample?: number, options?: HdrGpuOptions): Promise<Uint16Array>
@@ -291,7 +293,7 @@ export async function runVideoExportToWebm(
           // frame wait for the next animation tick — already-converged frames
           // included — and hung outright in a background tab, where rAF never
           // fires at all.
-          const pending = hdr ? deps.engine.captureHdrFrame!(output.width, output.height, output.supersample, {format:'video',exposure:output.hdrExposure ?? 0,signal:request.signal,onWarning:onHdrWarning}) : deps.engine.captureExportFrame({
+          const pending = hdr ? deps.engine.captureHdrFrame!(output.width, output.height, output.supersample, {format:'video',exposure:output.hdrExposure ?? 0,signal:request.signal,onWarning:onHdrWarning,watermark:watermarkSettings.video ? watermarkSettings : undefined}) : deps.engine.captureExportFrame({
             outputWidth: output.width,
             outputHeight: output.height,
             supersample: output.supersample,
@@ -300,6 +302,7 @@ export async function runVideoExportToWebm(
             // over [0, duration] inclusive so the last frame lands on B.
             timestampMicros: Math.round((frame.index * 1e6) / output.fps),
             durationMicros: frameDurationMicros,
+            watermark: watermarkSettings.video,
           })
           let settled = false
           const done = pending.then((f) => { settled = true; return f })

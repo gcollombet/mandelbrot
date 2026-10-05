@@ -102,3 +102,16 @@ export function interpolateScale(a: string, b: string, t: number): string {
   const coarse = compareScales(a, b) > 0 ? a : b, fine = compareScales(a, b) > 0 ? b : a
   return compareScales(value, coarse) > 0 ? canonicalScale(coarse) : compareScales(value, fine) < 0 ? canonicalScale(fine) : value
 }
+
+/** log10 of |a - b| for two decimal strings, exact whatever their depth;
+ *  -Infinity when they are equal. */
+export function decimalDifferenceLog10(a: string, b: string): number {
+  const left = parse(a), right = parse(b)
+  const exponent = left.exponent < right.exponent ? left.exponent : right.exponent
+  const scaled = (d: Decimal) => (d.negative ? -1n : 1n) * BigInt(d.digits) * 10n ** (d.exponent - exponent)
+  let difference = scaled(left) - scaled(right)
+  if (difference === 0n) return -Infinity
+  if (difference < 0n) difference = -difference
+  const digits = difference.toString(), head = digits.slice(0, 17)
+  return Math.log10(Number(head)) + (digits.length - head.length) + Number(exponent)
+}

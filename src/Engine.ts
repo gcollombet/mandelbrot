@@ -2485,6 +2485,7 @@ export class Engine {
         supersample: number
         timestampMicros: number
         durationMicros: number
+        watermark?: boolean
     }): Promise<VideoFrame> {
         if (this.session?.hdr) return Promise.reject(new Error(t('engine.export.useHdrCapture')))
         const frame = this.capture.requestFrame(request, this.device?.limits?.maxTextureDimension2D ?? 8192)

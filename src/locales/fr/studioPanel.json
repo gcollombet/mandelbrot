@@ -182,7 +182,8 @@
     "zoomOut": "Dézoomer la timeline (-)",
     "zoomIn": "Zoomer la timeline (+, ou molette)",
     "fit": "Voir tout le parcours (Maj+Z, ou double-clic sur la règle)",
-    "follow": "Défilement automatique : garder le curseur centré pendant la lecture (F)"
+    "follow": "Défilement automatique : garder le curseur centré pendant la lecture (F)",
+    "lock": "Cadenas : les keyframes et marqueurs ne se déplacent plus à la souris, un clic les sélectionne seulement (N)"
   },
   "markers": {
     "add": "Poser un marqueur au curseur (M). Double-clic pour renommer, nom vide pour supprimer.",
@@ -290,5 +291,32 @@
     "hint": "Pose un keyframe à chaque instant détecté (dans la plage de boucle I / O s'il y en a une) : la vue courante pour la caméra, le look en place pour le look. Les instants qui ont déjà un keyframe sont laissés tels quels.",
     "run": "Poser {count} keyframe(s)",
     "done": "{count} keyframe(s) posés, {skipped} instant(s) déjà occupés"
+  },
+  "quick": {
+    "title": "Réglages rapides",
+    "customize": "Choisir les réglages affichés",
+    "customizeHint": "Cochez les réglages à garder sous la main. Le choix est mémorisé.",
+    "hint": "Sur un keyframe de look, le réglage s'enregistre dans le côté affiché ; ailleurs il reste en attente. Double-clic : valeur par défaut.",
+    "none": "Aucun réglage épinglé : cliquez sur l'étoile pour en choisir.",
+    "groups": {
+      "palette": "Palette",
+      "relief": "Relief",
+      "light": "Lumière",
+      "grade": "Étalonnage",
+      "view3d": "Vue 3D"
+    }
+  },
+  "moves": {
+    "title": "Caméra",
+    "slide": "Pas de glissement",
+    "slideDesc": "En pourcentage de la hauteur d'écran, par clic sur une flèche.",
+    "up": "Glisser la vue vers le haut",
+    "down": "Glisser la vue vers le bas",
+    "left": "Glisser la vue vers la gauche",
+    "right": "Glisser la vue vers la droite",
+    "zoom": "Pas de zoom",
+    "zoomIn": "Zoomer",
+    "zoomOut": "Dézoomer",
+    "rotation": "Rotation"
   }
 }

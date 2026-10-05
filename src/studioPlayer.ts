@@ -35,6 +35,8 @@ export interface StudioNavigator {
   has_export_path(): boolean
   step_at_transition_time(width: number | undefined, height: number | undefined, elapsed: number): unknown
   get_params(): unknown
+  /** Move the centre at once, in view half-heights along the screen axes. */
+  translate_direct(dx: number, dy: number, canvasWidth?: number, canvasHeight?: number): void
 }
 
 export interface StudioController {

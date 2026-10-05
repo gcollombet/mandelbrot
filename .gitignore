@@ -53,3 +53,6 @@ target
 
 # Test bench outputs (bench/scenes.json is versioned)
 /bench/out
+
+# Prototype watermark detector, to be moved to its own repository
+/watermark-tool

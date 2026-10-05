@@ -39,6 +39,7 @@ import {normalizeAnimationConfig} from '../AnimationConfig';
 import {normalizeIterationPaletteCurve} from '../IterationPaletteCurve';
 import {createInterpolatedColorStop, normalizeColorStops} from '../ColorStop';
 import {interpolatePresetAppearance, TRANSITION_DEFAULTS} from '../presetTransition';
+import {setWatermark, watermarkSettings} from '../exportWatermark';
 import {snapshotPathAppearance, PATH_APPEARANCE_FIELDS, type PathAppearance} from '../palettePath';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
@@ -384,6 +385,8 @@ if (import.meta.env.DEV) {
   const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown; __bench?: unknown; __studioExport?: unknown; __engineReady?: unknown };
   w.__engineReady = () => !!mandelbrotEngine.value && !!mandelbrotCtrlRef.value;
   w.__capture = dev.capture;
+  // Prototype export watermark: __watermark({ enabled, amplitude }).
+  (w as Record<string, unknown>).__watermark = setWatermark;
   w.__compare = dev.compare;
   w.__bench = bench.bench;
   // Live-path tests: patch viewer settings without touching localStorage.
@@ -411,7 +414,9 @@ if (import.meta.env.DEV) {
           // Same capture drive as the runner: the capture is fulfilled at the end
           // of the next render, which is also where the camera steps.
           const pending = engine.captureExportFrame({ outputWidth: opts.width ?? 320, outputHeight: opts.height ?? 180, supersample: 1,
-            timestampMicros: Math.round(frame.index * 1e6 / (opts.fps ?? 10)), durationMicros: Math.round(1e6 / (opts.fps ?? 10)) });
+            timestampMicros: Math.round(frame.index * 1e6 / (opts.fps ?? 10)), durationMicros: Math.round(1e6 / (opts.fps ?? 10)),
+            // Like the runner: video frames carry the export watermark.
+            watermark: watermarkSettings.video });
           let settled = false;
           const done = pending.then((f) => { settled = true; return f; });
           void done.catch(() => {});

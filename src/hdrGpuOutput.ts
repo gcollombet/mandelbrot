@@ -1,3 +1,4 @@
+import { WATERMARK, WATERMARK_HDR_LEVEL } from './exportWatermark'
 import shader from './assets/hdr_output.wgsl?raw'
 
 import { t } from './i18n'
@@ -9,7 +10,11 @@ export type HdrGpuOptions = {
   originX?: number
   originY?: number
   signal?: { readonly aborted: boolean }
+  /** Export watermark, video only: amplitude in 8-bit levels and the share kept on flat areas. */
+  watermark?: { amplitude: number; flatShare: number }
 }
+/** Params of hdr_output.wgsl: 9 scalars, padding, two vec2. */
+const UNIFORM_BYTES = 56
 const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>>>()
 const abort = (options: HdrGpuOptions) => {
   if (options.signal?.aborted) throw new DOMException(t('video.runner.cancelled'), 'AbortError')
@@ -50,15 +55,22 @@ export async function readHdrGpuOutput(device: GPUDevice, source: GPUTexture, wi
     const output = make(size,GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST)
     const status = make(4,GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST)
     const readback = make(size + 4,GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST)
-    const uniform = make(32,GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST)
+    const uniform = make(UNIFORM_BYTES,GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST)
     const bind = device.createBindGroup({layout:pipeline.getBindGroupLayout(0), entries:[
       {binding:0,resource:source.createView()}, {binding:1,resource:{buffer:uniform}},
       {binding:2,resource:{buffer:output}}, {binding:3,resource:{buffer:status}},
     ]})
     const result = new Uint16Array(width * height * (video ? 1.5 : 3))
-    const params = new ArrayBuffer(32), ints = new Uint32Array(params), floats = new Float32Array(params)
+    const params = new ArrayBuffer(UNIFORM_BYTES), ints = new Uint32Array(params), floats = new Float32Array(params)
     ints.set([width,height,0,rows]); floats[4] = 203 * 2 ** exposure
     ints[5] = options.originX ?? 0; ints[6] = options.originY ?? 0
+    if (video && options.watermark && options.watermark.amplitude > 0) {
+      // Offsets 28 and 32, then the two wave vectors at 40 and 48 (vec2 alignment).
+      const a1 = WATERMARK.baseAngle * Math.PI / 180, a2 = a1 + WATERMARK.angleBetween * Math.PI / 180
+      const w1 = 2 * Math.PI * WATERMARK.baseFrequency / height, w2 = w1 * WATERMARK.frequencyRatio
+      floats[7] = options.watermark.amplitude * WATERMARK_HDR_LEVEL; floats[8] = options.watermark.flatShare
+      floats.set([w1 * Math.cos(a1), w1 * Math.sin(a1), w2 * Math.cos(a2), w2 * Math.sin(a2)], 10)
+    }
     let clipped = false
     for (let y = 0; y < height; y += rows) {
       abort(options)

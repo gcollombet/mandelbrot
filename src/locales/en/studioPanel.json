@@ -182,7 +182,8 @@
     "zoomOut": "Zoom the timeline out (-)",
     "zoomIn": "Zoom the timeline in (+, or wheel)",
     "fit": "Show the whole parcours (Shift+Z, or double-click the ruler)",
-    "follow": "Auto-scroll: keep the playhead centred during playback (F)"
+    "follow": "Auto-scroll: keep the playhead centred during playback (F)",
+    "lock": "Lock: keyframes and markers no longer move with the mouse, a click only selects them (N)"
   },
   "markers": {
     "add": "Add a marker at the playhead (M). Double-click to rename, empty name to delete.",
@@ -290,5 +291,32 @@
     "hint": "Pins a keyframe on every detected instant (inside the I / O loop range when there is one): the current view for the camera, the look in place for the look. Instants that already have a keyframe are left alone.",
     "run": "Pin {count} keyframe(s)",
     "done": "{count} keyframe(s) pinned, {skipped} instant(s) already taken"
+  },
+  "quick": {
+    "title": "Quick controls",
+    "customize": "Choose the controls shown",
+    "customizeHint": "Tick the controls to keep at hand. The choice is remembered.",
+    "hint": "On a look keyframe, the control is stored in the side on screen; elsewhere it stays pending. Double-click: default value.",
+    "none": "No pinned control: click the star to choose some.",
+    "groups": {
+      "palette": "Palette",
+      "relief": "Relief",
+      "light": "Light",
+      "grade": "Grade",
+      "view3d": "3D view"
+    }
+  },
+  "moves": {
+    "title": "Camera",
+    "slide": "Slide step",
+    "slideDesc": "As a percentage of the screen height, per click on an arrow.",
+    "up": "Slide the view up",
+    "down": "Slide the view down",
+    "left": "Slide the view left",
+    "right": "Slide the view right",
+    "zoom": "Zoom step",
+    "zoomIn": "Zoom in",
+    "zoomOut": "Zoom out",
+    "rotation": "Rotation"
   }
 }

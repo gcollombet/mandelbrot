@@ -12,6 +12,8 @@
 // normalised vertex UVs, so the target size only changes sampling density,
 // which is what keeps the same parcours reproducible across window sizes.
 
+import { watermarkSettings } from './exportWatermark'
+import { GpuWatermark } from './gpuWatermark'
 import {readHdrGpuOutput, type HdrGpuOptions} from './hdrGpuOutput'
 import {fullscreenPipelineDescriptor} from './gpuPipelines'
 import {t} from './i18n'
@@ -21,6 +23,8 @@ export type CaptureRequest = {
     outputHeight: number
     supersample: number
     timestampMicros: number
+    /** Mark this frame with the export watermark (video exports ask for it). */
+    watermark?: boolean
     durationMicros: number
 }
 
@@ -78,6 +82,7 @@ export class ExportCapture {
     private outputTexture?: GPUTexture
     private outputView?: GPUTextureView
     private readbackBuffer?: GPUBuffer
+    private readonly watermark = new GpuWatermark()
     /** Reduction pipelines keyed by factor — DOWNSCALE is a creation constant. */
     private readonly presentPipelines = new Map<number, GPURenderPipeline>()
     private presentBindGroup?: GPUBindGroup
@@ -132,6 +137,7 @@ export class ExportCapture {
 
     destroy(reason: string): void {
         this.cancel(reason)
+        this.watermark.destroy()
         this.linearTexture?.destroy?.()
         this.outputTexture?.destroy?.()
         this.readbackBuffer?.destroy?.()
@@ -227,8 +233,13 @@ export class ExportCapture {
                 return
             }
             const bytesPerRow = alignRowBytes(outputWidth * 4)
+            // Signature of the software (exportWatermark.ts): on video frames, or
+            // everywhere when forced. A GPU pass over the finished 8-bit frame.
+            const marked = (watermarkSettings.enabled || request.watermark) && watermarkSettings.amplitude > 0
+                ? this.watermark.encode(device, encoder, this.outputTexture!, frame.format, outputWidth, outputHeight, watermarkSettings)
+                : this.outputTexture!
             encoder.copyTextureToBuffer(
-                { texture: this.outputTexture! },
+                { texture: marked },
                 { buffer: this.readbackBuffer!, offset: 0, bytesPerRow },
                 { width: outputWidth, height: outputHeight, depthOrArrayLayers: 1 },
             )

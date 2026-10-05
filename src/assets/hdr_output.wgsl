@@ -1,7 +1,11 @@
 // Final HDR conversion. Output contains packed bytes ready for PNG or WebCodecs.
 struct Params {
   width: u32, height: u32, first_row: u32, rows: u32,
-  nits_per_unit: f32, origin_x: u32, origin_y: u32, pad: u32,
+  nits_per_unit: f32, origin_x: u32, origin_y: u32,
+  // Export watermark (exportWatermark.ts), video only: peak PQ offset of each
+  // wave on blue where the picture is busy (0 = off), share kept on flat areas,
+  // and the two wave vectors in radians per pixel.
+  wm_amplitude: f32, wm_flat: f32, wm_k1: vec2<f32>, wm_k2: vec2<f32>,
 }
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> p: Params;
@@ -25,6 +29,33 @@ fn pq_at(x: u32, local_y: u32) -> vec3<f32> {
   let a = pow(min(nits, vec3<f32>(10000)) / 10000.0, vec3<f32>(2610.0 / 16384.0));
   return pow((vec3<f32>(3424.0 / 4096.0) + (2413.0 / 128.0) * a) /
     (vec3<f32>(1) + (2392.0 / 128.0) * a), vec3<f32>(2523.0 / 32.0));
+}
+// PQ'-coded pixel carrying the watermark: an offset on blue, which the Y'CbCr
+// conversion below turns into Cb and a sliver of luma. The strength follows
+// how much green changes towards the pixels two to the left and two above;
+// WM_ACTIVITY_FULL is the 8-bit measure (24 levels) rescaled to PQ.
+const WM_ACTIVITY_FULL: f32 = 0.0546;
+fn pq_green(raw: vec4<f32>) -> f32 {
+  let c = raw.rgb / max(raw.a, 1e-6);
+  let nits = clamp(dot(c, vec3<f32>(0.0690973, 0.9195404, 0.0113623)) * p.nits_per_unit, 0.0, 10000.0);
+  let a = pow(nits / 10000.0, 2610.0 / 16384.0);
+  return pow((3424.0 / 4096.0 + (2413.0 / 128.0) * a) / (1.0 + (2392.0 / 128.0) * a), 2523.0 / 32.0);
+}
+fn marked_at(x: u32, local_y: u32) -> vec3<f32> {
+  var rgb = pq_at(x, local_y);
+  if (p.wm_amplitude <= 0.0) { return rgb; }
+  let y = local_y + p.first_row;
+  var change = 0.0;
+  if (x >= 2u) { change += abs(rgb.g - pq_at(x - 2u, local_y).g); }
+  if (y >= 2u) {
+    let up = textureLoad(source, vec2<i32>(i32(x), i32(y) - 2), 0);
+    change += abs(rgb.g - pq_green(up));
+  }
+  let uv = vec2<f32>(f32(x) + 0.5 - 0.5 * f32(p.width), f32(y) + 0.5 - 0.5 * f32(p.height));
+  let pattern = cos(dot(p.wm_k1, uv)) + cos(dot(p.wm_k2, uv));
+  let strength = p.wm_amplitude * (p.wm_flat + (1.0 - p.wm_flat) * min(1.0, change / WM_ACTIVITY_FULL));
+  rgb.b = clamp(rgb.b + strength * pattern, 0.0, 1.0);
+  return rgb;
 }
 fn noise(x: u32, y: u32) -> f32 {
   return fract(52.9829189 * fract(f32(x + p.origin_x) * 0.06711056 +
@@ -57,7 +88,7 @@ fn video(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var dy = 0u; dy < 2u; dy++) {
     var pair = 0u;
     for (var dx = 0u; dx < 2u; dx++) {
-      let rgb = pq_at(x + dx, y + dy);
+      let rgb = marked_at(x + dx, y + dy);
       let luma = rgb.g + 0.2627 * (rgb.r - rgb.g) + 0.0593 * (rgb.b - rgb.g);
       pair |= quantize(luma, x + dx, y + dy, false) << (dx * 16u);
       chroma += vec2<f32>((rgb.b - luma) / (2.0 * (1.0 - 0.0593)), (rgb.r - luma) / (2.0 * (1.0 - 0.2627)));
